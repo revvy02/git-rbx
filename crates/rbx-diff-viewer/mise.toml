@@ -1,0 +1,70 @@
+[tools]
+"ubi:revvy02/rodeo" = "v0.1.0-rc.8"
+
+[tasks.dev]
+description = "Run frontend dev server"
+dir = "frontend"
+run = "npm run dev"
+
+[tasks.build]
+description = "Build backend and frontend"
+run = """
+cargo build --release
+cd frontend && npm install && npm run build
+"""
+
+[tasks."frontend:install"]
+description = "Install frontend dependencies"
+dir = "frontend"
+run = "npm install"
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test && cd frontend && npm run lint"
+
+[tasks."dev:debug"]
+description = "Start dev servers + Chromium with remote debugging (for chrome-devtools MCP)"
+depends = ["frontend:install"]
+run = """
+#!/bin/bash
+set -e
+
+# Find Playwright Chromium path
+CHROMIUM_PATH=$(find ~/Library/Caches/ms-playwright -name "Google Chrome for Testing.app" -type d 2>/dev/null | head -1)
+
+if [ -z "$CHROMIUM_PATH" ]; then
+    echo "Playwright Chromium not found. Installing..."
+    cd frontend && npx playwright install chromium
+    CHROMIUM_PATH=$(find ~/Library/Caches/ms-playwright -name "Google Chrome for Testing.app" -type d 2>/dev/null | head -1)
+fi
+
+CHROMIUM_BIN="$CHROMIUM_PATH/Contents/MacOS/Google Chrome for Testing"
+
+# Check if ports are already in use
+if lsof -i :3000 -t >/dev/null 2>&1; then
+    echo "Backend already running on port 3000"
+else
+    echo "Starting backend..."
+    cargo run &
+    sleep 2
+fi
+
+if lsof -i :5173 -t >/dev/null 2>&1; then
+    echo "Frontend already running on port 5173"
+else
+    echo "Starting frontend..."
+    cd frontend && npm run dev &
+    sleep 2
+fi
+
+# Launch Chromium with remote debugging
+echo "Launching Chromium with remote debugging on port 9222..."
+"$CHROMIUM_BIN" --remote-debugging-port=9222 http://localhost:5173 &
+
+echo ""
+echo "✓ Dev servers running (backend:3000, frontend:5173)"
+echo "✓ Chromium launched with --remote-debugging-port=9222"
+echo ""
+echo "chrome-devtools MCP should now be able to connect."
+echo "Use 'mcp__chrome-devtools__new_page' with url 'http://localhost:5173' if needed."
+"""

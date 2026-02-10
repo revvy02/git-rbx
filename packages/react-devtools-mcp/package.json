@@ -1,0 +1,59 @@
+{
+  "name": "react-devtools-bridge",
+  "version": "0.1.0",
+  "description": "MCP server exposing React DevTools functionality to AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "react-devtools-bridge": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "TOOLS.md",
+    "SKILL.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "react-devtools-core": "^6.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "puppeteer": "^24.36.1",
+    "tsup": "^8.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "react",
+    "react-native",
+    "devtools",
+    "debugging",
+    "ai",
+    "claude"
+  ],
+  "author": "Skylar Barrera",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skylarbarrera/react-devtools-mcp"
+  }
+}
