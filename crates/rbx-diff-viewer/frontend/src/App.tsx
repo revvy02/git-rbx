@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { AppProvider, useAppContext } from './context/AppContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ExplorerPanel } from './components/ExplorerPanel';
 import { ResizeHandle } from './components/ResizeHandle';
 import './styles/index.css';
@@ -64,9 +65,11 @@ function DiffViewer() {
 
 function App() {
   return (
-    <AppProvider>
-      <DiffViewer />
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <DiffViewer />
+      </AppProvider>
+    </ErrorBoundary>
   );
 }
 

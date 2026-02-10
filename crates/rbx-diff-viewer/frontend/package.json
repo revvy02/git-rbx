@@ -14,6 +14,7 @@
     "dev:debug": "concurrently \"cd .. && cargo run\" \"npm run dev\" \"npx playwright install chromium && sleep 3 && $(find ~/Library/Caches/ms-playwright -name 'Google Chrome for Testing.app' -type d | head -1)/Contents/MacOS/'Google Chrome for Testing' --remote-debugging-port=9222 http://localhost:5173\""
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.13.18",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

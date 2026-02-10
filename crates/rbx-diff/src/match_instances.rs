@@ -1,8 +1,12 @@
 //! Instance matching between two DOMs.
-//! Uses name matching with multi-pass hash tiebreaking:
-//! Pass 1: Full property hash (exact match — nothing changed)
-//! Pass 2: No-refs hash (matches when only Ref properties like PrimaryPart changed)
-//! Pass 3: Positional fallback (pair remaining by sibling order)
+//!
+//! Matching strategy:
+//! 1. Single-candidate name match (unique name = instant match)
+//! 2. Multi-candidate name groups with hash tiebreaking:
+//!    - Pass 1: Full property hash (exact match)
+//!    - Pass 2: No-refs hash (matches when only Ref properties changed)
+//!    - Pass 3: Positional fallback (pair remaining by sibling order)
+//! 3. Class-based fallback for remaining unmatched (catches renames)
 
 use rbx_dom_weak::{types::Ref, WeakDom};
 use std::collections::HashMap;
@@ -43,6 +47,7 @@ pub fn match_children(
             old_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
                 name: inst.name.clone(),
+                class: inst.class.to_string(),
             })
         })
         .collect();
@@ -55,6 +60,7 @@ pub fn match_children(
             new_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
                 name: inst.name.clone(),
+                class: inst.class.to_string(),
             })
         })
         .collect();
@@ -204,6 +210,107 @@ pub fn match_children(
         }
     }
 
+    // ===== Class-based fallback (catches renames like "Signs" → "Sign") =====
+    // Group remaining unmatched by class and try hash-based matching
+    let mut class_groups_old: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, child) in old_children.iter().enumerate() {
+        if !old_matched[i] {
+            class_groups_old.entry(child.class.as_str()).or_default().push(i);
+        }
+    }
+
+    let mut class_groups_new: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (new_idx, new_child) in new_children.iter().enumerate() {
+        if !new_matched[new_idx] {
+            class_groups_new.entry(new_child.class.as_str()).or_default().push(new_idx);
+        }
+    }
+
+    let mut class_fallback_count = 0usize;
+
+    for (class_name, new_indices) in &class_groups_new {
+        let old_candidates = match class_groups_old.get(class_name) {
+            Some(indices) => indices.clone(),
+            None => continue,
+        };
+
+        if old_candidates.is_empty() {
+            continue;
+        }
+
+        // Same 3-pass tiebreaking as name groups
+        // Pass 1: Full hash
+        let mut remaining_new: Vec<usize> = Vec::new();
+        for &new_idx in new_indices {
+            let new_hash = new_hashes.get(new_children[new_idx].referent);
+            let new_hash_bytes = *new_hash.as_bytes();
+
+            let exact = old_candidates.iter().find(|&&oi| {
+                !old_matched[oi] && {
+                    let old_hash = old_hashes.get(old_children[oi].referent);
+                    *old_hash.as_bytes() == new_hash_bytes
+                }
+            });
+
+            if let Some(&oi) = exact {
+                old_matched[oi] = true;
+                new_matched[new_idx] = true;
+                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                class_fallback_count += 1;
+            } else {
+                remaining_new.push(new_idx);
+            }
+        }
+
+        // Pass 2: No-refs hash
+        let mut still_remaining: Vec<usize> = Vec::new();
+        for new_idx in remaining_new {
+            let new_hash_nr = new_hashes.get_no_refs(new_children[new_idx].referent);
+            let new_hash_nr_bytes = *new_hash_nr.as_bytes();
+
+            let nr_match = old_candidates.iter().find(|&&oi| {
+                !old_matched[oi] && {
+                    let old_hash_nr = old_hashes.get_no_refs(old_children[oi].referent);
+                    *old_hash_nr.as_bytes() == new_hash_nr_bytes
+                }
+            });
+
+            if let Some(&oi) = nr_match {
+                old_matched[oi] = true;
+                new_matched[new_idx] = true;
+                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                class_fallback_count += 1;
+            } else {
+                still_remaining.push(new_idx);
+            }
+        }
+
+        // Pass 3: Positional fallback
+        let mut remaining_old: Vec<usize> = old_candidates.iter()
+            .copied()
+            .filter(|&oi| !old_matched[oi])
+            .collect();
+
+        for new_idx in still_remaining {
+            if let Some(oi) = remaining_old.first().copied() {
+                remaining_old.remove(0);
+                old_matched[oi] = true;
+                new_matched[new_idx] = true;
+                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                class_fallback_count += 1;
+            }
+        }
+    }
+
+    if class_fallback_count > 0 {
+        let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+        debug!(
+            parent = parent_name,
+            class_fallback = class_fallback_count,
+            "class-based fallback matching"
+        );
+    }
+
     // Collect unmatched new children as added
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
@@ -250,6 +357,7 @@ pub fn match_children(
 struct ChildInfo {
     referent: Ref,
     name: String,
+    class: String,
 }
 
 /// Get the full path of an instance (e.g., "Workspace.Map.Building1")

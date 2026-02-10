@@ -10,6 +10,8 @@ rbx_types = "3.1"
 rbx_xml = "2.0"
 rbx_binary = "2.0"
 blake3 = "1.5"
+rbx_reflection = "6.1"
+rbx_reflection_database = "2.0"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 colored = "2"

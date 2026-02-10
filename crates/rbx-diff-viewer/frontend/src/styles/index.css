@@ -228,17 +228,16 @@ body {
 }
 
 /* Tree styles */
-.tree-node {
-  user-select: none;
-  position: relative;
-}
 .node-row {
+  height: 22px;
   padding: 2px 8px 2px 4px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+  user-select: none;
+  position: relative;
 }
 .node-row:hover { background: #2a2d2e; }
 .node-row.highlighted { background: #094771 !important; }
@@ -274,38 +273,20 @@ body {
 .node-name { color: #d4d4d4; }
 .node-class { color: #606060; margin-left: 4px; font-size: 11px; }
 
-.children { padding-left: 16px; }
-
-/* Tree lines - vertical line continuing down for siblings */
-.children > .tree-node::before {
-  content: '';
+/* Virtualized tree line connectors */
+.tree-line-vert {
   position: absolute;
-  left: -9px;  /* Position relative to parent's expand icon center */
   top: 0;
-  bottom: 0;
   width: 1px;
   background: #404040;
+  pointer-events: none;
 }
-
-/* Stop vertical line at last child (no siblings below) */
-.children > .tree-node.last-child::before {
-  bottom: calc(100% - 11px);  /* Stop at horizontal connector height */
-}
-
-/* Horizontal connector from vertical line to node */
-.children > .tree-node > .node-row::before {
-  content: '';
+.tree-line-horiz {
   position: absolute;
-  left: -9px;
-  top: 11px;  /* Center with row height */
   width: 9px;
   height: 1px;
   background: #404040;
-}
-
-/* Ensure node-row can position pseudo-element */
-.node-row {
-  position: relative;
+  pointer-events: none;
 }
 
 /* Diff highlighting - text colors for all panels (old, new, changes) */

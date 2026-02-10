@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "rbx-diff-viewer")]
@@ -126,36 +127,43 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let total_start = Instant::now();
 
+    let t = Instant::now();
     eprintln!("Loading {}...", args.old_file);
     let old_dom = load_file(&args.old_file)?;
+    eprintln!("  load old: {:.2?}", t.elapsed());
 
+    let t = Instant::now();
     eprintln!("Loading {}...", args.new_file);
     let new_dom = load_file(&args.new_file)?;
+    eprintln!("  load new: {:.2?}", t.elapsed());
 
+    let t = Instant::now();
     eprintln!("Computing differences...");
     let diffs = diff_doms(&old_dom, &new_dom);
+    eprintln!("  diff: {:.2?}", t.elapsed());
 
     let (added, removed, modified) = count_diffs(&diffs);
     eprintln!("Found {} added, {} removed, {} modified", added, removed, modified);
 
-    eprintln!("Building data structures...");
-
-    // Build full trees (no depth limit)
+    let t = Instant::now();
     let old_tree = serialize_tree_full(&old_dom, old_dom.root_ref());
     let new_tree = serialize_tree_full(&new_dom, new_dom.root_ref());
+    eprintln!("  serialize trees: {:.2?}", t.elapsed());
 
-    // Build properties maps for diff-relevant instances only
+    let t = Instant::now();
     let (old_properties, new_properties) = collect_diff_properties(&old_dom, &new_dom, &diffs);
+    eprintln!("  collect props: {:.2?}", t.elapsed());
 
-    // Load class icons from Roblox Studio installation
+    let t = Instant::now();
     let class_icons = if let Some(content_path) = find_roblox_content_path() {
-        eprintln!("Found Roblox Studio at: {}", content_path.display());
         load_class_icons(&content_path)
     } else {
         eprintln!("Warning: Roblox Studio not found, icons will not be embedded");
         HashMap::new()
     };
+    eprintln!("  load icons: {:.2?} ({} icons)", t.elapsed(), class_icons.len());
 
     let meta = Meta {
         old_name: Path::new(&args.old_file)
@@ -171,7 +179,6 @@ fn main() -> Result<()> {
         summary: Summary { added, removed, modified },
     };
 
-    // Core data (small, parsed immediately)
     let core_data = CoreData {
         meta,
         old_tree,
@@ -180,19 +187,17 @@ fn main() -> Result<()> {
         class_icons,
     };
 
-    eprintln!("Generating HTML...");
-
-    // Serialize core data to JSON
+    let t = Instant::now();
     let core_json = serde_json::to_string(&core_data)?;
     let core_compressed = gzip_compress(core_json.as_bytes());
     let core_b64 = BASE64.encode(&core_compressed);
-    eprintln!("Core data: {}MB -> {}MB compressed -> {}MB base64",
+    eprintln!("  json+compress core: {:.2?} ({}MB -> {}MB -> {}MB b64)",
+        t.elapsed(),
         core_json.len() / 1024 / 1024,
         core_compressed.len() / 1024 / 1024,
         core_b64.len() / 1024 / 1024,
     );
 
-    // Compress properties (diff-only, so small)
     let old_props_json = serde_json::to_string(&old_properties)?;
     let old_props_compressed = gzip_compress(old_props_json.as_bytes());
     let old_props_b64 = BASE64.encode(&old_props_compressed);
@@ -202,23 +207,19 @@ fn main() -> Result<()> {
     let new_props_b64 = BASE64.encode(&new_props_compressed);
 
     eprintln!(
-        "Properties (diff-only): old {} instances ({}KB), new {} instances ({}KB)",
+        "  props: old {} instances ({}KB), new {} instances ({}KB)",
         old_properties.len(),
         old_props_b64.len() / 1024,
         new_properties.len(),
         new_props_b64.len() / 1024,
     );
 
-    // Load HTML template and inject data
+    let t = Instant::now();
     let html_template = include_str!("../dist/index.html");
-
-    // Inject core data (compressed + base64, decompressed on load)
     let output_html = html_template.replace(
         "/*__DIFF_DATA_PLACEHOLDER__*/",
         &format!("window.__DIFF_DATA_B64__ = \"{}\"", core_b64),
     );
-
-    // Inject compressed properties
     let output_html = output_html.replace(
         "/*__OLD_PROPS_PLACEHOLDER__*/",
         &format!("window.__OLD_PROPS_B64__ = \"{}\"", old_props_b64),
@@ -227,12 +228,11 @@ fn main() -> Result<()> {
         "/*__NEW_PROPS_PLACEHOLDER__*/",
         &format!("window.__NEW_PROPS_B64__ = \"{}\"", new_props_b64),
     );
-
-    // Write output file
     std::fs::write(&args.output, output_html)?;
+    eprintln!("  html inject+write: {:.2?}", t.elapsed());
 
+    eprintln!("Total: {:.2?}", total_start.elapsed());
     eprintln!("Generated: {}", args.output);
-    eprintln!("Open in any browser to view the diff.");
 
     Ok(())
 }

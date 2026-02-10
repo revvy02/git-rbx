@@ -1,13 +1,16 @@
-//! Shallow instance hashing for content-based comparison.
-//! Provides two hash variants:
-//! - Full hash: name + class + all properties (including Refs)
-//! - No-refs hash: name + class + non-Ref properties only (stable when Ref props change)
+//! Instance hashing for content-based comparison.
+//!
+//! Two cache types:
+//! - `LazyHashCache`: Shallow hash (name + class + properties). Used for matching disambiguation.
+//! - `DeepHashCache`: Subtree hash (shallow hash + children's deep hashes). Used for Ref
+//!   comparison and subtree pruning in the diff pass.
 
 use blake3::{Hash, Hasher};
 use rbx_dom_weak::{types::Ref, WeakDom};
+use rbx_reflection::{PropertyKind, PropertySerialization, Scriptability};
 use rbx_types::{PhysicalProperties, Variant, Vector3};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 // ============================================================================
@@ -87,6 +90,7 @@ impl<'a> LazyHashCache<'a> {
 
     fn compute_hash(&self, referent: Ref) -> Hash {
         let inst = self.dom.get_by_ref(referent).unwrap();
+        let comparable = get_comparable_properties(&inst.class);
         let mut hasher = Hasher::new();
 
         hasher.update(inst.name.as_bytes());
@@ -97,6 +101,9 @@ impl<'a> LazyHashCache<'a> {
         props.sort_unstable_by_key(|(name, _)| name.as_str());
 
         for (name, value) in props {
+            if !comparable.contains(name.as_str()) {
+                continue;
+            }
             hasher.update(name.as_bytes());
             hash_variant(&self.dom, &mut hasher, value);
         }
@@ -106,6 +113,7 @@ impl<'a> LazyHashCache<'a> {
 
     fn compute_hash_no_refs(&self, referent: Ref) -> Hash {
         let inst = self.dom.get_by_ref(referent).unwrap();
+        let comparable = get_comparable_properties(&inst.class);
         let mut hasher = Hasher::new();
 
         hasher.update(inst.name.as_bytes());
@@ -120,11 +128,78 @@ impl<'a> LazyHashCache<'a> {
             if matches!(value, Variant::Ref(_)) {
                 continue;
             }
+            if !comparable.contains(name.as_str()) {
+                continue;
+            }
             hasher.update(name.as_bytes());
             hash_variant(&self.dom, &mut hasher, value);
         }
 
         hasher.finalize()
+    }
+}
+
+/// Deep subtree hash cache — includes children's hashes.
+/// Used for Ref comparison (compare target content instead of ref_mapping)
+/// and for subtree pruning (if deep hashes match, entire subtree is unchanged).
+///
+/// Computed lazily, bottom-up: requesting a parent's hash first computes all children.
+/// Skips ignored properties (e.g. UniqueId, HistoryId) so pruning works correctly.
+pub struct DeepHashCache<'a> {
+    dom: &'a WeakDom,
+    ignore_properties: &'a HashSet<String>,
+    cache: RefCell<HashMap<Ref, Hash>>,
+}
+
+impl<'a> DeepHashCache<'a> {
+    pub fn new(dom: &'a WeakDom, ignore_properties: &'a HashSet<String>) -> Self {
+        Self {
+            dom,
+            ignore_properties,
+            cache: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Get deep hash for an instance, computing bottom-up if needed.
+    pub fn get(&self, referent: Ref) -> Hash {
+        if let Some(hash) = self.cache.borrow().get(&referent) {
+            return *hash;
+        }
+        self.compute(referent)
+    }
+
+    fn compute(&self, referent: Ref) -> Hash {
+        let inst = self.dom.get_by_ref(referent).unwrap();
+        let comparable = get_comparable_properties(&inst.class);
+        let mut hasher = Hasher::new();
+
+        // Hash own identity + properties
+        hasher.update(inst.name.as_bytes());
+        hasher.update(inst.class.as_bytes());
+
+        let mut props: Vec<_> = inst.properties.iter().collect();
+        props.sort_unstable_by_key(|(name, _)| name.as_str());
+        for (name, value) in props {
+            if self.ignore_properties.contains(name.as_str()) {
+                continue;
+            }
+            if !comparable.contains(name.as_str()) {
+                continue;
+            }
+            hasher.update(name.as_bytes());
+            hash_variant(self.dom, &mut hasher, value);
+        }
+
+        // Incorporate children's deep hashes (in order — order matters)
+        let children = inst.children().to_vec();
+        for child_ref in children {
+            let child_hash = self.get(child_ref);
+            hasher.update(child_hash.as_bytes());
+        }
+
+        let hash = hasher.finalize();
+        self.cache.borrow_mut().insert(referent, hash);
+        hash
     }
 }
 
@@ -275,4 +350,65 @@ fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) {
         Variant::UniqueId(_) => {} // Skip - non-deterministic
         _ => {} // Skip unknown variants
     }
+}
+
+/// Get the set of comparable property names for a class.
+/// Caches per class — builds the set once by walking the class hierarchy.
+/// Properties NOT in this set should be skipped (non-reflected, non-scriptable, non-serializable).
+pub fn get_comparable_properties(class_name: &str) -> &'static HashSet<String> {
+    use std::sync::OnceLock;
+    use std::sync::Mutex;
+
+    static CLASS_PROPS: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+
+    let map_mutex = CLASS_PROPS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map_mutex.lock().unwrap();
+
+    if !map.contains_key(class_name) {
+        let props = build_comparable_properties(class_name);
+        map.insert(class_name.to_string(), props);
+    }
+
+    // Safety: we never remove entries, only add — pointer remains valid
+    let ptr = map.get(class_name).unwrap() as *const HashSet<String>;
+    // Release the lock before returning
+    drop(map);
+    unsafe { &*ptr }
+}
+
+fn build_comparable_properties(class_name: &str) -> HashSet<String> {
+    let database = rbx_reflection_database::get().unwrap();
+    let mut result = HashSet::new();
+
+    // Walk up the class hierarchy, collecting all comparable properties
+    let mut current_class = class_name;
+    loop {
+        let class_data = match database.classes.get(current_class) {
+            Some(data) => data,
+            None => break,
+        };
+
+        for (prop_name, prop_data) in &class_data.properties {
+            if matches!(prop_data.scriptability, Scriptability::None) {
+                continue;
+            }
+            let dominated = match &prop_data.kind {
+                PropertyKind::Canonical { serialization } => {
+                    matches!(serialization, PropertySerialization::DoesNotSerialize)
+                }
+                PropertyKind::Alias { .. } => continue, // Skip aliases, canonical will be found
+                _ => false,
+            };
+            if !dominated {
+                result.insert(prop_name.to_string());
+            }
+        }
+
+        match class_data.superclass.as_ref() {
+            Some(super_class) => current_class = super_class,
+            None => break,
+        }
+    }
+
+    result
 }

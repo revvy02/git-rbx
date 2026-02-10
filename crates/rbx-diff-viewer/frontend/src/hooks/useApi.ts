@@ -120,13 +120,12 @@ export async function getProperties(ref: string, side: 'old' | 'new'): Promise<P
 }
 
 // Build refInfo index from tree (ref -> {name, path, class})
-function buildRefInfo(tree: TreeNode, parentPath: string = ''): Record<string, RefInfo> {
-  const result: Record<string, RefInfo> = {};
+function buildRefInfo(tree: TreeNode, parentPath = '', result: Record<string, RefInfo> = {}): Record<string, RefInfo> {
   const path = parentPath ? `${parentPath}/${tree.name}` : tree.name;
   result[tree.ref] = { name: tree.name, path, class: tree.class };
   if (tree.children) {
     for (const child of tree.children) {
-      Object.assign(result, buildRefInfo(child, path));
+      buildRefInfo(child, path, result);
     }
   }
   return result;
@@ -151,6 +150,9 @@ async function getCoreData(): Promise<CoreData> {
       oldRefInfo: buildRefInfo(raw.oldTree),
       newRefInfo: buildRefInfo(raw.newTree),
     };
+    // Eagerly decompress property data in background (fire-and-forget)
+    ensurePropsLoaded('old');
+    ensurePropsLoaded('new');
     return coreDataCache!;
   })();
 

@@ -1,4 +1,9 @@
-//! Tree and property diffing logic.
+//! Two-phase tree diffing.
+//!
+//! Phase 1: Recursively match instances across both DOMs, building a global ref mapping.
+//! Phase 2: Compare properties using the ref mapping for Ref property comparison.
+//! Ref properties pointing to matched instances are considered equal (same logical target),
+//! with hash-based fallback for refs into pruned (identical) subtrees.
 
 use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::Variant;
@@ -6,8 +11,8 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, info_span};
 
-use crate::hash::LazyHashCache;
-use crate::match_instances::{get_instance_path, match_children, MatchResult};
+use crate::hash::{get_comparable_properties, DeepHashCache, LazyHashCache};
+use crate::match_instances::{get_instance_path, match_children};
 
 /// A single difference found between two DOMs.
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +117,7 @@ impl Default for DiffConfig {
 }
 
 /// Compute the diff between two DOMs.
+/// Phase 1: Build global ref mapping. Phase 2: Diff using the mapping.
 pub fn compute_diff(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
@@ -121,51 +127,45 @@ pub fn compute_diff(
 ) -> Vec<DiffEntry> {
     let _span = info_span!("compute_diff").entered();
 
+    let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
+    let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
+
+    // Phase 1: Build global ref mapping (old_ref → new_ref) for matched instances
+    let mut ref_mapping = HashMap::new();
+    build_ref_mapping(
+        old_dom, new_dom,
+        old_dom.root_ref(), new_dom.root_ref(),
+        old_hashes, new_hashes,
+        &old_deep, &new_deep,
+        &mut ref_mapping,
+    );
+    info!(matched_pairs = ref_mapping.len(), "ref mapping built");
+
+    // Phase 2: Diff using the mapping
     let mut diffs = Vec::new();
-    // Global mapping of matched instances: old_ref → new_ref
-    let mut ref_mapping: HashMap<Ref, Ref> = HashMap::new();
-    // Cache match results from first pass to avoid recomputing in second pass
-    let mut match_cache: HashMap<(Ref, Ref), MatchResult> = HashMap::new();
-
-    // First pass: build the complete ref mapping by traversing the tree
-    {
-        let _span = info_span!("build_ref_mapping").entered();
-        build_ref_mapping(
-            old_dom,
-            new_dom,
-            old_dom.root_ref(),
-            new_dom.root_ref(),
-            old_hashes,
-            new_hashes,
-            &mut ref_mapping,
-            &mut match_cache,
-        );
-        info!(matched_pairs = ref_mapping.len(), cached_matches = match_cache.len(), "ref mapping complete");
-    }
-
-    // Second pass: compute diffs using the mapping for Ref comparison
-    {
-        let _span = info_span!("diff_recursive_pass").entered();
-        diff_recursive(
-            old_dom,
-            new_dom,
-            old_dom.root_ref(),
-            new_dom.root_ref(),
-            config,
-            &ref_mapping,
-            &match_cache,
-            &mut diffs,
-        );
-        info!(diffs_found = diffs.len(), "diff pass complete");
-    }
+    diff_pass(
+        old_dom,
+        new_dom,
+        old_dom.root_ref(),
+        new_dom.root_ref(),
+        old_hashes,
+        new_hashes,
+        &old_deep,
+        &new_deep,
+        config,
+        &ref_mapping,
+        &mut diffs,
+    );
 
     old_hashes.log_stats("old");
     new_hashes.log_stats("new");
+    info!(diffs_found = diffs.len(), "diff complete");
 
     diffs
 }
 
-/// Build a mapping of all matched instances (old_ref → new_ref)
+/// Phase 1: Recursively match all instances, building the global ref mapping.
+/// Only recurses into non-pruned subtrees (where deep hashes differ).
 fn build_ref_mapping(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
@@ -173,44 +173,38 @@ fn build_ref_mapping(
     new_ref: Ref,
     old_hashes: &LazyHashCache,
     new_hashes: &LazyHashCache,
-    ref_mapping: &mut HashMap<Ref, Ref>,
-    match_cache: &mut HashMap<(Ref, Ref), MatchResult>,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
+    mapping: &mut HashMap<Ref, Ref>,
 ) {
-    // Add this pair to the mapping
-    ref_mapping.insert(old_ref, new_ref);
-
-    // Match children and cache the result
     let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
-
-    for (old_child_ref, new_child_ref) in &match_result.matched {
-        build_ref_mapping(
-            old_dom,
-            new_dom,
-            *old_child_ref,
-            *new_child_ref,
-            old_hashes,
-            new_hashes,
-            ref_mapping,
-            match_cache,
-        );
+    for (old_child, new_child) in &match_result.matched {
+        mapping.insert(*old_child, *new_child);
+        // Only recurse into subtrees where deep hashes differ (same pruning as diff_pass)
+        if old_deep.get(*old_child) != new_deep.get(*new_child) {
+            build_ref_mapping(
+                old_dom, new_dom, *old_child, *new_child,
+                old_hashes, new_hashes, old_deep, new_deep, mapping,
+            );
+        }
     }
-
-    match_cache.insert((old_ref, new_ref), match_result);
 }
 
-fn diff_recursive(
+/// Phase 2: match children, compare properties, recurse into changed subtrees.
+fn diff_pass(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
     old_ref: Ref,
     new_ref: Ref,
+    old_hashes: &LazyHashCache,
+    new_hashes: &LazyHashCache,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
     config: &DiffConfig,
     ref_mapping: &HashMap<Ref, Ref>,
-    match_cache: &HashMap<(Ref, Ref), MatchResult>,
     diffs: &mut Vec<DiffEntry>,
 ) {
-    // Use cached match result from build_ref_mapping pass (avoids recomputing)
-    let match_result = match_cache.get(&(old_ref, new_ref))
-        .expect("match_cache missing entry — build_ref_mapping should have populated it");
+    let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
 
     // Report removed instances
     for removed_ref in &match_result.removed {
@@ -234,9 +228,13 @@ fn diff_recursive(
         }
     }
 
-    // Compare matched pairs — always recurse (no hash-based pruning needed
-    // since shallow hashes don't represent subtrees)
+    // Process matched pairs — prune unchanged subtrees via deep hash
     for (old_child_ref, new_child_ref) in &match_result.matched {
+        // Pruning: if deep hashes match, entire subtree is identical — skip
+        if old_deep.get(*old_child_ref) == new_deep.get(*new_child_ref) {
+            continue;
+        }
+
         let property_changes = diff_properties(
             old_dom,
             new_dom,
@@ -244,6 +242,8 @@ fn diff_recursive(
             *new_child_ref,
             config,
             ref_mapping,
+            old_deep,
+            new_deep,
         );
 
         if !property_changes.is_empty() {
@@ -258,20 +258,32 @@ fn diff_recursive(
             }
         }
 
-        diff_recursive(
+        // Recurse into children
+        diff_pass(
             old_dom,
             new_dom,
             *old_child_ref,
             *new_child_ref,
+            old_hashes,
+            new_hashes,
+            old_deep,
+            new_deep,
             config,
             ref_mapping,
-            match_cache,
             diffs,
         );
     }
 }
 
+// ============================================================================
+// Property comparison
+// ============================================================================
+
 /// Compare properties between two matched instances.
+/// Detects name changes (for renamed instances matched via class fallback)
+/// and uses the ref mapping for Ref property comparison.
+/// Filters out non-reflected, non-serializable, and default-valued properties
+/// to avoid false positives from serialization differences.
 fn diff_properties(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
@@ -279,23 +291,44 @@ fn diff_properties(
     new_ref: Ref,
     config: &DiffConfig,
     ref_mapping: &HashMap<Ref, Ref>,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
 ) -> Vec<PropertyChange> {
     let old_inst = old_dom.get_by_ref(old_ref).unwrap();
     let new_inst = new_dom.get_by_ref(new_ref).unwrap();
 
+    let database = rbx_reflection_database::get().unwrap();
+    let class_name = new_inst.class.as_str();
+    let defaults = database
+        .classes
+        .get(class_name)
+        .map(|cd| &cd.default_properties);
+
     let mut changes = Vec::new();
     let mut visited = HashSet::new();
+
+    // Detect name changes (inst.name is separate from inst.properties in rbx_dom_weak)
+    if old_inst.name != new_inst.name {
+        changes.push(PropertyChange {
+            name: "Name".to_string(),
+            old_value: Some(PropertyValue::String { value: old_inst.name.clone() }),
+            new_value: Some(PropertyValue::String { value: new_inst.name.clone() }),
+        });
+    }
 
     // Check properties in new instance
     for (name, new_value) in &new_inst.properties {
         if config.ignore_properties.contains(name.as_str()) {
             continue;
         }
+        if !should_compare_property(class_name, name) {
+            continue;
+        }
         visited.insert(name.clone());
 
         match old_inst.properties.get(name) {
             Some(old_value) => {
-                if !variants_equal(old_dom, new_dom, old_value, new_value, ref_mapping) {
+                if !variants_equal(old_dom, new_dom, old_value, new_value, ref_mapping, old_deep, new_deep) {
                     changes.push(PropertyChange {
                         name: name.to_string(),
                         old_value: Some(variant_to_property_value(old_value)),
@@ -304,7 +337,10 @@ fn diff_properties(
                 }
             }
             None => {
-                // Property added
+                // Property only in new — skip if it's just a default value
+                if is_default_value(defaults, name, new_value) {
+                    continue;
+                }
                 changes.push(PropertyChange {
                     name: name.to_string(),
                     old_value: None,
@@ -319,7 +355,14 @@ fn diff_properties(
         if config.ignore_properties.contains(name.as_str()) {
             continue;
         }
+        if !should_compare_property(old_inst.class.as_str(), name) {
+            continue;
+        }
         if !visited.contains(name) {
+            // Property only in old — skip if it's just a default value
+            if is_default_value(defaults, name, old_value) {
+                continue;
+            }
             changes.push(PropertyChange {
                 name: name.to_string(),
                 old_value: Some(variant_to_property_value(old_value)),
@@ -331,14 +374,36 @@ fn diff_properties(
     changes
 }
 
+/// Check if a property should be compared (is meaningful for diffing).
+/// Uses the shared comparable properties set from hash.rs.
+fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
+    get_comparable_properties(class_name).contains(prop_name)
+}
+
+/// Check if a value matches the reflection database default for this property.
+fn is_default_value(
+    defaults: Option<&std::collections::HashMap<std::borrow::Cow<'_, str>, Variant>>,
+    name: &str,
+    value: &Variant,
+) -> bool {
+    if let Some(defaults) = defaults {
+        if let Some(default_value) = defaults.get(name) {
+            return value == default_value;
+        }
+    }
+    false
+}
+
 /// Compare two variants for equality (with tolerance for floats).
-/// Uses ref_mapping to compare Ref properties by checking if targets are matched pairs.
+/// Uses ref mapping for Ref comparison (checks logical identity of targets).
 fn variants_equal(
-    _old_dom: &WeakDom,
-    _new_dom: &WeakDom,
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
     a: &Variant,
     b: &Variant,
     ref_mapping: &HashMap<Ref, Ref>,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
 ) -> bool {
     use std::mem::discriminant;
 
@@ -363,33 +428,46 @@ fn variants_equal(
             pos_eq // Simplified - full rotation comparison is complex
         }
         (Variant::Ref(old_target), Variant::Ref(new_target)) => {
-            // Compare Refs by checking if they point to matched instances
-            refs_equal(*old_target, *new_target, ref_mapping)
+            refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping, old_deep, new_deep)
         }
         (Variant::UniqueId(_), Variant::UniqueId(_)) => true, // Skip uniqueid
         _ => a == b,
     }
 }
 
-/// Compare two Ref values by checking if they point to matched instances.
-/// Returns true if:
-/// - Both are null refs
-/// - old_target maps to new_target in the ref_mapping (they're a matched pair)
-fn refs_equal(old_target: Ref, new_target: Ref, ref_mapping: &HashMap<Ref, Ref>) -> bool {
-    let old_is_none = old_target.is_none();
-    let new_is_none = new_target.is_none();
+/// Compare two Ref values by checking if they point to the same matched instance.
+/// Uses the ref mapping first (covers matched instances that may have changed content),
+/// falls back to deep hash comparison for refs into pruned (identical) subtrees.
+fn refs_equal(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    old_target: Ref,
+    new_target: Ref,
+    ref_mapping: &HashMap<Ref, Ref>,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
+) -> bool {
+    let old_exists = !old_target.is_none() && old_dom.get_by_ref(old_target).is_some();
+    let new_exists = !new_target.is_none() && new_dom.get_by_ref(new_target).is_some();
 
-    match (old_is_none, new_is_none) {
-        (true, true) => true,   // Both null
-        (true, false) | (false, true) => false,  // One null, one not
-        (false, false) => {
-            // Check if old_target maps to new_target (they're matched instances)
-            ref_mapping.get(&old_target) == Some(&new_target)
+    match (old_exists, new_exists) {
+        (false, false) => true,
+        (true, false) | (false, true) => false,
+        (true, true) => {
+            // Check mapping: are these the same logical instance?
+            if let Some(&mapped_new) = ref_mapping.get(&old_target) {
+                return mapped_new == new_target;
+            }
+            // Fallback for pruned subtrees (identical content, not in mapping)
+            old_deep.get(old_target) == new_deep.get(new_target)
         }
     }
 }
 
-/// Convert a Variant to a typed PropertyValue.
+// ============================================================================
+// Variant → PropertyValue conversion
+// ============================================================================
+
 fn variant_to_property_value(v: &Variant) -> PropertyValue {
     match v {
         Variant::Bool(b) => PropertyValue::Bool { value: *b },
@@ -451,4 +529,3 @@ fn variant_to_property_value(v: &Variant) -> PropertyValue {
         _ => PropertyValue::Other { type_name: format!("{:?}", v.ty()) },
     }
 }
-
