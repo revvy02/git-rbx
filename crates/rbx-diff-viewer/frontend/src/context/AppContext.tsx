@@ -28,6 +28,8 @@ interface AppState {
   // Refs to reveal (expand ancestors and scroll into view)
   oldRevealRef: string | null;
   newRevealRef: string | null;
+  // Refs that have properties (diff-relevant instances)
+  diffRefs: Set<string>;
   // Selected diff entry for CHANGES panel
   diffSelectedEntry: DiffEntry | null;
 }
@@ -67,6 +69,7 @@ const initialState: AppState = {
   highlightedRef: null,
   oldRevealRef: null,
   newRevealRef: null,
+  diffRefs: new Set(),
   diffSelectedEntry: null,
 };
 
@@ -163,8 +166,9 @@ function buildDiffTree(
       const ancestor = ancestors[i];
       const isLeaf = i === ancestors.length - 1;
 
-      if (!diffNode.children[ancestor.name]) {
-        diffNode.children[ancestor.name] = {
+      const key = ancestor.ref;
+      if (!diffNode.children[key]) {
+        diffNode.children[key] = {
           name: ancestor.name,
           children: {},
           changeType: isLeaf ? diff.type : null,
@@ -174,10 +178,10 @@ function buildDiffTree(
           ref: ancestor.ref
         };
       } else if (!isLeaf) {
-        diffNode.children[ancestor.name].hasChangedDescendant = true;
+        diffNode.children[key].hasChangedDescendant = true;
       }
 
-      diffNode = diffNode.children[ancestor.name];
+      diffNode = diffNode.children[key];
 
       if (isLeaf) {
         diffNode.changeType = diff.type;
@@ -197,6 +201,11 @@ function reducer(state: AppState, action: Action): AppState {
       const diffTree = buildDiffTree(diffs, oldTree, newTree);
       const oldParentMap = buildParentMap(oldTree);
       const newParentMap = buildParentMap(newTree);
+      const diffRefs = new Set<string>();
+      for (const diff of diffs) {
+        if (diff.old_ref) diffRefs.add(diff.old_ref);
+        if (diff.new_ref) diffRefs.add(diff.new_ref);
+      }
       return {
         ...state,
         isLoaded: true,
@@ -212,6 +221,7 @@ function reducer(state: AppState, action: Action): AppState {
         newRefInfo,
         oldParentMap,
         newParentMap,
+        diffRefs,
       };
     }
     case 'SELECT_INSTANCE': {

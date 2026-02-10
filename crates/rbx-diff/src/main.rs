@@ -6,6 +6,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::time::Instant;
+use tracing::info_span;
+use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::{diff_doms_with_config, DiffConfig};
 use rbx_diff::output::{print_diff, OutputFormat};
@@ -41,18 +43,32 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Init tracing subscriber (controlled via RUST_LOG env var)
+    fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(fmt::format::FmtSpan::CLOSE)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .init();
+
     let total_start = Instant::now();
 
     // Load old file
     let load_start = Instant::now();
     eprintln!("Loading {}...", args.old_file);
-    let old_dom = load_file(&args.old_file)?;
+    let old_dom = {
+        let _span = info_span!("load_old_file", file = %args.old_file).entered();
+        load_file(&args.old_file)?
+    };
     let old_load_time = load_start.elapsed();
 
     // Load new file
     let load_start = Instant::now();
     eprintln!("Loading {}...", args.new_file);
-    let new_dom = load_file(&args.new_file)?;
+    let new_dom = {
+        let _span = info_span!("load_new_file", file = %args.new_file).entered();
+        load_file(&args.new_file)?
+    };
     let new_load_time = load_start.elapsed();
 
     // Build diff config

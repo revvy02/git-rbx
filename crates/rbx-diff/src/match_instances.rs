@@ -1,12 +1,17 @@
 //! Instance matching between two DOMs.
-//! Uses name matching with hash as tiebreaker.
+//! Uses name matching with multi-pass hash tiebreaking:
+//! Pass 1: Full property hash (exact match — nothing changed)
+//! Pass 2: No-refs hash (matches when only Ref properties like PrimaryPart changed)
+//! Pass 3: Positional fallback (pair remaining by sibling order)
 
 use rbx_dom_weak::{types::Ref, WeakDom};
+use std::collections::HashMap;
+use tracing::{debug, info};
 
 use crate::hash::LazyHashCache;
 
 /// Result of matching instances between two DOMs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchResult {
     /// Matched pairs: (old_ref, new_ref)
     pub matched: Vec<(Ref, Ref)>,
@@ -31,14 +36,13 @@ pub fn match_children(
     let new_parent_inst = new_dom.get_by_ref(new_parent).unwrap();
 
     // Build list of old children with their info (no hash computed yet)
-    let mut old_children: Vec<_> = old_parent_inst
+    let old_children: Vec<_> = old_parent_inst
         .children()
         .iter()
         .filter_map(|&r| {
             old_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
                 name: inst.name.clone(),
-                matched: false,
             })
         })
         .collect();
@@ -51,63 +55,194 @@ pub fn match_children(
             new_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
                 name: inst.name.clone(),
-                matched: false,
             })
         })
         .collect();
 
     let mut matched = Vec::new();
     let mut added = Vec::new();
+    let mut hash_tiebreaks = 0usize;
+    let mut unique_matches = 0usize;
 
-    // Match each new child to an old child
-    for new_child in &new_children {
-        // Find all candidates with matching name
-        let candidates: Vec<usize> = old_children
-            .iter()
-            .enumerate()
-            .filter(|(_, old)| {
-                !old.matched && old.name == new_child.name
+    let old_count = old_children.len();
+    let new_count = new_children.len();
+
+    let mut old_matched = vec![false; old_count];
+    let mut new_matched = vec![false; new_count];
+
+    // Build name → indices map for O(1) lookup instead of O(n) scan
+    let mut name_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, child) in old_children.iter().enumerate() {
+        name_index.entry(child.name.as_str()).or_default().push(i);
+    }
+
+    // ===== Single-candidate matching (no ambiguity) =====
+    for (new_idx, new_child) in new_children.iter().enumerate() {
+        let candidates: Vec<usize> = name_index
+            .get(new_child.name.as_str())
+            .map(|indices| {
+                indices.iter().copied()
+                    .filter(|&i| !old_matched[i])
+                    .collect()
             })
-            .map(|(i, _)| i)
-            .collect();
+            .unwrap_or_default();
 
-        if candidates.is_empty() {
-            // No match found - this is a new instance
-            added.push(new_child.referent);
-        } else if candidates.len() == 1 {
-            // Exactly one match - no hash needed!
+        if candidates.len() == 1 {
+            unique_matches += 1;
             let idx = candidates[0];
-            old_children[idx].matched = true;
+            old_matched[idx] = true;
+            new_matched[new_idx] = true;
             matched.push((old_children[idx].referent, new_child.referent));
-        } else {
-            // Multiple candidates - use hash to find best match (lazy compute)
-            let new_hash = new_hashes.get(new_child.referent);
+        }
+    }
+
+    // ===== Multi-candidate matching (multi-pass tiebreaking) =====
+    // Group unmatched new children by name for batch processing
+    let mut name_groups: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (new_idx, new_child) in new_children.iter().enumerate() {
+        if !new_matched[new_idx] {
+            let has_candidates = name_index
+                .get(new_child.name.as_str())
+                .map(|indices| indices.iter().any(|&i| !old_matched[i]))
+                .unwrap_or(false);
+            if has_candidates {
+                name_groups.entry(new_child.name.as_str()).or_default().push(new_idx);
+            }
+        }
+    }
+
+    for (name, new_indices) in &name_groups {
+        hash_tiebreaks += new_indices.len();
+
+        // Collect unmatched old candidates for this name group
+        let old_candidates: Vec<usize> = name_index
+            .get(name)
+            .map(|indices| {
+                indices.iter().copied()
+                    .filter(|&i| !old_matched[i])
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut pass1_count = 0usize;
+        let mut pass2_count = 0usize;
+        let mut pass3_count = 0usize;
+
+        // Pass 1: Full hash match (all properties including Refs)
+        let mut remaining_new: Vec<usize> = Vec::new();
+        for &new_idx in new_indices {
+            let new_hash = new_hashes.get(new_children[new_idx].referent);
             let new_hash_bytes = *new_hash.as_bytes();
 
-            // Try to find exact hash match
-            let exact_match = candidates.iter().find(|&&idx| {
-                let old_hash = old_hashes.get(old_children[idx].referent);
-                *old_hash.as_bytes() == new_hash_bytes
+            let exact = old_candidates.iter().find(|&&oi| {
+                !old_matched[oi] && {
+                    let old_hash = old_hashes.get(old_children[oi].referent);
+                    *old_hash.as_bytes() == new_hash_bytes
+                }
             });
 
-            if let Some(&idx) = exact_match {
-                old_children[idx].matched = true;
-                matched.push((old_children[idx].referent, new_child.referent));
+            if let Some(&oi) = exact {
+                old_matched[oi] = true;
+                new_matched[new_idx] = true;
+                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                pass1_count += 1;
             } else {
-                // No exact hash match - use first available candidate
-                let idx = candidates[0];
-                old_children[idx].matched = true;
-                matched.push((old_children[idx].referent, new_child.referent));
+                remaining_new.push(new_idx);
             }
+        }
+
+        // Pass 2: No-refs hash match (stable when only Ref properties changed)
+        let mut still_remaining: Vec<usize> = Vec::new();
+        for new_idx in remaining_new {
+            let new_hash_nr = new_hashes.get_no_refs(new_children[new_idx].referent);
+            let new_hash_nr_bytes = *new_hash_nr.as_bytes();
+
+            let nr_match = old_candidates.iter().find(|&&oi| {
+                !old_matched[oi] && {
+                    let old_hash_nr = old_hashes.get_no_refs(old_children[oi].referent);
+                    *old_hash_nr.as_bytes() == new_hash_nr_bytes
+                }
+            });
+
+            if let Some(&oi) = nr_match {
+                old_matched[oi] = true;
+                new_matched[new_idx] = true;
+                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                pass2_count += 1;
+            } else {
+                still_remaining.push(new_idx);
+            }
+        }
+
+        // Pass 3: Positional fallback — pair remaining by order
+        let mut remaining_old: Vec<usize> = old_candidates.iter()
+            .copied()
+            .filter(|&oi| !old_matched[oi])
+            .collect();
+
+        for new_idx in still_remaining {
+            if let Some(oi) = remaining_old.first().copied() {
+                remaining_old.remove(0);
+                old_matched[oi] = true;
+                new_matched[new_idx] = true;
+                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                pass3_count += 1;
+            }
+        }
+
+        if pass2_count > 0 || pass3_count > 0 {
+            let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+            debug!(
+                parent = parent_name,
+                name = *name,
+                total = new_indices.len(),
+                pass1_full_hash = pass1_count,
+                pass2_no_refs = pass2_count,
+                pass3_positional = pass3_count,
+                "multi-pass tiebreak"
+            );
+        }
+    }
+
+    // Collect unmatched new children as added
+    for (new_idx, new_child) in new_children.iter().enumerate() {
+        if !new_matched[new_idx] {
+            added.push(new_child.referent);
         }
     }
 
     // Collect unmatched old children as removed
     let removed: Vec<Ref> = old_children
         .iter()
-        .filter(|c| !c.matched)
-        .map(|c| c.referent)
+        .enumerate()
+        .filter(|(i, _)| !old_matched[*i])
+        .map(|(_, c)| c.referent)
         .collect();
+
+    // Log matching stats for non-trivial levels
+    if old_count + new_count > 10 {
+        let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+        info!(
+            parent = parent_name,
+            old_children = old_count,
+            new_children = new_count,
+            matched = matched.len(),
+            unique = unique_matches,
+            hash_tiebreaks = hash_tiebreaks,
+            added = added.len(),
+            removed = removed.len(),
+            "match_children"
+        );
+    } else if hash_tiebreaks > 0 {
+        let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+        debug!(
+            parent = parent_name,
+            old_children = old_count,
+            new_children = new_count,
+            hash_tiebreaks = hash_tiebreaks,
+            "match_children (hash tiebreak)"
+        );
+    }
 
     MatchResult { matched, removed, added }
 }
@@ -115,7 +250,6 @@ pub fn match_children(
 struct ChildInfo {
     referent: Ref,
     name: String,
-    matched: bool,
 }
 
 /// Get the full path of an instance (e.g., "Workspace.Map.Building1")

@@ -23,6 +23,7 @@ export function ExplorerPanel({ side, title, showProperties = true }: ExplorerPa
   const tree = side === 'old' ? state.oldTree : side === 'new' ? state.newTree : null;
   const diffTree = side === 'diff' ? state.diffTree : null;
   const refMap = side === 'old' ? state.oldRefMap : side === 'new' ? state.newRefMap : undefined;
+  const diffRefs = side !== 'diff' ? state.diffRefs : undefined;
 
   // Get selected ref for this side (independent per panel)
   const selectedRef = side === 'old' ? state.oldSelectedRef : side === 'new' ? state.newSelectedRef : null;
@@ -60,12 +61,13 @@ export function ExplorerPanel({ side, title, showProperties = true }: ExplorerPa
           side={side}
           depth={0}
           refMap={refMap}
+          diffRefs={diffRefs}
           searchQuery={searchQuery}
         />
       );
     }
     return <div className="loading">Loading...</div>;
-  }, [side, diffTree, sortedDiffKeys, tree, refMap, searchQuery]);
+  }, [side, diffTree, sortedDiffKeys, tree, refMap, diffRefs, searchQuery]);
 
   return (
     <>

@@ -11,6 +11,7 @@ interface ExplorerNodeProps {
   side: Side;
   depth: number;
   refMap?: Record<string, string>;
+  diffRefs?: Set<string>;
   isLastChild?: boolean;  // true if this is the last sibling (for tree line styling)
   searchQuery?: string;
 }
@@ -61,7 +62,7 @@ function isAncestorOf(nodeRef: string, targetRef: string, parentMap: Record<stri
   return false;
 }
 
-export const ExplorerNode = memo(function ExplorerNode({ node, diffNode, side, depth, refMap, isLastChild = false, searchQuery = '' }: ExplorerNodeProps) {
+export const ExplorerNode = memo(function ExplorerNode({ node, diffNode, side, depth, refMap, diffRefs, isLastChild = false, searchQuery = '' }: ExplorerNodeProps) {
   const { state, selectInstance, selectDiffEntry, highlightRef, revealInstance, clearReveal } = useAppContext();
   const rowRef = useRef<HTMLDivElement>(null);
 
@@ -148,6 +149,9 @@ export const ExplorerNode = memo(function ExplorerNode({ node, diffNode, side, d
     changeType = (refMap[ref] as ChangeType) || null;
   }
 
+  // Non-diff instances are "unavailable" (no properties embedded)
+  const isUnavailable = !isDiffNode && !!ref && !!diffRefs && !diffRefs.has(ref);
+
   // Check if this node is selected or highlighted (per-side independent selections)
   const selectedRef = side === 'old' ? state.oldSelectedRef : side === 'new' ? state.newSelectedRef : null;
   const isSelected = selectedRef === ref;
@@ -172,6 +176,7 @@ export const ExplorerNode = memo(function ExplorerNode({ node, diffNode, side, d
   const handleSelect = useCallback(() => {
     if (ref && !isDiffNode) {
       selectInstance(ref, side);
+      highlightRef(null); // Clear cross-panel highlight
     } else if (isDiffNode && diffNode?.diff) {
       // For diff nodes, select the diff entry for properties panel
       selectDiffEntry(diffNode.diff);
@@ -196,34 +201,35 @@ export const ExplorerNode = memo(function ExplorerNode({ node, diffNode, side, d
     'node-row',
     isDiffNode ? 'diff-node' : '',
     changeType || '',
+    isUnavailable ? 'unavailable' : '',
     isSelected ? 'selected' : '',
     isHighlighted ? 'highlighted' : ''
   ].filter(Boolean).join(' ');
 
-  // Memoize sorted diff children names
-  const sortedDiffChildNames = useMemo(() => {
+  // Memoize sorted diff children keys (keyed by ref, sorted by change type then name)
+  const sortedDiffChildKeys = useMemo(() => {
     if (!isDiffNode || !diffNode) return [];
     return Object.keys(diffNode.children).sort((a, b) => {
-      const aType = diffNode.children[a].changeType;
-      const bType = diffNode.children[b].changeType;
+      const aNode = diffNode.children[a];
+      const bNode = diffNode.children[b];
       const order: Record<string, number> = { modified: 0, added: 1, removed: 2 };
-      const aOrder = aType ? order[aType] ?? 3 : 3;
-      const bOrder = bType ? order[bType] ?? 3 : 3;
+      const aOrder = aNode.changeType ? order[aNode.changeType] ?? 3 : 3;
+      const bOrder = bNode.changeType ? order[bNode.changeType] ?? 3 : 3;
       if (aOrder !== bOrder) return aOrder - bOrder;
-      return a.localeCompare(b);
+      return aNode.name.localeCompare(bNode.name);
     });
   }, [isDiffNode, diffNode]);
 
   // Render children - only called when not collapsed
   const renderChildren = () => {
     if (isDiffNode && diffNode) {
-      return sortedDiffChildNames.map((childName, index) => (
+      return sortedDiffChildKeys.map((childKey, index) => (
         <ExplorerNode
-          key={childName}
-          diffNode={diffNode.children[childName]}
+          key={childKey}
+          diffNode={diffNode.children[childKey]}
           side={side}
           depth={depth + 1}
-          isLastChild={index === sortedDiffChildNames.length - 1}
+          isLastChild={index === sortedDiffChildKeys.length - 1}
           searchQuery={searchQuery}
         />
       ));
@@ -235,6 +241,7 @@ export const ExplorerNode = memo(function ExplorerNode({ node, diffNode, side, d
           side={side}
           depth={depth + 1}
           refMap={refMap}
+          diffRefs={diffRefs}
           isLastChild={index === children.length - 1}
           searchQuery={searchQuery}
         />

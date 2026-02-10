@@ -4,9 +4,10 @@ use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::Variant;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use tracing::{info, info_span};
 
 use crate::hash::LazyHashCache;
-use crate::match_instances::{get_instance_path, match_children};
+use crate::match_instances::{get_instance_path, match_children, MatchResult};
 
 /// A single difference found between two DOMs.
 #[derive(Debug, Clone, Serialize)]
@@ -118,33 +119,48 @@ pub fn compute_diff(
     new_hashes: &LazyHashCache,
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
+    let _span = info_span!("compute_diff").entered();
+
     let mut diffs = Vec::new();
     // Global mapping of matched instances: old_ref → new_ref
     let mut ref_mapping: HashMap<Ref, Ref> = HashMap::new();
+    // Cache match results from first pass to avoid recomputing in second pass
+    let mut match_cache: HashMap<(Ref, Ref), MatchResult> = HashMap::new();
 
     // First pass: build the complete ref mapping by traversing the tree
-    build_ref_mapping(
-        old_dom,
-        new_dom,
-        old_dom.root_ref(),
-        new_dom.root_ref(),
-        old_hashes,
-        new_hashes,
-        &mut ref_mapping,
-    );
+    {
+        let _span = info_span!("build_ref_mapping").entered();
+        build_ref_mapping(
+            old_dom,
+            new_dom,
+            old_dom.root_ref(),
+            new_dom.root_ref(),
+            old_hashes,
+            new_hashes,
+            &mut ref_mapping,
+            &mut match_cache,
+        );
+        info!(matched_pairs = ref_mapping.len(), cached_matches = match_cache.len(), "ref mapping complete");
+    }
 
     // Second pass: compute diffs using the mapping for Ref comparison
-    diff_recursive(
-        old_dom,
-        new_dom,
-        old_dom.root_ref(),
-        new_dom.root_ref(),
-        old_hashes,
-        new_hashes,
-        config,
-        &ref_mapping,
-        &mut diffs,
-    );
+    {
+        let _span = info_span!("diff_recursive_pass").entered();
+        diff_recursive(
+            old_dom,
+            new_dom,
+            old_dom.root_ref(),
+            new_dom.root_ref(),
+            config,
+            &ref_mapping,
+            &match_cache,
+            &mut diffs,
+        );
+        info!(diffs_found = diffs.len(), "diff pass complete");
+    }
+
+    old_hashes.log_stats("old");
+    new_hashes.log_stats("new");
 
     diffs
 }
@@ -158,11 +174,12 @@ fn build_ref_mapping(
     old_hashes: &LazyHashCache,
     new_hashes: &LazyHashCache,
     ref_mapping: &mut HashMap<Ref, Ref>,
+    match_cache: &mut HashMap<(Ref, Ref), MatchResult>,
 ) {
     // Add this pair to the mapping
     ref_mapping.insert(old_ref, new_ref);
 
-    // Match children and recurse
+    // Match children and cache the result
     let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
 
     for (old_child_ref, new_child_ref) in &match_result.matched {
@@ -174,8 +191,11 @@ fn build_ref_mapping(
             old_hashes,
             new_hashes,
             ref_mapping,
+            match_cache,
         );
     }
+
+    match_cache.insert((old_ref, new_ref), match_result);
 }
 
 fn diff_recursive(
@@ -183,19 +203,14 @@ fn diff_recursive(
     new_dom: &WeakDom,
     old_ref: Ref,
     new_ref: Ref,
-    old_hashes: &LazyHashCache,
-    new_hashes: &LazyHashCache,
     config: &DiffConfig,
     ref_mapping: &HashMap<Ref, Ref>,
+    match_cache: &HashMap<(Ref, Ref), MatchResult>,
     diffs: &mut Vec<DiffEntry>,
 ) {
-    // NOTE: We can't use hash-based fast-path at this level because
-    // Ref properties are excluded from hashes (for determinism).
-    // Two instances with different PrimaryParts would have identical hashes.
-    // Instead, we always compare properties and use hashes only for child recursion.
-
-    // Match children
-    let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
+    // Use cached match result from build_ref_mapping pass (avoids recomputing)
+    let match_result = match_cache.get(&(old_ref, new_ref))
+        .expect("match_cache missing entry — build_ref_mapping should have populated it");
 
     // Report removed instances
     for removed_ref in &match_result.removed {
@@ -219,9 +234,9 @@ fn diff_recursive(
         }
     }
 
-    // Compare matched pairs
+    // Compare matched pairs — always recurse (no hash-based pruning needed
+    // since shallow hashes don't represent subtrees)
     for (old_child_ref, new_child_ref) in &match_result.matched {
-        // Always check properties (including Refs which aren't in hash)
         let property_changes = diff_properties(
             old_dom,
             new_dom,
@@ -243,26 +258,16 @@ fn diff_recursive(
             }
         }
 
-        // Use hash fast-path for recursive children diffing
-        // If child subtree hashes match, skip recursing into that subtree
-        // Hashes are computed lazily here
-        let old_hash = old_hashes.get(*old_child_ref);
-        let new_hash = new_hashes.get(*new_child_ref);
-        let should_recurse = old_hash != new_hash;
-
-        if should_recurse {
-            diff_recursive(
-                old_dom,
-                new_dom,
-                *old_child_ref,
-                *new_child_ref,
-                old_hashes,
-                new_hashes,
-                config,
-                ref_mapping,
-                diffs,
-            );
-        }
+        diff_recursive(
+            old_dom,
+            new_dom,
+            *old_child_ref,
+            *new_child_ref,
+            config,
+            ref_mapping,
+            match_cache,
+            diffs,
+        );
     }
 }
 
@@ -342,8 +347,12 @@ fn variants_equal(
     }
 
     match (a, b) {
-        (Variant::Float32(x), Variant::Float32(y)) => (x - y).abs() < 0.01,
-        (Variant::Float64(x), Variant::Float64(y)) => (x - y).abs() < 0.01,
+        (Variant::Float32(x), Variant::Float32(y)) => {
+            x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
+        }
+        (Variant::Float64(x), Variant::Float64(y)) => {
+            x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
+        }
         (Variant::Vector3(x), Variant::Vector3(y)) => {
             (x.x - y.x).abs() < 0.01 && (x.y - y.y).abs() < 0.01 && (x.z - y.z).abs() < 0.01
         }

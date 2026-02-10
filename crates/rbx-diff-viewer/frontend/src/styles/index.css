@@ -245,6 +245,9 @@ body {
 .node-row.added { background: rgba(78, 201, 176, 0.15); }
 .node-row.removed { background: rgba(241, 76, 76, 0.15); }
 .node-row.modified { background: rgba(220, 220, 170, 0.15); }
+.node-row.unavailable .node-name,
+.node-row.unavailable .node-class { opacity: 0.4; }
+.node-row.unavailable .class-icon { opacity: 0.3; }
 
 .expand-icon {
   width: 16px;
@@ -305,10 +308,10 @@ body {
   position: relative;
 }
 
-/* Diff panel - tree view */
-.diff-node.added .node-name { color: #4ec9b0; }
-.diff-node.removed .node-name { color: #f14c4c; }
-.diff-node.modified .node-name { color: #dcdcaa; }
+/* Diff highlighting - text colors for all panels (old, new, changes) */
+.node-row.added .node-name { color: #4ec9b0; }
+.node-row.removed .node-name { color: #f14c4c; }
+.node-row.modified .node-name { color: #dcdcaa; }
 
 .change-indicator {
   width: 12px;
