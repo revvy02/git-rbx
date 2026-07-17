@@ -1,3 +1,6 @@
 [submodule "rojo"]
 	path = rojo
 	url = https://github.com/rojo-rbx/rojo.git
+[submodule "rensselaer"]
+	path = rensselaer
+	url = https://github.com/example/private-fixture-source.git
