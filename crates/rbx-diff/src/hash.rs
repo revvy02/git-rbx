@@ -205,7 +205,7 @@ impl<'a> DeepHashCache<'a> {
 
 /// Hash a variant value.
 /// For Ref properties, uses name+class of the target as a stable identifier.
-fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) {
+pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) {
     match value {
         Variant::Attributes(attrs) => {
             let mut sorted: Vec<_> = attrs.iter().collect();

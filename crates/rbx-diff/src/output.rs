@@ -33,12 +33,14 @@ fn print_pretty(diffs: &[DiffEntry]) {
     let mut added = Vec::new();
     let mut removed = Vec::new();
     let mut modified = Vec::new();
+    let mut moved = Vec::new();
 
     for diff in diffs {
         match diff {
             DiffEntry::Added { .. } => added.push(diff),
             DiffEntry::Removed { .. } => removed.push(diff),
             DiffEntry::Modified { .. } => modified.push(diff),
+            DiffEntry::Moved { .. } => moved.push(diff),
         }
     }
 
@@ -62,46 +64,67 @@ fn print_pretty(diffs: &[DiffEntry]) {
         }
     }
 
+    // Print moved instances
+    if !moved.is_empty() {
+        println!("\n{}", "Moved:".cyan().bold());
+        for diff in &moved {
+            if let DiffEntry::Moved { old_path, path, class, property_changes, .. } = diff {
+                println!("  {} {} {} {} [{}]",
+                    ">".cyan(),
+                    old_path.cyan(),
+                    "→".dimmed(),
+                    path.cyan(),
+                    class
+                );
+                print_property_changes(property_changes);
+            }
+        }
+    }
+
     // Print modified instances
     if !modified.is_empty() {
         println!("\n{}", "Modified:".yellow().bold());
         for diff in &modified {
             if let DiffEntry::Modified { path, class, property_changes, .. } = diff {
                 println!("  {} {} [{}]", "~".yellow(), path.yellow(), class);
-                for change in property_changes {
-                    match (&change.old_value, &change.new_value) {
-                        (Some(old), Some(new)) => {
-                            println!("      {}: {} {} {}",
-                                change.name,
-                                format_property_value(old).red(),
-                                "→".dimmed(),
-                                format_property_value(new).green()
-                            );
-                        }
-                        (None, Some(new)) => {
-                            println!("      {}: {} {}",
-                                change.name,
-                                "+".green(),
-                                format_property_value(new).green()
-                            );
-                        }
-                        (Some(old), None) => {
-                            println!("      {}: {} {}",
-                                change.name,
-                                "-".red(),
-                                format_property_value(old).red()
-                            );
-                        }
-                        (None, None) => {}
-                    }
-                }
+                print_property_changes(property_changes);
             }
         }
     }
 
     // Print summary
     println!();
-    print_summary_line(&added, &removed, &modified);
+    print_summary_line(&added, &removed, &modified, &moved);
+}
+
+fn print_property_changes(property_changes: &[crate::diff::PropertyChange]) {
+    for change in property_changes {
+        match (&change.old_value, &change.new_value) {
+            (Some(old), Some(new)) => {
+                println!("      {}: {} {} {}",
+                    change.name,
+                    format_property_value(old).red(),
+                    "→".dimmed(),
+                    format_property_value(new).green()
+                );
+            }
+            (None, Some(new)) => {
+                println!("      {}: {} {}",
+                    change.name,
+                    "+".green(),
+                    format_property_value(new).green()
+                );
+            }
+            (Some(old), None) => {
+                println!("      {}: {} {}",
+                    change.name,
+                    "-".red(),
+                    format_property_value(old).red()
+                );
+            }
+            (None, None) => {}
+        }
+    }
 }
 
 /// Format a PropertyValue for human-readable display.
@@ -152,22 +175,25 @@ fn print_summary(diffs: &[DiffEntry]) {
     let mut added = 0;
     let mut removed = 0;
     let mut modified = 0;
+    let mut moved = 0;
 
     for diff in diffs {
         match diff {
             DiffEntry::Added { .. } => added += 1,
             DiffEntry::Removed { .. } => removed += 1,
             DiffEntry::Modified { .. } => modified += 1,
+            DiffEntry::Moved { .. } => moved += 1,
         }
     }
 
-    if added == 0 && removed == 0 && modified == 0 {
+    if added == 0 && removed == 0 && modified == 0 && moved == 0 {
         println!("No differences found.");
     } else {
-        println!("{} added, {} removed, {} modified",
+        println!("{} added, {} removed, {} modified, {} moved",
             added.to_string().green(),
             removed.to_string().red(),
-            modified.to_string().yellow()
+            modified.to_string().yellow(),
+            moved.to_string().cyan()
         );
     }
 }
@@ -176,13 +202,15 @@ fn print_summary_line(
     added: &[&DiffEntry],
     removed: &[&DiffEntry],
     modified: &[&DiffEntry],
+    moved: &[&DiffEntry],
 ) {
     println!(
-        "{}: {} added, {} removed, {} modified",
+        "{}: {} added, {} removed, {} modified, {} moved",
         "Summary".bold(),
         added.len().to_string().green(),
         removed.len().to_string().red(),
-        modified.len().to_string().yellow()
+        modified.len().to_string().yellow(),
+        moved.len().to_string().cyan()
     );
 }
 
@@ -199,15 +227,17 @@ fn print_json(diffs: &[DiffEntry]) {
         added: usize,
         removed: usize,
         modified: usize,
+        moved: usize,
     }
 
     let added = diffs.iter().filter(|d| matches!(d, DiffEntry::Added { .. })).count();
     let removed = diffs.iter().filter(|d| matches!(d, DiffEntry::Removed { .. })).count();
     let modified = diffs.iter().filter(|d| matches!(d, DiffEntry::Modified { .. })).count();
+    let moved = diffs.iter().filter(|d| matches!(d, DiffEntry::Moved { .. })).count();
 
     let output = Output {
         changes: diffs,
-        summary: Summary { added, removed, modified },
+        summary: Summary { added, removed, modified, moved },
     };
 
     println!("{}", serde_json::to_string_pretty(&output).unwrap());

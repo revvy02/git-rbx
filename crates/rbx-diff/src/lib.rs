@@ -3,6 +3,7 @@
 mod diff;
 mod hash;
 mod match_instances;
+mod move_detect;
 pub mod output;
 
 pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};

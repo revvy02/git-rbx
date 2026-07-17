@@ -13,6 +13,7 @@ use tracing::{info, info_span};
 
 use crate::hash::{get_comparable_properties, DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, match_children};
+use crate::move_detect::detect_moves;
 
 /// A single difference found between two DOMs.
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +35,17 @@ pub enum DiffEntry {
     Modified {
         old_ref: String,
         new_ref: String,
+        path: String,
+        class: String,
+        property_changes: Vec<PropertyChange>,
+    },
+    /// Instance was moved to a different parent (same logical instance).
+    /// `path` is the new location; property_changes covers any edits made
+    /// alongside the move (empty for a pure move).
+    Moved {
+        old_ref: String,
+        new_ref: String,
+        old_path: String,
         path: String,
         class: String,
         property_changes: Vec<PropertyChange>,
@@ -130,16 +142,44 @@ pub fn compute_diff(
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
     let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
 
-    // Phase 1: Build global ref mapping (old_ref → new_ref) for matched instances
+    // Phase 1: Build global ref mapping (old_ref → new_ref) for matched instances,
+    // collecting removed/added subtree roots for global move detection
     let mut ref_mapping = HashMap::new();
+    let mut removed_roots = Vec::new();
+    let mut added_roots = Vec::new();
     build_ref_mapping(
         old_dom, new_dom,
         old_dom.root_ref(), new_dom.root_ref(),
         old_hashes, new_hashes,
         &old_deep, &new_deep,
         &mut ref_mapping,
+        &mut removed_roots,
+        &mut added_roots,
     );
     info!(matched_pairs = ref_mapping.len(), "ref mapping built");
+
+    // Phase 1.5: Pair removed/added roots globally into moves.
+    // Must happen before the diff pass so Ref properties pointing at moved
+    // instances compare through the mapping instead of reporting false changes.
+    let moves = detect_moves(
+        old_dom, new_dom,
+        removed_roots, added_roots,
+        &old_deep, &new_deep,
+    );
+    let moved_old: HashSet<Ref> = moves.iter().map(|(o, _)| *o).collect();
+    let moved_new: HashSet<Ref> = moves.iter().map(|(_, n)| *n).collect();
+    for (old_root, new_root) in &moves {
+        ref_mapping.insert(*old_root, *new_root);
+        // Map matched descendants of edited moves too (pure moves prune via deep hash)
+        if old_deep.get(*old_root) != new_deep.get(*new_root) {
+            build_ref_mapping(
+                old_dom, new_dom, *old_root, *new_root,
+                old_hashes, new_hashes, &old_deep, &new_deep,
+                &mut ref_mapping,
+                &mut Vec::new(), &mut Vec::new(),
+            );
+        }
+    }
 
     // Phase 2: Diff using the mapping
     let mut diffs = Vec::new();
@@ -154,8 +194,36 @@ pub fn compute_diff(
         &new_deep,
         config,
         &ref_mapping,
+        &moved_old,
+        &moved_new,
         &mut diffs,
     );
+
+    // Phase 3: Emit moves, then recurse into moved subtrees that also changed
+    for (old_root, new_root) in &moves {
+        let property_changes = diff_properties(
+            old_dom, new_dom, *old_root, *new_root,
+            config, &ref_mapping, &old_deep, &new_deep,
+        );
+        if let Some(inst) = new_dom.get_by_ref(*new_root) {
+            diffs.push(DiffEntry::Moved {
+                old_ref: format!("{}", *old_root),
+                new_ref: format!("{}", *new_root),
+                old_path: get_instance_path(old_dom, *old_root),
+                path: get_instance_path(new_dom, *new_root),
+                class: inst.class.to_string(),
+                property_changes,
+            });
+        }
+        if old_deep.get(*old_root) != new_deep.get(*new_root) {
+            diff_pass(
+                old_dom, new_dom, *old_root, *new_root,
+                old_hashes, new_hashes, &old_deep, &new_deep,
+                config, &ref_mapping, &moved_old, &moved_new,
+                &mut diffs,
+            );
+        }
+    }
 
     old_hashes.log_stats("old");
     new_hashes.log_stats("new");
@@ -166,6 +234,7 @@ pub fn compute_diff(
 
 /// Phase 1: Recursively match all instances, building the global ref mapping.
 /// Only recurses into non-pruned subtrees (where deep hashes differ).
+/// Collects removed/added subtree roots along the way for global move detection.
 fn build_ref_mapping(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
@@ -176,8 +245,12 @@ fn build_ref_mapping(
     old_deep: &DeepHashCache,
     new_deep: &DeepHashCache,
     mapping: &mut HashMap<Ref, Ref>,
+    removed_roots: &mut Vec<Ref>,
+    added_roots: &mut Vec<Ref>,
 ) {
     let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
+    removed_roots.extend_from_slice(&match_result.removed);
+    added_roots.extend_from_slice(&match_result.added);
     for (old_child, new_child) in &match_result.matched {
         mapping.insert(*old_child, *new_child);
         // Only recurse into subtrees where deep hashes differ (same pruning as diff_pass)
@@ -185,6 +258,7 @@ fn build_ref_mapping(
             build_ref_mapping(
                 old_dom, new_dom, *old_child, *new_child,
                 old_hashes, new_hashes, old_deep, new_deep, mapping,
+                removed_roots, added_roots,
             );
         }
     }
@@ -202,12 +276,17 @@ fn diff_pass(
     new_deep: &DeepHashCache,
     config: &DiffConfig,
     ref_mapping: &HashMap<Ref, Ref>,
+    moved_old: &HashSet<Ref>,
+    moved_new: &HashSet<Ref>,
     diffs: &mut Vec<DiffEntry>,
 ) {
     let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
 
-    // Report removed instances
+    // Report removed instances (skipping those reclassified as moves)
     for removed_ref in &match_result.removed {
+        if moved_old.contains(removed_ref) {
+            continue;
+        }
         if let Some(inst) = old_dom.get_by_ref(*removed_ref) {
             diffs.push(DiffEntry::Removed {
                 old_ref: format!("{}", *removed_ref),
@@ -217,8 +296,11 @@ fn diff_pass(
         }
     }
 
-    // Report added instances
+    // Report added instances (skipping those reclassified as moves)
     for added_ref in &match_result.added {
+        if moved_new.contains(added_ref) {
+            continue;
+        }
         if let Some(inst) = new_dom.get_by_ref(*added_ref) {
             diffs.push(DiffEntry::Added {
                 new_ref: format!("{}", *added_ref),
@@ -270,6 +352,8 @@ fn diff_pass(
             new_deep,
             config,
             ref_mapping,
+            moved_old,
+            moved_new,
             diffs,
         );
     }

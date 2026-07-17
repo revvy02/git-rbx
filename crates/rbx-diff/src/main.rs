@@ -17,10 +17,10 @@ use rbx_diff::output::{print_diff, OutputFormat};
 #[command(about = "Compare two Roblox rbxm/rbxmx files and show differences")]
 #[command(version)]
 struct Args {
-    /// First (old) rbxm or rbxmx file
+    /// First (old) rbxm/rbxmx/rbxl/rbxlx file
     old_file: String,
 
-    /// Second (new) rbxm or rbxmx file
+    /// Second (new) rbxm/rbxmx/rbxl/rbxlx file
     new_file: String,
 
     /// Only show summary counts
@@ -122,8 +122,8 @@ fn load_file(path: &str) -> Result<rbx_dom_weak::WeakDom> {
     let file = BufReader::new(File::open(path)?);
 
     match ext.to_lowercase().as_str() {
-        "rbxm" => Ok(rbx_binary::from_reader(file)?),
-        "rbxmx" => Ok(rbx_xml::from_reader_default(file)?),
-        _ => bail!("Unknown file extension: {}. Expected .rbxm or .rbxmx", ext),
+        "rbxm" | "rbxl" => Ok(rbx_binary::from_reader(file)?),
+        "rbxmx" | "rbxlx" => Ok(rbx_xml::from_reader_default(file)?),
+        _ => bail!("Unknown file extension: {}. Expected .rbxm, .rbxmx, .rbxl, or .rbxlx", ext),
     }
 }
