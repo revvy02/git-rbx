@@ -1,3 +1,4 @@
 [tools]
 rust = "stable"
 node = "24"
+"ubi:revvy02/rodeo" = "v1.2.0-rc.3"
