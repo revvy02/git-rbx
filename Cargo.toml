@@ -1,8 +1,6 @@
 [workspace]
 members = [
     "crates/rbx-diff",
-    "crates/rbxmx-canon",
-    "crates/rbx-diff-viewer",
 ]
 resolver = "2"
 
