@@ -382,7 +382,7 @@ fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
 
 /// Check if a value matches the reflection database default for this property.
 fn is_default_value(
-    defaults: Option<&std::collections::HashMap<std::borrow::Cow<'_, str>, Variant>>,
+    defaults: Option<&std::collections::HashMap<&str, Variant>>,
     name: &str,
     value: &Variant,
 ) -> bool {
