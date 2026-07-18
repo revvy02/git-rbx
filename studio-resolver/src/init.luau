@@ -381,73 +381,51 @@ local function Panel()
 		end
 	end
 
-	-- Cap the scrolling row list so the panel's automatic height stops at
-	-- the bottom of the viewport; past that the canvas extends and scrolls.
-	local chromeHeight = 16 + 20 + 30 + (10 * 2) + (6 * 2) + 16 -- top margin, title, button, padding, gaps, bottom margin
-	local maxListHeight = workspace.CurrentCamera.ViewportSize.Y - chromeHeight
-
-	Element("Frame", {
+	-- The scroller is the panel: invisible, stretched to the bottom of the
+	-- screen; rows and the button carry their own backgrounds, and
+	-- AutomaticCanvasSize extends past the viewport when content overflows.
+	Element("ScrollingFrame", {
 		id = "panel",
-		Size = UDim2.new(0, 340, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
 		Position = UDim2.new(1, -356, 0, 16),
-		BackgroundColor3 = Color3.fromRGB(28, 28, 32),
+		Size = UDim2.new(0, 340, 1, -32),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 4,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
 	}, function()
-		Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 8) })
-		Element("UIPadding", {
-			id = "pad",
-			PaddingLeft = UDim.new(0, 10),
-			PaddingRight = UDim.new(0, 10),
-			PaddingTop = UDim.new(0, 10),
-			PaddingBottom = UDim.new(0, 10),
-		})
 		Element("UIListLayout", {
 			id = "layout",
 			Padding = UDim.new(0, 6),
 			SortOrder = Enum.SortOrder.LayoutOrder,
 		})
+		Element("UIPadding", {
+			id = "pad",
+			PaddingRight = UDim.new(0, 8),
+		})
 
-		Label(
-			"title",
-			if finished
+		Element("TextLabel", {
+			id = "title",
+			Text = if finished
 				then "Merge complete — file written"
 				else `rbx-diff: {#conflicts - unresolved}/{#conflicts} decided`,
-			if finished then Color3.fromRGB(120, 220, 140) else nil
-		)
+			Size = UDim2.new(1, 0, 0, 26),
+			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
+			TextColor3 = if finished then Color3.fromRGB(120, 220, 140) else Color3.fromRGB(230, 230, 230),
+			TextSize = 14,
+			Font = Enum.Font.GothamMedium,
+		}, function()
+			Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 6) })
+		end)
 
 		if finished then
 			return
 		end
 
-		Element("ScrollingFrame", {
-			id = "rows",
-			Size = UDim2.new(1, 0, 0, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			AutomaticCanvasSize = Enum.AutomaticSize.Y,
-			CanvasSize = UDim2.new(0, 0, 0, 0),
-			BackgroundTransparency = 1,
-			BorderSizePixel = 0,
-			ScrollBarThickness = 4,
-			ScrollingDirection = Enum.ScrollingDirection.Y,
-		}, function()
-			Element("UISizeConstraint", {
-				id = "clamp",
-				MaxSize = Vector2.new(math.huge, maxListHeight),
-			})
-			Element("UIListLayout", {
-				id = "layout",
-				Padding = UDim.new(0, 6),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			})
-			Element("UIPadding", {
-				id = "pad",
-				PaddingRight = UDim.new(0, 6),
-			})
-
-			for _, conflict in conflicts do
-				ConflictRow(conflict)
-			end
-		end)
+		for _, conflict in conflicts do
+			ConflictRow(conflict)
+		end
 
 		local canComplete = unresolved == 0 and not completing
 		Element("TextButton", {
@@ -458,7 +436,9 @@ local function Panel()
 				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 				else "Complete",
 			Size = UDim2.new(1, 0, 0, 30),
-			BackgroundColor3 = if canComplete then Color3.fromRGB(60, 160, 90) else Color3.fromRGB(55, 55, 60),
+			BackgroundColor3 = if canComplete
+				then Color3.fromRGB(60, 160, 90)
+				else Color3.fromRGB(55, 55, 60),
 			TextColor3 = Color3.fromRGB(240, 240, 240),
 			TextSize = 14,
 			Font = Enum.Font.GothamMedium,
@@ -479,16 +459,25 @@ end
 -- Frame loop; the run stays alive until finalized
 -- ============================================================================
 
--- Self-terminating render loop: if this session's panel disappears (a newer
--- resolver run's boot cleanup destroyed it, or the run was killed), stop
--- rendering — a killed run's Heartbeat connection otherwise survives and
--- errors every frame trying to reparent a destroyed ScreenGui.
+-- Self-terminating render loop. Two death signals: this run's runtime entry
+-- vanishing from _G.__rodeo_procs (the run ended or was killed — the UI
+-- would otherwise linger looking alive while every process.run parks
+-- forever on a dead bridge), or the panel being destroyed by a newer
+-- session's boot cleanup. Either way: tear the UI down and stop rendering.
+local myEid = _G.__rodeo_eid :: string
 local screenGui: Instance? = nil
 local connection
+local function teardown()
+	connection:Disconnect()
+	if screenGui then
+		screenGui:Destroy()
+		screenGui = nil
+	end
+	finished = true
+end
 connection = RunService.Heartbeat:Connect(function()
-	if screenGui and screenGui.Parent == nil then
-		connection:Disconnect()
-		finished = true
+	if _G.__rodeo_procs[myEid] == nil or (screenGui and screenGui.Parent == nil) then
+		teardown()
 		return
 	end
 	updateHighlights()
@@ -521,6 +510,9 @@ end
 task.wait(2) -- let the success state render briefly
 
 connection:Disconnect()
+if screenGui then
+	screenGui:Destroy()
+end
 for _, highlight in liveHighlights do
 	highlight:Destroy()
 end
