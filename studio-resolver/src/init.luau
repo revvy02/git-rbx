@@ -23,9 +23,11 @@ local CoreGui = game:GetService("CoreGui")
 
 local process = require("@rodeo/process")
 
-local miu = require("@self/miu/lib")
-local Element = miu.Instance
-local Portal = miu.Portal
+-- Leaf requires: rodeo's darklua bundling can't resolve a require to an
+-- init.luau, so miu's aggregator (src/miu/init.luau) can't be the target —
+-- the vendored package keeps its upstream shape regardless.
+local Element = require("@self/miu/Instance")
+local Portal = require("@self/miu/Portal")
 
 local CONTAINER_NAME = "__RbxDiffMerge"
 
