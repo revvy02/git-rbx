@@ -2,3 +2,10 @@ target/
 node_modules/
 dist/
 .DS_Store
+.claude/
+*_packages
+.pesde
+
+# pesde-installed packages (regenerate with pesde install)
+studio-resolver/roblox_packages/
+studio-resolver/.rodeo/.temp/

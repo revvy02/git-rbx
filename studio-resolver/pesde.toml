@@ -1,0 +1,20 @@
+name = "rvy/rbx_diff_studio_resolver"
+version = "0.1.0"
+private = true
+
+[engines]
+pesde = "^0.7.2"
+
+[target]
+environment = "roblox"
+
+[indices]
+default = "https://github.com/pesde-pkg/index"
+
+[wally_indices]
+default = "https://github.com/UpliftGames/wally-index"
+
+[dependencies]
+miu = { wally = "revvy02/miu", version = "^0.1.0" }
+miu_ui_labs = { wally = "revvy02/miu-ui-labs", version = "^0.2.0" }
+miu_virtual_list = { wally = "revvy02/miu-virtual-list", version = "^0.1.0" }
