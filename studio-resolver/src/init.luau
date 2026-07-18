@@ -50,8 +50,6 @@ parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
 parser:option("--rbx-diff", "Path to the rbx-diff binary"):target("rbxDiffBin"):default("rbx-diff")
 parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
 
--- pparse: argparse's error path calls process.exit, which suspends the run
--- under rodeo's lune adapter — fail with a readable return instead
 local args = parser:parse(process.args)
 local mergedFile = args.file
 local rbxDiffBin = args.rbxDiffBin
@@ -67,7 +65,7 @@ type Conflict = {
 	path: string,
 	property: string?,
 	resolved: string?,
-	target: Instance?,
+	target: Instance,
 	entry: Instance,
 }
 
@@ -98,32 +96,19 @@ end
 
 local conflicts: { Conflict } = {}
 for _, entry in container:GetChildren() do
-	local kind = entry:GetAttribute("Kind")
-	if typeof(kind) ~= "string" then
-		continue
-	end
-	local targetValue = entry:FindFirstChild("Target")
-	local resolved = entry:GetAttribute("Resolved")
 	table.insert(conflicts, {
 		name = entry.Name,
-		kind = kind,
-		path = entry:GetAttribute("Path") or "?",
-		property = entry:GetAttribute("Property"),
-		resolved = if typeof(resolved) == "string" and resolved ~= "" then resolved else nil,
-		target = if targetValue and targetValue:IsA("ObjectValue") then targetValue.Value else nil,
+		kind = entry:GetAttribute("Kind") :: string,
+		path = entry:GetAttribute("Path") :: string,
+		property = entry:GetAttribute("Property") :: string?,
+		resolved = entry:GetAttribute("Resolved") :: string?,
+		target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
 		entry = entry,
 	})
 end
 table.sort(conflicts, function(a, b)
 	return a.name < b.name
 end)
-
--- A previous resolver run in this Studio leaves its ScreenGui behind
--- (portal targets outlive the run) — clear it so sessions don't stack
-local stale = CoreGui:FindFirstChild("RbxDiffResolver")
-if stale then
-	stale:Destroy()
-end
 
 print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
 
@@ -139,17 +124,11 @@ local function statusColor(conflict: Conflict): Color3
 end
 
 -- The live value of the conflicted property on the (copy) target instance.
-local function liveValue(conflict: Conflict): (boolean, any)
-	local target = conflict.target
-	if not target then
-		return false, nil
-	end
+local function liveValue(conflict: Conflict): any
 	if conflict.property == "Name" then
-		return true, target.Name
+		return conflict.target.Name
 	end
-	return pcall(function()
-		return (target :: any)[conflict.property :: string]
-	end)
+	return (conflict.target :: any)[conflict.property :: string]
 end
 
 -- Encode a captured value as the plain JSON the CLI coerces by property type.
@@ -177,11 +156,7 @@ end
 -- Custom = "edit the instance in Studio, that edit is the resolution".
 -- Available for Property conflicts whose live value has an encodable type.
 local function canCustom(conflict: Conflict): boolean
-	if conflict.kind ~= "Property" or not conflict.target then
-		return false
-	end
-	local ok, v = liveValue(conflict)
-	return ok and encodeValue(v) ~= nil
+	return conflict.kind == "Property" and encodeValue(liveValue(conflict)) ~= nil
 end
 
 -- ============================================================================
@@ -214,14 +189,7 @@ local function complete()
 			if conflict.resolved == "custom" then
 				-- Capture the live value NOW — the final state of the user's
 				-- in-Studio edit is the resolution
-				local ok, v = liveValue(conflict)
-				local encoded = if ok then encodeValue(v) else nil
-				if encoded == nil then
-					completeError = `{conflict.name}: could not capture custom value`
-					warn(completeError)
-					completing = false
-					return
-				end
+				local encoded = encodeValue(liveValue(conflict))
 				args = {
 					rbxDiffBin,
 					"resolve",
@@ -244,19 +212,19 @@ local function complete()
 					conflict.name,
 				}
 			end
-			local result = process.run(args)
-			if not result.ok then
-				completeError = `--take {conflict.name} failed: {result.stderr}`
+			local ok, result = pcall(process.run, args)
+			if not ok or not result.ok then
+				completeError = `--take {conflict.name} failed: {if ok then result.err else result}`
 				warn(completeError)
 				completing = false
 				return
 			end
 		end
-		local result = process.run({ rbxDiffBin, "resolve", mergedFile, "--finalize" })
-		if result.ok then
+		local ok, result = pcall(process.run, { rbxDiffBin, "resolve", mergedFile, "--finalize" })
+		if ok and result.ok then
 			finished = true
 		else
-			completeError = `finalize failed: {result.stderr}`
+			completeError = `finalize failed: {if ok then result.err else result}`
 			warn(completeError)
 		end
 		completing = false
@@ -264,15 +232,8 @@ local function complete()
 end
 
 local function focusOn(conflict: Conflict)
-	local target = conflict.target
-	if not target or not target:IsA("PVInstance") then
-		return
-	end
-	local ok, pivot = pcall(target.GetPivot, target)
-	if ok then
-		local camera = workspace.CurrentCamera
-		camera.CFrame = CFrame.lookAt(pivot.Position + Vector3.new(12, 8, 12), pivot.Position)
-	end
+	local pivot = (conflict.target :: PVInstance):GetPivot()
+	workspace.CurrentCamera.CFrame = CFrame.lookAt(pivot.Position + Vector3.new(12, 8, 12), pivot.Position)
 end
 
 -- ============================================================================
@@ -285,7 +246,7 @@ local liveHighlights: { [string]: Highlight } = {}
 local function updateHighlights()
 	for _, conflict in conflicts do
 		local target = conflict.target
-		local spatial = target ~= nil and target:IsDescendantOf(workspace) and target:IsA("PVInstance")
+		local spatial = target:IsDescendantOf(workspace) and target:IsA("PVInstance")
 		if not spatial or finished then
 			local existing = liveHighlights[conflict.name]
 			if existing then
@@ -403,7 +364,7 @@ local function ConflictRow(conflict: Conflict)
 					choose(conflict, "custom")
 				end)
 			end
-			if conflict.target and conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
+			if conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
 				Button("view", "View", false, Color3.fromRGB(80, 80, 90), function()
 					focusOn(conflict)
 				end)
@@ -422,9 +383,8 @@ local function Panel()
 
 	-- Cap the scrolling row list so the panel's automatic height stops at
 	-- the bottom of the viewport; past that the canvas extends and scrolls.
-	local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.Y or 1080
 	local chromeHeight = 16 + 20 + 30 + (10 * 2) + (6 * 2) + 16 -- top margin, title, button, padding, gaps, bottom margin
-	local maxListHeight = math.max(120, viewport - chromeHeight)
+	local maxListHeight = workspace.CurrentCamera.ViewportSize.Y - chromeHeight
 
 	Element("Frame", {
 		id = "panel",

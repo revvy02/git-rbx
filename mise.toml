@@ -1,4 +1,6 @@
 [tools]
 rust = "stable"
 node = "24"
-"ubi:revvy02/rodeo" = "v1.2.0-rc.3"
+"ubi:revvy02/rodeo" = "v1.2.0-rc.4"
+[env]
+_.path = ["./target/release"]
