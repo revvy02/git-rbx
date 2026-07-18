@@ -479,15 +479,29 @@ fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
 }
 
 /// Studio serializes every service under the DataModel root on save, plus
-/// internals like FilteredSelection. When comparing place files (root is a
-/// DataModel), additions/removals directly at the root are serialization
-/// noise, not changes. Never applies to model diffs (non-DataModel root).
-fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, _inst: &rbx_dom_weak::Instance) -> bool {
+/// internals like FilteredSelection (class "Instance"). Additions/removals of
+/// those at the root are serialization noise, not changes. The check is
+/// class-based, NOT position-based: rbx_binary gives model files a
+/// DataModel-class root too, and top-level model content (Parts, Models, ...)
+/// must still diff normally.
+fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, inst: &rbx_dom_weak::Instance) -> bool {
     let parent = match dom.get_by_ref(parent_ref) {
         Some(p) => p,
         None => return false,
     };
-    parent_ref == dom.root_ref() && parent.class.as_str() == "DataModel"
+    if parent_ref != dom.root_ref() || parent.class.as_str() != "DataModel" {
+        return false;
+    }
+    let class_name = inst.class.as_str();
+    if class_name == "Instance" {
+        return true; // Studio's FilteredSelection objects
+    }
+    let database = rbx_reflection_database::get().unwrap();
+    database
+        .classes
+        .get(class_name)
+        .map(|cd| cd.tags.contains(&rbx_reflection::ClassTag::Service))
+        .unwrap_or(false)
 }
 
 /// Check if a value matches the reflection database default for this property.

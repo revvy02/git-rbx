@@ -35,6 +35,25 @@ fn vector_hash(hasher: &mut Hasher, vector: Vector3) {
     n_hash!(hasher, round!(vector.x), round!(vector.y), round!(vector.z))
 }
 
+/// The target's position in the tree as child indices from the root,
+/// e.g. [2, 0, 3]. Distinguishes same-named siblings for Ref hashing.
+fn ref_index_path(dom: &WeakDom, target: Ref) -> Vec<u32> {
+    let mut path = Vec::new();
+    let mut current = target;
+    while let Some(inst) = dom.get_by_ref(current) {
+        let parent = inst.parent();
+        let Some(parent_inst) = dom.get_by_ref(parent) else {
+            break;
+        };
+        if let Some(index) = parent_inst.children().iter().position(|&c| c == current) {
+            path.push(index as u32);
+        }
+        current = parent;
+    }
+    path.reverse();
+    path
+}
+
 /// Normalize a Roblox asset URI to a canonical form so different spellings of
 /// the same asset compare equal — Studio rewrites e.g.
 /// `http://www.roblox.com/asset/?id=123` to `rbxassetid://123` on save.
@@ -349,10 +368,18 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
             if target_ref.is_none() {
                 hasher.update(&[0x00]); // null ref
             } else if let Some(target) = dom.get_by_ref(*target_ref) {
-                // Use name+class as stable identifier (no subtree hashing)
+                // Identify the target by name+class AND its index path from the
+                // root: name+class alone makes a retarget to a same-named
+                // sibling invisible (deep hashes stay equal, pruning hides the
+                // change). Index paths shift when siblings are inserted, but a
+                // spuriously changed hash only costs pruning/matching work —
+                // the property pass still decides equality via the ref mapping.
                 hasher.update(&[0x01]);
                 hasher.update(target.name.as_bytes());
                 hasher.update(target.class.as_bytes());
+                for index in ref_index_path(dom, *target_ref) {
+                    n_hash!(hasher, index);
+                }
             } else {
                 hasher.update(&[0x00]); // invalid ref = null
             }
