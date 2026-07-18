@@ -2,11 +2,14 @@
 	rbx-diff studio resolver — visual front end over the in-file conflict state.
 
 	Run against the conflicted file (places open directly; models import
-	into a preview folder). The run owns the Studio it spawns, so Studio
-	closes itself when the session completes — pass --detach to keep it open:
+	into a preview folder). `rbx-diff resolve <file> --studio` launches this
+	from a copy of this tree embedded in the binary; from the checkout:
 
-	  rodeo run --place ./merged.rbxl --focus src -- ./merged.rbxl
-	  rodeo run --place --focus src -- ./merged.rbxm
+	  rodeo run --place ./merged.rbxl --focus src/init.luau -- ./merged.rbxl
+	  rodeo run --place --focus src/init.luau -- ./merged.rbxm
+
+	The run owns the Studio it spawns, so Studio closes itself when the
+	session completes — pass --detach to keep it open.
 
 	Discovery is entirely in-DOM (the __RbxDiffMerge container + RbxDiffConflict
 	tags that `rbx-diff merge` stamped). Decisions are STAGED in the session —
@@ -21,7 +24,7 @@
 	only rbx-diff writes it, only at Complete. Abandoning the session leaves the
 	conflicted file exactly as `rbx-diff merge` wrote it.
 
-	Args: <merged-file> [--rbx-diff <path-to-binary>]
+	Args: <merged-file> [--rbx-diff <path-to-binary>] [--auto <side>]
 ]]
 
 local RunService = game:GetService("RunService")
@@ -29,8 +32,6 @@ local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
 
 local process = require("@rodeo/process")
-
-local argparse = require("@pkg/argparse")
 
 -- Leaf requires: rodeo's darklua bundling can't resolve a require to an
 -- init.luau, so miu's aggregator (src/miu/init.luau) can't be the target —
@@ -45,14 +46,31 @@ local OURS_COLOR = Color3.fromRGB(70, 160, 255)
 local THEIRS_COLOR = Color3.fromRGB(170, 90, 255)
 local CUSTOM_COLOR = Color3.fromRGB(80, 200, 160)
 
-local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
-parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
-parser:option("--rbx-diff", "Path to the rbx-diff binary"):target("rbxDiffBin"):default("rbx-diff")
-parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
-
-local args = parser:parse(process.args)
-local mergedFile = args.file
-local rbxDiffBin = args.rbxDiffBin
+-- Tool-controlled args, parsed by hand so the resolver has no package
+-- dependencies (the tree ships embedded in the rbx-diff binary):
+--   <merged-file>       conflicted file written by `rbx-diff merge`
+--   --rbx-diff <bin>    path to the rbx-diff binary
+--   --auto <side>       debug: stage every conflict to this side and Complete
+local fileArg: string? = nil
+local rbxDiffBin = "rbx-diff"
+local autoSide: string? = nil
+do
+	local i = 1
+	while i <= #process.args do
+		local arg = process.args[i]
+		if arg == "--rbx-diff" then
+			i += 1
+			rbxDiffBin = process.args[i]
+		elseif arg == "--auto" then
+			i += 1
+			autoSide = process.args[i]
+		else
+			fileArg = arg
+		end
+		i += 1
+	end
+end
+local mergedFile = assert(fileArg, "usage: <merged-file> [--rbx-diff <bin>] [--auto <side>]")
 
 -- ============================================================================
 -- Conflict model: read once from the DOM. Resolution state is kept locally
@@ -436,9 +454,7 @@ local function Panel()
 				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 				else "Complete",
 			Size = UDim2.new(1, 0, 0, 30),
-			BackgroundColor3 = if canComplete
-				then Color3.fromRGB(60, 160, 90)
-				else Color3.fromRGB(55, 55, 60),
+			BackgroundColor3 = if canComplete then Color3.fromRGB(60, 160, 90) else Color3.fromRGB(55, 55, 60),
 			TextColor3 = Color3.fromRGB(240, 240, 240),
 			TextSize = 14,
 			Font = Enum.Font.GothamMedium,
@@ -497,9 +513,9 @@ end)
 
 -- Debug drive-through: stage everything to one side and Complete, so the
 -- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
-if args.autoSide then
+if autoSide then
 	for _, conflict in conflicts do
-		conflict.resolved = args.autoSide
+		conflict.resolved = autoSide
 	end
 	complete()
 end

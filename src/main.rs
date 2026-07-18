@@ -107,6 +107,16 @@ enum Command {
         /// Apply all resolutions, strip conflict state, write the clean file
         #[arg(long)]
         finalize: bool,
+
+        /// Resolve visually in Roblox Studio: opens the file with conflict
+        /// highlights and an Ours/Theirs/Custom panel (needs `rodeo` on
+        /// PATH). Exits 0 only when the session leaves the file clean
+        #[arg(long, conflicts_with_all = ["list", "take", "value", "path", "entry", "all", "finalize"])]
+        studio: bool,
+
+        /// Debug: auto-stage every conflict to this side and complete
+        #[arg(long, hide = true, requires = "studio", value_name = "SIDE")]
+        studio_auto: Option<String>,
     },
     /// Exit nonzero if the file contains unresolved merge conflict state
     Check {
@@ -131,8 +141,12 @@ fn main() -> Result<()> {
         Command::Merge { base, ours, theirs, output, ignore_property } => {
             cmd_merge(&base, &ours, &theirs, output.as_deref(), &ignore_property)
         }
-        Command::Resolve { file, list, take, value, path, entry, all, finalize } => {
-            cmd_resolve(&file, list, take.as_deref(), value.as_deref(), path.as_deref(), entry.as_deref(), all, finalize)
+        Command::Resolve { file, list, take, value, path, entry, all, finalize, studio, studio_auto } => {
+            if studio {
+                cmd_resolve_studio(&file, studio_auto.as_deref())
+            } else {
+                cmd_resolve(&file, list, take.as_deref(), value.as_deref(), path.as_deref(), entry.as_deref(), all, finalize)
+            }
         }
         Command::Check { file } => cmd_check(&file),
     }
@@ -343,7 +357,88 @@ fn cmd_resolve(
         return Ok(());
     }
 
-    bail!("specify --list, --take <ours|theirs> (--path/--all), or --finalize");
+    bail!("specify --list, --take <ours|theirs> (--path/--all), --finalize, or --studio");
+}
+
+/// The Studio resolver script tree, embedded so `resolve --studio` works from
+/// an installed binary with no checkout around. It is written to a temp dir
+/// at launch and rodeo bundles it from there like any on-disk script; the
+/// only requires it has left are `@self` (relative) and `@rodeo` (runtime).
+const RESOLVER_FILES: &[(&str, &str)] = &[
+    ("init.luau", include_str!("../studio-resolver/src/init.luau")),
+    ("miu/init.luau", include_str!("../studio-resolver/src/miu/init.luau")),
+    ("miu/Context.luau", include_str!("../studio-resolver/src/miu/Context.luau")),
+    ("miu/Instance.luau", include_str!("../studio-resolver/src/miu/Instance.luau")),
+    ("miu/Portal.luau", include_str!("../studio-resolver/src/miu/Portal.luau")),
+    ("miu/retained_scope.luau", include_str!("../studio-resolver/src/miu/retained_scope.luau")),
+    ("miu/scope.luau", include_str!("../studio-resolver/src/miu/scope.luau")),
+    ("miu/unmounting.luau", include_str!("../studio-resolver/src/miu/unmounting.luau")),
+];
+
+/// Launch the visual resolver in Roblox Studio via rodeo. The session stages
+/// decisions in-Studio and calls back into this binary (`resolve --take`,
+/// `--finalize`) when the user hits Complete — the file on disk is the only
+/// truth, so the verdict afterwards is simply whether conflict state remains.
+fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
+    let dom = load_file(file)?;
+    let Some(container) = find_container(&dom) else {
+        bail!("{file} has no conflict container — nothing to resolve");
+    };
+    let unresolved = list_entries(&dom, container)
+        .iter()
+        .filter(|e| e.resolved.is_none())
+        .count();
+
+    // Places open in Studio directly; models run in an empty place and the
+    // resolver imports them into a preview folder.
+    let abs_file = std::fs::canonicalize(file)?;
+    let is_place = matches!(extension(file)?.as_str(), "rbxl" | "rbxlx");
+
+    let script_dir = std::env::temp_dir().join(format!("rbx-diff-resolver-{}", std::process::id()));
+    for (rel, source) in RESOLVER_FILES {
+        let path = script_dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(&path, source)?;
+    }
+
+    let mut cmd = std::process::Command::new("rodeo");
+    cmd.arg("run").arg("--place");
+    if is_place {
+        cmd.arg(&abs_file);
+    }
+    cmd.arg("--focus")
+        .arg(script_dir.join("init.luau"))
+        .arg("--")
+        .arg(&abs_file)
+        .arg("--rbx-diff")
+        .arg(std::env::current_exe()?);
+    if let Some(side) = auto {
+        cmd.args(["--auto", side]);
+    }
+
+    eprintln!("Opening the Studio resolver for {file} ({unresolved} unresolved conflict(s))...");
+    let status = cmd.status().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => anyhow::anyhow!(
+            "`rodeo` not found on PATH — the Studio resolver runs through it \
+             (https://github.com/revvy02/rodeo). Resolve from the CLI instead: \
+             rbx-diff resolve {file} --list"
+        ),
+        _ => anyhow::Error::from(e).context("launching rodeo"),
+    })?;
+    let _ = std::fs::remove_dir_all(&script_dir);
+
+    // rodeo's exit code only says how the SESSION ended (completed, killed,
+    // Studio closed mid-way); what the merge is at now is in the file.
+    if find_container(&load_file(file)?).is_none() {
+        eprintln!("{file}: conflicts resolved, file is clean");
+        Ok(())
+    } else {
+        if !status.success() {
+            eprintln!("(resolver session ended without completing)");
+        }
+        eprintln!("{file}: still contains conflict state");
+        std::process::exit(1);
+    }
 }
 
 fn cmd_check(file: &str) -> Result<()> {

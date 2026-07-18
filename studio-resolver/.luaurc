@@ -1,7 +1,7 @@
 {
   "languageMode": "strict",
   "aliases": {
-    "rodeo": "~/.rodeo/typedefs/1.2.0-rc.3",
+    "rodeo": "~/.rodeo/typedefs/1.2.0-rc.4",
     "lune": "~/.lune/.typedefs/0.10.4/",
     "pkg": "./lune_packages",
     "luaupkg": "./luau_packages",
