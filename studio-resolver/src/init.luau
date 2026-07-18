@@ -70,6 +70,7 @@ local rbxDiffBin = args.rbxDiffBin
 -- ============================================================================
 
 type SideInfo = {
+	folder: Instance?, -- the stamped side folder (a swapped-out clone lives here)
 	clone: Instance?, -- this side's version (nil = this side deletes the target)
 	destination: Instance?, -- MoveTarget: the parent this side moves the target to
 	destinationPath: string?,
@@ -271,34 +272,22 @@ local function focusOn(conflict: Conflict)
 end
 
 -- ============================================================================
--- 3D rendering: status highlight on the target, ghost twins of both sides
--- (spawned from the stamped Ours/Theirs clones), and a live preview — staging
--- a side morphs the Studio COPY toward that outcome (property values, parents,
--- delete fades) and unpicking restores the boot-time base state. None of this
--- touches the disk file; the CLI at Complete is still the only writer.
--- Ghost + status highlights each cost a Highlight instance (engine cap ~31
--- concurrent) — fine at typical conflict counts, revisit for huge merges.
+-- 3D rendering: the scene shows exactly what is currently selected — staging
+-- Ours renders ours' version, Theirs renders theirs', unpicked renders base.
+-- Property values apply to the target, moves reparent it, delete-vs-edit
+-- swaps the stamped clone itself in and out of the scene. Unpicking restores
+-- boot snapshots; none of this touches the disk file — the CLI at Complete
+-- is still the only writer.
 -- ============================================================================
 
-local staleGhosts = workspace:FindFirstChild("__RbxDiffGhosts")
-if staleGhosts then
-	staleGhosts:Destroy()
+-- The stamped container rides inside model files, so a model preview imports
+-- it into workspace — where every clone renders on top of its target. It is
+-- pure data for this session: stash it out of the scene (copy-only; the file
+-- keeps its container until finalize strips it).
+local liveContainer = container :: Instance
+if liveContainer:IsDescendantOf(workspace) then
+	liveContainer.Parent = game:GetService("ServerStorage")
 end
-local ghostRoot = Instance.new("Folder")
-ghostRoot.Name = "__RbxDiffGhosts"
-ghostRoot.Archivable = false
-ghostRoot.Parent = workspace
-
-type Ghost = {
-	root: Instance,
-	parts: { [BasePart]: number }, -- part -> the clone's true transparency
-	highlight: Highlight,
-	truePivot: CFrame, -- where this version actually lives
-	flankPivot: CFrame, -- parked beside the target for comparison
-}
-
-local ghosts: { [string]: Ghost } = {} -- key: `{conflict.name}/{side}`
-local destinationHighlights: { [string]: Highlight } = {} -- MoveTarget, same key
 
 local function eachPart(root: Instance, fn: (BasePart) -> ())
 	if root:IsA("BasePart") then
@@ -315,6 +304,7 @@ local function sideInfo(entry: Instance, sideName: string): SideInfo
 	local info: SideInfo = {}
 	local folder = entry:FindFirstChild(sideName)
 	if folder then
+		info.folder = folder
 		for _, child in folder:GetChildren() do
 			if child.Name == "Destination" and child:IsA("ObjectValue") then
 				info.destination = child.Value
@@ -327,57 +317,7 @@ local function sideInfo(entry: Instance, sideName: string): SideInfo
 	return info
 end
 
-local function makeGhost(conflict: Conflict, side: string, clone: Instance, flankOffset: Vector3): Ghost?
-	if not clone:IsA("PVInstance") then
-		return nil
-	end
-	local root = clone:Clone()
-	root.Name = `{conflict.name}_{side}`
-	local parts: { [BasePart]: number } = {}
-	eachPart(root, function(part)
-		parts[part] = part.Transparency
-		part.Anchored = true
-		part.CanCollide = false
-		part.CanQuery = false
-		part.CanTouch = false
-		part.Locked = true
-	end)
-	local color = if side == "ours" then OURS_COLOR else THEIRS_COLOR
-	local highlight = Instance.new("Highlight")
-	highlight.FillColor = color
-	highlight.OutlineColor = color
-	highlight.Adornee = root
-	highlight.Parent = root
-	local truePivot = (clone :: PVInstance):GetPivot()
-	root.Parent = ghostRoot
-	local ghost: Ghost = {
-		root = root,
-		parts = parts,
-		highlight = highlight,
-		truePivot = truePivot,
-		flankPivot = truePivot + flankOffset,
-	}
-	(root :: PVInstance):PivotTo(ghost.flankPivot)
-	return ghost
-end
-
--- "dim": translucent reference beside the target. "solid": the true look, for
--- a version previewed in place. "hidden": the target itself shows it already.
-local function setGhostState(ghost: Ghost, state: "dim" | "solid" | "hidden", pivot: CFrame?)
-	for part, original in ghost.parts do
-		part.Transparency = if state == "solid" then original elseif state == "dim" then 1 - (1 - original) * 0.35 else 1
-	end
-	ghost.highlight.Enabled = state ~= "hidden"
-	ghost.highlight.FillTransparency = if state == "solid" then 0.8 else 0.92
-	ghost.highlight.OutlineTransparency = if state == "solid" then 0 else 0.5
-	if pivot then
-		(ghost.root :: PVInstance):PivotTo(pivot)
-	end
-end
-
--- Boot pass: side clones, base snapshots (for unpick restore), ghost twins.
--- Ghosts spawn for spatial targets only, and not for Name conflicts (both
--- twins would look identical — the panel summary carries those).
+-- Boot pass: side clones + the base snapshots that unpicking restores.
 for _, conflict in conflicts do
 	conflict.ours = sideInfo(conflict.entry, "Ours")
 	conflict.theirs = sideInfo(conflict.entry, "Theirs")
@@ -395,44 +335,9 @@ for _, conflict in conflicts do
 		end)
 		conflict.targetParts = parts
 	end
-
-	local spatial = target:IsA("PVInstance") and target:IsDescendantOf(workspace)
-	if spatial and (conflict.kind == "Property" and conflict.property ~= "Name" or conflict.kind == "DeleteVsEdit") then
-		local _, size = getBoundingBox(target :: PVInstance)
-		local gap = size.X + 3
-		for side, offset in { ours = Vector3.new(-gap, 0, 0), theirs = Vector3.new(gap, 0, 0) } :: { [string]: Vector3 } do
-			local clone = ((if side == "ours" then conflict.ours else conflict.theirs) :: SideInfo).clone
-			if clone then
-				local ghost = makeGhost(conflict, side, clone, offset)
-				if ghost then
-					ghosts[`{conflict.name}/{side}`] = ghost
-				end
-			end
-		end
-	end
-	if conflict.kind == "MoveTarget" then
-		for side, info in
-			{ ours = conflict.ours :: SideInfo, theirs = conflict.theirs :: SideInfo } :: { [string]: SideInfo }
-		do
-			local destination = info.destination
-			if destination and destination:IsA("PVInstance") and destination:IsDescendantOf(workspace) then
-				local color = if side == "ours" then OURS_COLOR else THEIRS_COLOR
-				local highlight = Instance.new("Highlight")
-				highlight.FillColor = color
-				highlight.OutlineColor = color
-				highlight.FillTransparency = 0.92
-				highlight.OutlineTransparency = 0.5
-				highlight.Adornee = destination
-				highlight.Parent = ghostRoot
-				destinationHighlights[`{conflict.name}/{side}`] = highlight
-			end
-		end
-	end
 end
 
--- Morph the Studio copy toward the staged outcome; nil (unpicked) restores
--- the base snapshot. Ghost emphasis follows: the staged side's ghost hides
--- (the target now previews it), the rejected side stays dim for comparison.
+-- Render the staged selection; nil (unpicked) restores the base snapshot.
 local function applyPreview(conflict: Conflict)
 	local staged = conflict.resolved
 
@@ -461,43 +366,23 @@ local function applyPreview(conflict: Conflict)
 			conflict.target.Parent = destination
 		end
 	elseif conflict.kind == "DeleteVsEdit" then
-		-- Staging the delete side fades the target to a remnant; staging the
-		-- edit side swaps the edited ghost in solid at the true position and
-		-- hides the base target entirely.
+		-- One side deletes, the other edits. Staging either side hides the
+		-- base target; staging the edit side additionally swaps its stamped
+		-- clone into the target's spot (it carries its own true coordinates).
 		local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
-		local fade = if staged == nil then nil elseif staged == editSide then 1 else 0.92
+		local editInfo = (if editSide == "ours" then conflict.ours else conflict.theirs) :: SideInfo
 		for part, original in conflict.targetParts :: { [BasePart]: number } do
-			part.Transparency = fade or original
+			part.Transparency = if staged == nil then original else 1
 		end
-		local ghost = ghosts[`{conflict.name}/{editSide}`]
-		if ghost then
-			if staged == editSide then
-				setGhostState(ghost, "solid", ghost.truePivot)
-			else
-				setGhostState(ghost, "dim", ghost.flankPivot)
-			end
-		end
-		return
-	end
-
-	for _, side in { "ours", "theirs" } do
-		local ghost = ghosts[`{conflict.name}/{side}`]
-		if ghost then
-			setGhostState(ghost, if staged == side then "hidden" else "dim")
-		end
-		local highlight = destinationHighlights[`{conflict.name}/{side}`]
-		if highlight then
-			highlight.FillTransparency = if staged == side then 0.75 else 0.92
-			highlight.OutlineTransparency = if staged == side then 0 else 0.5
+		local clone = editInfo.clone
+		if clone then
+			clone.Parent = if staged == editSide then conflict.target.Parent else editInfo.folder
 		end
 	end
 end
 
 local function renderPreviews()
 	if finished then
-		if ghostRoot.Parent then
-			ghostRoot:Destroy()
-		end
 		return
 	end
 	for _, conflict in conflicts do
@@ -528,10 +413,23 @@ local function updateHighlights()
 		if not highlight then
 			highlight = Instance.new("Highlight")
 			highlight.Name = `RbxDiffHighlight_{conflict.name}`
-			highlight.Adornee = target
 			highlight.Parent = target
 			liveHighlights[conflict.name] = highlight
 		end
+
+		-- Adorn whatever the preview is actually rendering: normally the
+		-- target, but a staged edit side of a delete-vs-edit renders its
+		-- swapped-in clone instead.
+		local adornee: Instance = target
+		if conflict.kind == "DeleteVsEdit" then
+			local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
+			local info = (if editSide == "ours" then conflict.ours else conflict.theirs) :: SideInfo
+			if conflict.resolved == editSide and info.clone then
+				adornee = info.clone :: Instance
+			end
+		end
+		highlight.Adornee = adornee
+
 		local color = statusColor(conflict)
 		highlight.OutlineColor = color
 		highlight.FillColor = color
