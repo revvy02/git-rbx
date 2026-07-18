@@ -241,3 +241,42 @@ fn custom_resolution_rejects_non_property_conflicts() {
     let err = rbx_diff::mark_entry_custom(&mut base, entry, &serde_json::json!(1.0)).unwrap_err();
     assert!(err.to_string().contains("DeleteVsEdit"), "{err}");
 }
+
+#[test]
+fn custom_resolution_handles_color3uint8_properties() {
+    // Part.Color serializes as Color3uint8 — the custom value stores as a
+    // Color3 attribute and finalize narrows it back to the property's type.
+    let color_part = |r: u8, g: u8, b: u8| {
+        InstanceBuilder::new("Part")
+            .with_name("P")
+            .with_property("Color", Variant::Color3uint8(rbx_types::Color3uint8::new(r, g, b)))
+    };
+    let mut base = WeakDom::new(folder("root").with_child(color_part(100, 100, 100)));
+    let ours = WeakDom::new(folder("root").with_child(color_part(255, 0, 0)));
+    let theirs = WeakDom::new(folder("root").with_child(color_part(0, 0, 255)));
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+    assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
+    stamp_conflicts(&mut base, &ours, &theirs, &result);
+
+    let container = find_container(&base).unwrap();
+    let entry = list_entries(&base, container)[0].entry_ref;
+    rbx_diff::mark_entry_custom(&mut base, entry, &serde_json::json!([0.2353, 0.4706, 1.0]))
+        .unwrap();
+
+    // Survive the file format (Color3 attribute round-trip)
+    let mut buffer = Vec::new();
+    rbx_binary::to_writer(&mut buffer, &base, base.root().children()).unwrap();
+    let mut dom: WeakDom = rbx_binary::from_reader(buffer.as_slice()).unwrap();
+
+    finalize(&mut dom).unwrap();
+    let part = dom
+        .descendants()
+        .find(|i| i.name == "P")
+        .unwrap();
+    match part.properties.get(&"Color".into()) {
+        Some(Variant::Color3uint8(c)) => {
+            assert_eq!((c.r, c.g, c.b), (60, 120, 255));
+        }
+        other => panic!("expected Color3uint8, got {other:?}"),
+    }
+}

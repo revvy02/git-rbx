@@ -425,6 +425,12 @@ fn coerce_json_to_variant(value: &serde_json::Value, template: &Variant) -> Resu
             let c = arr(value, 3)?;
             Variant::Color3(rbx_types::Color3::new(c[0] as f32, c[1] as f32, c[2] as f32))
         }
+        // Part.Color serializes as Color3uint8; attributes can only hold
+        // Color3, so store that and let finalize's re-coercion narrow it
+        Variant::Color3uint8(_) => {
+            let c = arr(value, 3)?;
+            Variant::Color3(rbx_types::Color3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+        }
         Variant::Vector3(_) => {
             let v = arr(value, 3)?;
             Variant::Vector3(rbx_types::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32))
@@ -552,6 +558,13 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
                 (Variant::Float64(n), Some(Variant::Float32(_))) => Variant::Float32(*n as f32),
                 (Variant::Float64(n), Some(Variant::Int32(_))) => Variant::Int32(*n as i32),
                 (Variant::Float64(n), Some(Variant::Int64(_))) => Variant::Int64(*n as i64),
+                (Variant::Color3(c), Some(Variant::Color3uint8(_))) => {
+                    Variant::Color3uint8(rbx_types::Color3uint8::new(
+                        (c.r * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (c.g * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (c.b * 255.0).round().clamp(0.0, 255.0) as u8,
+                    ))
+                }
                 _ => custom,
             };
 
