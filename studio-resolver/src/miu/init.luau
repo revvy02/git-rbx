@@ -1,5 +1,5 @@
 --[[
-	Vendored miu core (revvy02/miu 0.1.0 + retained-scope 0.1.0) with string
+	Vendored miu core (revvy02/miu 0.1.1 + retained-scope 0.1.0) with string
 	requires so rodeo's darklua bundling can resolve it — the pesde shims use
 	instance-path requires that don't survive single-file bundling.
 ]]
