@@ -5,6 +5,19 @@ name = "rvy/rbx_diff_studio_resolver"
 version = "0.1.0"
 target = "roblox"
 
+[graph."caveful_games/argparse@0.1.2 lune"]
+direct = ["argparse", { name = "caveful_games/argparse", version = "=0.1.2", index = "default", target = "lune" }, "standard"]
+
+[graph."caveful_games/argparse@0.1.2 lune".pkg_ref]
+ref_ty = "pesde"
+index_url = "https://github.com/pesde-pkg/index"
+
+[graph."caveful_games/argparse@0.1.2 lune".pkg_ref.dependencies]
+luau_check = [{ name = "jiwonz/luau_check", version = "^0.2.0", index = "https://github.com/pesde-pkg/index" }, "dev"]
+luau_lsp = [{ name = "pesde/luau_lsp", version = "^1.38.0", index = "https://github.com/pesde-pkg/index" }, "dev"]
+selene = [{ name = "pesde/selene", version = "^0.27.1", index = "https://github.com/pesde-pkg/index" }, "dev"]
+stylua = [{ name = "pesde/stylua", version = "^2.0.2", index = "https://github.com/pesde-pkg/index" }, "dev"]
+
 [graph."wally#pepeeltoro41/ui-labs@2.4.2 roblox".pkg_ref]
 ref_ty = "wally"
 index_url = "https://github.com/UpliftGames/wally-index"

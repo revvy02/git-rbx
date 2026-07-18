@@ -15,6 +15,7 @@ default = "https://github.com/pesde-pkg/index"
 default = "https://github.com/UpliftGames/wally-index"
 
 [dependencies]
+argparse = { name = "caveful_games/argparse", version = "=0.1.2", target = "lune" }
 miu = { wally = "revvy02/miu", version = "^0.1.0" }
 miu_ui_labs = { wally = "revvy02/miu-ui-labs", version = "^0.2.0" }
 miu_virtual_list = { wally = "revvy02/miu-virtual-list", version = "^0.1.0" }

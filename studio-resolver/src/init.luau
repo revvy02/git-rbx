@@ -15,13 +15,15 @@
 	The Studio DOM is a COPY of the file — the disk file stays authoritative and
 	only rbx-diff writes it. This script is just eyes and buttons.
 
-	Args: <merged-file-path> [path-to-rbx-diff-binary]
+	Args: <merged-file> [--rbx-diff <path-to-binary>]
 ]]
 
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 
 local process = require("@rodeo/process")
+
+local argparse = require("@pkg/argparse")
 
 -- Leaf requires: rodeo's darklua bundling can't resolve a require to an
 -- init.luau, so miu's aggregator (src/miu/init.luau) can't be the target —
@@ -35,9 +37,20 @@ local UNRESOLVED_COLOR = Color3.fromRGB(255, 170, 0)
 local OURS_COLOR = Color3.fromRGB(70, 160, 255)
 local THEIRS_COLOR = Color3.fromRGB(170, 90, 255)
 
-local mergedFile = process.args[1]
-assert(mergedFile, "usage: rodeo run src -- <merged-file> [rbx-diff-binary]")
-local rbxDiffBin = process.args[2] or "rbx-diff"
+local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
+parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
+parser:option("--rbx-diff", "Path to the rbx-diff binary"):target("rbxDiffBin"):default("rbx-diff")
+
+-- pparse: argparse's error path calls process.exit, which suspends the run
+-- under rodeo's lune adapter — fail with a readable return instead
+local parseOk, args = parser:pparse(process.args)
+if not parseOk then
+	warn(`{args}`)
+	return parser:get_usage()
+end
+
+local mergedFile = args.file
+local rbxDiffBin = args.rbxDiffBin
 
 -- ============================================================================
 -- Conflict model: read once from the DOM. Resolution state is kept locally

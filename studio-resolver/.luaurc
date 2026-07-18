@@ -1,0 +1,10 @@
+{
+  "languageMode": "strict",
+  "aliases": {
+    "rodeo": "~/.rodeo/typedefs/1.2.0-rc.3",
+    "lune": "~/.lune/.typedefs/0.10.4/",
+    "pkg": "./lune_packages",
+    "luaupkg": "./luau_packages",
+    "rbxpkg": "./roblox_packages"
+  }
+}
