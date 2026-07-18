@@ -33,11 +33,17 @@ local HttpService = game:GetService("HttpService")
 
 local process = require("@rodeo/process")
 
+local argparse = require("@pkg/argparse")
+
 -- Leaf requires: rodeo's darklua bundling can't resolve a require to an
 -- init.luau, so miu's aggregator (src/miu/init.luau) can't be the target —
 -- the vendored package keeps its upstream shape regardless.
 local Element = require("@self/miu/Instance")
 local Portal = require("@self/miu/Portal")
+
+local StyleLink = require("@self/wind/StyleLink")
+local StyleSheet = require("@self/wind/StyleSheet")
+local WindRules = require("@self/wind/WindRules")
 
 local CONTAINER_NAME = "__RbxDiffMerge"
 
@@ -46,31 +52,14 @@ local OURS_COLOR = Color3.fromRGB(70, 160, 255)
 local THEIRS_COLOR = Color3.fromRGB(170, 90, 255)
 local CUSTOM_COLOR = Color3.fromRGB(80, 200, 160)
 
--- Tool-controlled args, parsed by hand so the resolver has no package
--- dependencies (the tree ships embedded in the rbx-diff binary):
---   <merged-file>       conflicted file written by `rbx-diff merge`
---   --rbx-diff <bin>    path to the rbx-diff binary
---   --auto <side>       debug: stage every conflict to this side and Complete
-local fileArg: string? = nil
-local rbxDiffBin = "rbx-diff"
-local autoSide: string? = nil
-do
-	local i = 1
-	while i <= #process.args do
-		local arg = process.args[i]
-		if arg == "--rbx-diff" then
-			i += 1
-			rbxDiffBin = process.args[i]
-		elseif arg == "--auto" then
-			i += 1
-			autoSide = process.args[i]
-		else
-			fileArg = arg
-		end
-		i += 1
-	end
-end
-local mergedFile = assert(fileArg, "usage: <merged-file> [--rbx-diff <bin>] [--auto <side>]")
+local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
+parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
+parser:option("--rbx-diff", "Path to the rbx-diff binary"):target("rbxDiffBin"):default("rbx-diff")
+parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
+
+local args = parser:parse(process.args)
+local mergedFile = args.file
+local rbxDiffBin = args.rbxDiffBin
 
 -- ============================================================================
 -- Conflict model: read once from the DOM. Resolution state is kept locally
@@ -297,9 +286,7 @@ local function Label(id: string, text: string, color: Color3?)
 	Element("TextLabel", {
 		id = id,
 		Text = text,
-		Size = UDim2.new(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
+		tags = { "text-base", "auto-size-y" },
 		TextColor3 = color or Color3.fromRGB(230, 230, 230),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextSize = 14,
@@ -313,47 +300,29 @@ local function Button(id: string, text: string, highlighted: boolean, color: Col
 		id = id,
 		Text = text,
 		Size = UDim2.new(0, 64, 0, 22),
+		tags = { "corner-sm" },
 		BackgroundColor3 = if highlighted then color else Color3.fromRGB(60, 60, 65),
 		TextColor3 = Color3.fromRGB(240, 240, 240),
 		TextSize = 13,
 		Font = Enum.Font.GothamMedium,
 		AutoButtonColor = true,
 		events = { Activated = onClick },
-	}, function()
-		Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 4) })
-	end)
+	})
 end
 
 local function ConflictRow(conflict: Conflict)
 	Element("Frame", {
 		id = conflict.name,
-		Size = UDim2.new(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
+		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
 		BackgroundColor3 = Color3.fromRGB(40, 40, 46),
 	}, function()
-		Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 6) })
-		Element("UIPadding", {
-			id = "pad",
-			PaddingLeft = UDim.new(0, 8),
-			PaddingRight = UDim.new(0, 8),
-			PaddingTop = UDim.new(0, 6),
-			PaddingBottom = UDim.new(0, 6),
-		})
-		Element("UIListLayout", {
-			id = "layout",
-			Padding = UDim.new(0, 4),
-			SortOrder = Enum.SortOrder.LayoutOrder,
-		})
-
 		Label("path", conflict.path, statusColor(conflict))
 
 		local detail = conflict.kind .. (if conflict.property then ` ({conflict.property})` else "")
 		Element("TextLabel", {
 			id = "detail",
 			Text = detail,
-			Size = UDim2.new(1, 0, 0, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
+			tags = { "text-base", "auto-size-y" },
 			TextColor3 = Color3.fromRGB(160, 160, 170),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextSize = 12,
@@ -364,13 +333,8 @@ local function ConflictRow(conflict: Conflict)
 		Element("Frame", {
 			id = "buttons",
 			Size = UDim2.new(1, 0, 0, 22),
-			BackgroundTransparency = 1,
+			tags = { "bg-none", "flex-row", "gap-sm" },
 		}, function()
-			Element("UIListLayout", {
-				id = "layout",
-				FillDirection = Enum.FillDirection.Horizontal,
-				Padding = UDim.new(0, 6),
-			})
 			Button("ours", "Ours", conflict.resolved == "ours", OURS_COLOR, function()
 				choose(conflict, "ours")
 			end)
@@ -406,36 +370,22 @@ local function Panel()
 		id = "panel",
 		Position = UDim2.new(1, -356, 0, 16),
 		Size = UDim2.new(0, 340, 1, -32),
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		ScrollBarThickness = 4,
+		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
 		ScrollingDirection = Enum.ScrollingDirection.Y,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		CanvasSize = UDim2.new(0, 0, 0, 0),
 	}, function()
-		Element("UIListLayout", {
-			id = "layout",
-			Padding = UDim.new(0, 6),
-			SortOrder = Enum.SortOrder.LayoutOrder,
-		})
-		Element("UIPadding", {
-			id = "pad",
-			PaddingRight = UDim.new(0, 8),
-		})
-
 		Element("TextLabel", {
 			id = "title",
 			Text = if finished
 				then "Merge complete — file written"
 				else `rbx-diff: {#conflicts - unresolved}/{#conflicts} decided`,
 			Size = UDim2.new(1, 0, 0, 26),
+			tags = { "corner-md" },
 			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
 			TextColor3 = if finished then Color3.fromRGB(120, 220, 140) else Color3.fromRGB(230, 230, 230),
 			TextSize = 14,
 			Font = Enum.Font.GothamMedium,
-		}, function()
-			Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 6) })
-		end)
+		})
 
 		if finished then
 			return
@@ -454,6 +404,7 @@ local function Panel()
 				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 				else "Complete",
 			Size = UDim2.new(1, 0, 0, 30),
+			tags = { "corner-md" },
 			BackgroundColor3 = if canComplete then Color3.fromRGB(60, 160, 90) else Color3.fromRGB(55, 55, 60),
 			TextColor3 = Color3.fromRGB(240, 240, 240),
 			TextSize = 14,
@@ -465,9 +416,7 @@ local function Panel()
 					end
 				end,
 			},
-		}, function()
-			Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 6) })
-		end)
+		})
 	end)
 end
 
@@ -505,6 +454,12 @@ connection = RunService.Heartbeat:Connect(function()
 			DisplayOrder = 200,
 			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		}, function()
+			-- One sheet for the whole panel: the wind utility classes
+			-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) that
+			-- the elements below reference through `tags`.
+			StyleLink(StyleSheet(function()
+				WindRules()
+			end))
 			Panel()
 		end)
 		screenGui = (guiNode :: any).instance
@@ -513,9 +468,9 @@ end)
 
 -- Debug drive-through: stage everything to one side and Complete, so the
 -- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
-if autoSide then
+if args.autoSide then
 	for _, conflict in conflicts do
-		conflict.resolved = autoSide
+		conflict.resolved = args.autoSide
 	end
 	complete()
 end

@@ -361,10 +361,15 @@ fn cmd_resolve(
 }
 
 /// The Studio resolver script tree, embedded so `resolve --studio` works from
-/// an installed binary with no checkout around. It is written to a temp dir
-/// at launch and rodeo bundles it from there like any on-disk script; the
-/// only requires it has left are `@self` (relative) and `@rodeo` (runtime).
+/// an installed binary with no checkout around. It is written to a temp dir at
+/// launch and rodeo bundles it from there like any on-disk script: `@self` is
+/// relative, `@rodeo`/`@lune` are runtime/adapter-provided, and `@pkg` maps to
+/// the embedded lune_packages via the emitted .luaurc.
+///
+/// The argparse entries read from studio-resolver/lune_packages, which pesde
+/// manages — if the build can't find them, run `pesde install` there first.
 const RESOLVER_FILES: &[(&str, &str)] = &[
+    (".luaurc", r#"{ "aliases": { "pkg": "./lune_packages" } }"#),
     ("init.luau", include_str!("../studio-resolver/src/init.luau")),
     ("miu/init.luau", include_str!("../studio-resolver/src/miu/init.luau")),
     ("miu/Context.luau", include_str!("../studio-resolver/src/miu/Context.luau")),
@@ -373,6 +378,17 @@ const RESOLVER_FILES: &[(&str, &str)] = &[
     ("miu/retained_scope.luau", include_str!("../studio-resolver/src/miu/retained_scope.luau")),
     ("miu/scope.luau", include_str!("../studio-resolver/src/miu/scope.luau")),
     ("miu/unmounting.luau", include_str!("../studio-resolver/src/miu/unmounting.luau")),
+    ("wind/init.luau", include_str!("../studio-resolver/src/wind/init.luau")),
+    ("wind/px.luau", include_str!("../studio-resolver/src/wind/px.luau")),
+    ("wind/StyleRule.luau", include_str!("../studio-resolver/src/wind/StyleRule.luau")),
+    ("wind/StyleSheet.luau", include_str!("../studio-resolver/src/wind/StyleSheet.luau")),
+    ("wind/StyleLink.luau", include_str!("../studio-resolver/src/wind/StyleLink.luau")),
+    ("wind/WindRules.luau", include_str!("../studio-resolver/src/wind/WindRules.luau")),
+    ("lune_packages/argparse.luau", include_str!("../studio-resolver/lune_packages/argparse.luau")),
+    (
+        "lune_packages/.pesde/caveful_games+argparse/0.1.2/argparse/src/lib.luau",
+        include_str!("../studio-resolver/lune_packages/.pesde/caveful_games+argparse/0.1.2/argparse/src/lib.luau"),
+    ),
 ];
 
 /// Launch the visual resolver in Roblox Studio via rodeo. The session stages
