@@ -23,6 +23,7 @@
 
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
 local process = require("@rodeo/process")
 
@@ -39,6 +40,7 @@ local CONTAINER_NAME = "__RbxDiffMerge"
 local UNRESOLVED_COLOR = Color3.fromRGB(255, 170, 0)
 local OURS_COLOR = Color3.fromRGB(70, 160, 255)
 local THEIRS_COLOR = Color3.fromRGB(170, 90, 255)
+local CUSTOM_COLOR = Color3.fromRGB(80, 200, 160)
 
 local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
 parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
@@ -105,8 +107,56 @@ local function statusColor(conflict: Conflict): Color3
 		return OURS_COLOR
 	elseif conflict.resolved == "theirs" then
 		return THEIRS_COLOR
+	elseif conflict.resolved == "custom" then
+		return CUSTOM_COLOR
 	end
 	return UNRESOLVED_COLOR
+end
+
+-- The live value of the conflicted property on the (copy) target instance.
+local function liveValue(conflict: Conflict): (boolean, any)
+	local target = conflict.target
+	if not target then
+		return false, nil
+	end
+	if conflict.property == "Name" then
+		return true, target.Name
+	end
+	return pcall(function()
+		return (target :: any)[conflict.property :: string]
+	end)
+end
+
+-- Encode a captured value as the plain JSON the CLI coerces by property type.
+-- Returns nil for types custom resolution doesn't support.
+local function encodeValue(v: any): any
+	local t = typeof(v)
+	if t == "number" or t == "string" or t == "boolean" then
+		return v
+	elseif t == "Color3" then
+		return { v.R, v.G, v.B }
+	elseif t == "Vector3" then
+		return { v.X, v.Y, v.Z }
+	elseif t == "Vector2" then
+		return { v.X, v.Y }
+	elseif t == "CFrame" then
+		return { v:GetComponents() }
+	elseif t == "UDim" then
+		return { v.Scale, v.Offset }
+	elseif t == "UDim2" then
+		return { v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset }
+	end
+	return nil
+end
+
+-- Custom = "edit the instance in Studio, that edit is the resolution".
+-- Available for Property conflicts whose live value has an encodable type.
+local function canCustom(conflict: Conflict): boolean
+	if conflict.kind ~= "Property" or not conflict.target then
+		return false
+	end
+	local ok, v = liveValue(conflict)
+	return ok and encodeValue(v) ~= nil
 end
 
 -- ============================================================================
@@ -135,11 +185,32 @@ local function complete()
 	completeError = nil
 	task.spawn(function()
 		for _, conflict in conflicts do
-			local result = process.run({
-				rbxDiffBin, "resolve", mergedFile,
-				"--take", conflict.resolved :: string,
-				"--entry", conflict.name,
-			})
+			local args
+			if conflict.resolved == "custom" then
+				-- Capture the live value NOW — the final state of the user's
+				-- in-Studio edit is the resolution
+				local ok, v = liveValue(conflict)
+				local encoded = if ok then encodeValue(v) else nil
+				if encoded == nil then
+					completeError = `{conflict.name}: could not capture custom value`
+					warn(completeError)
+					completing = false
+					return
+				end
+				args = {
+					rbxDiffBin, "resolve", mergedFile,
+					"--take", "custom",
+					"--entry", conflict.name,
+					"--value", HttpService:JSONEncode(encoded),
+				}
+			else
+				args = {
+					rbxDiffBin, "resolve", mergedFile,
+					"--take", conflict.resolved :: string,
+					"--entry", conflict.name,
+				}
+			end
+			local result = process.run(args)
 			if not result.ok then
 				completeError = `--take {conflict.name} failed: {result.stderr}`
 				warn(completeError)
@@ -289,6 +360,11 @@ local function ConflictRow(conflict: Conflict)
 			Button("theirs", "Theirs", conflict.resolved == "theirs", THEIRS_COLOR, function()
 				choose(conflict, "theirs")
 			end)
+			if canCustom(conflict) then
+				Button("custom", "Custom", conflict.resolved == "custom", CUSTOM_COLOR, function()
+					choose(conflict, "custom")
+				end)
+			end
 			if conflict.target and conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
 				Button("view", "View", false, Color3.fromRGB(80, 80, 90), function()
 					focusOn(conflict)

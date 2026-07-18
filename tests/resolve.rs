@@ -183,3 +183,61 @@ fn stamped_file_diffs_cleanly_against_base() {
     );
 }
 
+
+#[test]
+fn custom_resolution_applies_the_supplied_value() {
+    // The VS Code-style third option: neither ours (0.25) nor theirs (0.75),
+    // but a hand-picked value — coerced to the property's real type
+    // (Float32) and stored in the file as the entry's CustomValue attribute.
+    let mut dom = conflicted_merge();
+    let container = find_container(&dom).unwrap();
+    let entry = list_entries(&dom, container)[0].entry_ref;
+
+    rbx_diff::mark_entry_custom(&mut dom, entry, &serde_json::json!(0.5)).unwrap();
+
+    // The custom value must survive the file format like every other bit of
+    // conflict state
+    let mut buffer = Vec::new();
+    rbx_binary::to_writer(&mut buffer, &dom, dom.root().children()).unwrap();
+    let mut dom: WeakDom = rbx_binary::from_reader(buffer.as_slice()).unwrap();
+
+    let container = find_container(&dom).unwrap();
+    assert_eq!(list_entries(&dom, container)[0].resolved.as_deref(), Some("custom"));
+
+    finalize(&mut dom).unwrap();
+    assert_eq!(transparency_of(&dom, "P"), 0.5);
+    assert!(find_container(&dom).is_none());
+}
+
+#[test]
+fn custom_resolution_rejects_wrong_shapes() {
+    let mut dom = conflicted_merge();
+    let container = find_container(&dom).unwrap();
+    let entry = list_entries(&dom, container)[0].entry_ref;
+
+    // Transparency is a number; a string must be rejected with the property named
+    let err = rbx_diff::mark_entry_custom(&mut dom, entry, &serde_json::json!("nope")).unwrap_err();
+    assert!(err.to_string().contains("Transparency"), "{err}");
+
+    // Unresolved after the failed mark: finalize still refuses
+    assert!(finalize(&mut dom).is_err());
+}
+
+#[test]
+fn custom_resolution_rejects_non_property_conflicts() {
+    // delete-vs-edit conflicts have no single property to override
+    let mut base = base_dom();
+    let ours = WeakDom::new(folder("root").with_child(folder("B")));
+    let theirs = WeakDom::new(
+        folder("root")
+            .with_child(folder("A").with_child(part_with("P", 0.5)))
+            .with_child(folder("B")),
+    );
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+    stamp_conflicts(&mut base, &ours, &theirs, &result);
+
+    let container = find_container(&base).unwrap();
+    let entry = list_entries(&base, container)[0].entry_ref;
+    let err = rbx_diff::mark_entry_custom(&mut base, entry, &serde_json::json!(1.0)).unwrap_err();
+    assert!(err.to_string().contains("DeleteVsEdit"), "{err}");
+}

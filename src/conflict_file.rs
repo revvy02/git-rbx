@@ -325,6 +325,164 @@ pub fn mark_entry(dom: &mut WeakDom, entry_ref: Ref, side: &str) -> Result<()> {
     Ok(())
 }
 
+/// Mark a Property-kind entry resolved with a caller-supplied value (the
+/// "edit the result yourself" resolution). The value is stored ON the entry
+/// as the CustomValue attribute — the file stays self-contained — after
+/// being coerced to the conflicted property's real type, using the entry's
+/// Ours/Theirs clones as the type template.
+pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::Value) -> Result<()> {
+    let entries: Vec<ConflictEntry> = {
+        let Some(inst) = dom.get_by_ref(entry_ref) else {
+            bail!("conflict entry no longer exists");
+        };
+        let parent = inst.parent();
+        list_entries(dom, parent)
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.entry_ref == entry_ref)
+        .ok_or_else(|| anyhow::anyhow!("conflict entry not found"))?;
+    if entry.kind != "Property" {
+        bail!(
+            "custom resolution only applies to Property conflicts ({} is {})",
+            entry.path,
+            entry.kind
+        );
+    }
+    let prop = entry
+        .property
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{}: property conflict without Property attr", entry.path))?;
+
+    // Type template: the same property on the Ours (or Theirs) clone
+    let template = ["Ours", "Theirs"]
+        .iter()
+        .find_map(|side| {
+            let folder = child_by_name(dom, entry_ref, side)?;
+            let clone_ref = first_non_value_child(dom, folder)?;
+            let inst = dom.get_by_ref(clone_ref)?;
+            if prop == "Name" {
+                Some(Variant::String(inst.name.clone()))
+            } else {
+                inst.properties.get(&prop.into()).cloned()
+            }
+        })
+        .ok_or_else(|| anyhow::anyhow!("{}: no clone to derive the property type from", entry.path))?;
+
+    let coerced = coerce_json_to_variant(value, &template)
+        .map_err(|e| anyhow::anyhow!("{}.{}: {}", entry.path, prop, e))?;
+    if !attribute_storable(&coerced) {
+        bail!("{}.{}: this property type does not support custom resolution", entry.path, prop);
+    }
+
+    let Some(inst) = dom.get_by_ref_mut(entry_ref) else {
+        bail!("conflict entry no longer exists");
+    };
+    let mut attrs = match inst.properties.get(&"Attributes".into()) {
+        Some(Variant::Attributes(a)) => a.clone(),
+        _ => bail!("conflict entry has no attributes"),
+    };
+    attrs.insert("Resolved".to_string(), Variant::String("custom".to_string()));
+    attrs.insert("CustomValue".to_string(), coerced);
+    inst.properties.insert("Attributes".into(), Variant::Attributes(attrs));
+    Ok(())
+}
+
+/// Coerce plain JSON into the template's variant type. Untyped on the wire —
+/// the conflicted property's existing type is authoritative.
+fn coerce_json_to_variant(value: &serde_json::Value, template: &Variant) -> Result<Variant> {
+    use serde_json::Value as J;
+    let num = |v: &J| -> Result<f64> {
+        v.as_f64().ok_or_else(|| anyhow::anyhow!("expected a number, got {v}"))
+    };
+    let arr = |v: &J, n: usize| -> Result<Vec<f64>> {
+        let items = v
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("expected an array of {n} numbers, got {v}"))?;
+        if items.len() != n {
+            bail!("expected {n} numbers, got {}", items.len());
+        }
+        items.iter().map(|x| num(x)).collect()
+    };
+
+    Ok(match template {
+        Variant::String(_) => Variant::String(
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("expected a string, got {value}"))?
+                .to_string(),
+        ),
+        Variant::Bool(_) => Variant::Bool(
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("expected a bool, got {value}"))?,
+        ),
+        Variant::Float32(_) => Variant::Float32(num(value)? as f32),
+        Variant::Float64(_) => Variant::Float64(num(value)?),
+        Variant::Int32(_) => Variant::Int32(num(value)? as i32),
+        Variant::Int64(_) => Variant::Int64(num(value)? as i64),
+        Variant::Color3(_) => {
+            let c = arr(value, 3)?;
+            Variant::Color3(rbx_types::Color3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+        }
+        Variant::Vector3(_) => {
+            let v = arr(value, 3)?;
+            Variant::Vector3(rbx_types::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32))
+        }
+        Variant::Vector2(_) => {
+            let v = arr(value, 2)?;
+            Variant::Vector2(rbx_types::Vector2::new(v[0] as f32, v[1] as f32))
+        }
+        Variant::CFrame(_) => {
+            let c = arr(value, 12)?;
+            let f = |i: usize| c[i] as f32;
+            Variant::CFrame(rbx_types::CFrame::new(
+                rbx_types::Vector3::new(f(0), f(1), f(2)),
+                rbx_types::Matrix3::new(
+                    rbx_types::Vector3::new(f(3), f(4), f(5)),
+                    rbx_types::Vector3::new(f(6), f(7), f(8)),
+                    rbx_types::Vector3::new(f(9), f(10), f(11)),
+                ),
+            ))
+        }
+        Variant::UDim(_) => {
+            let u = arr(value, 2)?;
+            Variant::UDim(rbx_types::UDim::new(u[0] as f32, u[1] as i32))
+        }
+        Variant::UDim2(_) => {
+            let u = arr(value, 4)?;
+            Variant::UDim2(rbx_types::UDim2::new(
+                rbx_types::UDim::new(u[0] as f32, u[1] as i32),
+                rbx_types::UDim::new(u[2] as f32, u[3] as i32),
+            ))
+        }
+        other => bail!(
+            "custom resolution is not supported for {:?}-typed properties",
+            other.ty()
+        ),
+    })
+}
+
+/// Attribute-storable check: CustomValue must survive the file round-trip as
+/// an attribute (mirrors the supported set of coerce_json_to_variant).
+fn attribute_storable(value: &Variant) -> bool {
+    matches!(
+        value,
+        Variant::String(_)
+            | Variant::Bool(_)
+            | Variant::Float32(_)
+            | Variant::Float64(_)
+            | Variant::Int32(_)
+            | Variant::Int64(_)
+            | Variant::Color3(_)
+            | Variant::Vector3(_)
+            | Variant::Vector2(_)
+            | Variant::CFrame(_)
+            | Variant::UDim(_)
+            | Variant::UDim2(_)
+    )
+}
+
 /// Apply every entry's resolution, strip the container and tags, and leave a
 /// clean DOM. Errors if any entry is unresolved.
 pub fn finalize(dom: &mut WeakDom) -> Result<usize> {
@@ -360,6 +518,55 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
     untag_instance(dom, target, CONFLICT_TAG);
 
     match entry.kind.as_str() {
+        "Property" if side == "custom" => {
+            let prop = entry
+                .property
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("{}: property conflict without Property attr", entry.path))?;
+            let custom = dom
+                .get_by_ref(entry.entry_ref)
+                .and_then(|inst| match inst.properties.get(&"Attributes".into()) {
+                    Some(Variant::Attributes(a)) => a.get("CustomValue").cloned(),
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("{}: resolved custom but no CustomValue stored", entry.path))?;
+            // Attributes round-trip strings as BinaryString and integers as
+            // f64; re-coerce against the clone-derived template on the way out
+            let template = ["Ours", "Theirs"]
+                .iter()
+                .find_map(|s| {
+                    let folder = child_by_name(dom, entry.entry_ref, s)?;
+                    let clone_ref = first_non_value_child(dom, folder)?;
+                    let inst = dom.get_by_ref(clone_ref)?;
+                    if prop == "Name" {
+                        Some(Variant::String(inst.name.clone()))
+                    } else {
+                        inst.properties.get(&prop.into()).cloned()
+                    }
+                });
+            let value = match (&custom, &template) {
+                (Variant::BinaryString(b), Some(Variant::String(_))) => Variant::String(
+                    String::from_utf8(b.clone().into_vec())
+                        .map_err(|_| anyhow::anyhow!("{}: CustomValue is not UTF-8", entry.path))?,
+                ),
+                (Variant::Float64(n), Some(Variant::Float32(_))) => Variant::Float32(*n as f32),
+                (Variant::Float64(n), Some(Variant::Int32(_))) => Variant::Int32(*n as i32),
+                (Variant::Float64(n), Some(Variant::Int64(_))) => Variant::Int64(*n as i64),
+                _ => custom,
+            };
+
+            if prop == "Name" {
+                let name = match value {
+                    Variant::String(s) => s,
+                    other => bail!("{}: custom Name must be a string, got {:?}", entry.path, other.ty()),
+                };
+                if let Some(inst) = dom.get_by_ref_mut(target) {
+                    inst.name = name;
+                }
+            } else if let Some(inst) = dom.get_by_ref_mut(target) {
+                inst.properties.insert(prop.into(), value);
+            }
+        }
         "Property" => {
             let prop = entry
                 .property

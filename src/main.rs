@@ -11,8 +11,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    diff_doms_with_config, finalize, find_container, list_entries, mark_entry, merge_doms,
-    stamp_conflicts, ConflictKind, DiffConfig, CONTAINER_NAME,
+    diff_doms_with_config, finalize, find_container, list_entries, mark_entry, mark_entry_custom,
+    merge_doms, stamp_conflicts, ConflictKind, DiffConfig, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -80,9 +80,16 @@ enum Command {
         #[arg(long)]
         list: bool,
 
-        /// Resolve toward this side: ours | theirs
+        /// Resolve toward this side: ours | theirs | custom (custom requires
+        /// --entry and --value)
         #[arg(long, value_name = "SIDE")]
         take: Option<String>,
+
+        /// Custom resolution value as plain JSON (number, string, bool, or
+        /// array — coerced to the conflicted property's type), with
+        /// --take custom
+        #[arg(long)]
+        value: Option<String>,
 
         /// Base path of the conflict(s) to resolve (with --take).
         /// May match several entries (e.g. two properties on one instance)
@@ -124,8 +131,8 @@ fn main() -> Result<()> {
         Command::Merge { base, ours, theirs, output, ignore_property } => {
             cmd_merge(&base, &ours, &theirs, output.as_deref(), &ignore_property)
         }
-        Command::Resolve { file, list, take, path, entry, all, finalize } => {
-            cmd_resolve(&file, list, take.as_deref(), path.as_deref(), entry.as_deref(), all, finalize)
+        Command::Resolve { file, list, take, value, path, entry, all, finalize } => {
+            cmd_resolve(&file, list, take.as_deref(), value.as_deref(), path.as_deref(), entry.as_deref(), all, finalize)
         }
         Command::Check { file } => cmd_check(&file),
     }
@@ -255,6 +262,7 @@ fn cmd_resolve(
     file: &str,
     list: bool,
     take: Option<&str>,
+    value: Option<&str>,
     path: Option<&str>,
     entry_name: Option<&str>,
     all: bool,
@@ -275,6 +283,23 @@ fn cmd_resolve(
                 .unwrap_or_default();
             println!("[{state}] {} {} — {}{}", entry.name, entry.path, entry.kind, detail);
         }
+        return Ok(());
+    }
+
+    if take == Some("custom") {
+        let entry_name = entry_name
+            .ok_or_else(|| anyhow::anyhow!("--take custom requires --entry <name>"))?;
+        let value = value
+            .ok_or_else(|| anyhow::anyhow!("--take custom requires --value <json>"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(value).with_context(|| format!("parsing --value {value}"))?;
+        let entry = list_entries(&dom, container)
+            .into_iter()
+            .find(|e| e.name == entry_name)
+            .ok_or_else(|| anyhow::anyhow!("no conflict entry named {entry_name}"))?;
+        mark_entry_custom(&mut dom, entry.entry_ref, &parsed)?;
+        save_file(file, &dom)?;
+        eprintln!("Marked {entry_name} as custom");
         return Ok(());
     }
 
