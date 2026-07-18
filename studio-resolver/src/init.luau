@@ -433,7 +433,7 @@ local function updateHighlights()
 		local color = statusColor(conflict)
 		highlight.OutlineColor = color
 		highlight.FillColor = color
-		highlight.FillTransparency = 0.85
+		highlight.FillTransparency = 1 -- outline only
 	end
 end
 
