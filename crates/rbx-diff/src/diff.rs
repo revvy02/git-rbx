@@ -288,6 +288,9 @@ fn diff_pass(
             continue;
         }
         if let Some(inst) = old_dom.get_by_ref(*removed_ref) {
+            if is_studio_artifact(old_dom, old_ref, inst) {
+                continue;
+            }
             diffs.push(DiffEntry::Removed {
                 old_ref: format!("{}", *removed_ref),
                 path: get_instance_path(old_dom, *removed_ref),
@@ -302,6 +305,9 @@ fn diff_pass(
             continue;
         }
         if let Some(inst) = new_dom.get_by_ref(*added_ref) {
+            if is_studio_artifact(new_dom, new_ref, inst) {
+                continue;
+            }
             diffs.push(DiffEntry::Added {
                 new_ref: format!("{}", *added_ref),
                 path: get_instance_path(new_dom, *added_ref),
@@ -425,6 +431,10 @@ fn diff_properties(
                 if is_default_value(defaults, name, new_value) {
                     continue;
                 }
+                // A nil Ref on one side only is semantically "unset" — not a change
+                if matches!(new_value, Variant::Ref(r) if r.is_none()) {
+                    continue;
+                }
                 changes.push(PropertyChange {
                     name: name.to_string(),
                     old_value: None,
@@ -447,6 +457,10 @@ fn diff_properties(
             if is_default_value(defaults, name, old_value) {
                 continue;
             }
+            // A nil Ref on one side only is semantically "unset" — not a change
+            if matches!(old_value, Variant::Ref(r) if r.is_none()) {
+                continue;
+            }
             changes.push(PropertyChange {
                 name: name.to_string(),
                 old_value: Some(variant_to_property_value(old_value)),
@@ -462,6 +476,18 @@ fn diff_properties(
 /// Uses the shared comparable properties set from hash.rs.
 fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
     get_comparable_properties(class_name).contains(prop_name)
+}
+
+/// Studio serializes every service under the DataModel root on save, plus
+/// internals like FilteredSelection. When comparing place files (root is a
+/// DataModel), additions/removals directly at the root are serialization
+/// noise, not changes. Never applies to model diffs (non-DataModel root).
+fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, _inst: &rbx_dom_weak::Instance) -> bool {
+    let parent = match dom.get_by_ref(parent_ref) {
+        Some(p) => p,
+        None => return false,
+    };
+    parent_ref == dom.root_ref() && parent.class.as_str() == "DataModel"
 }
 
 /// Check if a value matches the reflection database default for this property.
@@ -506,13 +532,37 @@ fn variants_equal(
             (x.x - y.x).abs() < 0.01 && (x.y - y.y).abs() < 0.01 && (x.z - y.z).abs() < 0.01
         }
         (Variant::CFrame(x), Variant::CFrame(y)) => {
-            let pos_eq = (x.position.x - y.position.x).abs() < 0.01
-                && (x.position.y - y.position.y).abs() < 0.01
-                && (x.position.z - y.position.z).abs() < 0.01;
-            pos_eq // Simplified - full rotation comparison is complex
+            // Compare all components (position + rotation matrix), like rojo's
+            // trueEquals — position-only comparison silently drops pure rotations
+            let vec_eq = |a: rbx_types::Vector3, b: rbx_types::Vector3| {
+                (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01 && (a.z - b.z).abs() < 0.01
+            };
+            vec_eq(x.position, y.position)
+                && vec_eq(x.orientation.x, y.orientation.x)
+                && vec_eq(x.orientation.y, y.orientation.y)
+                && vec_eq(x.orientation.z, y.orientation.z)
         }
         (Variant::Ref(old_target), Variant::Ref(new_target)) => {
             refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping, old_deep, new_deep)
+        }
+        // Asset URIs: Studio rewrites URL spellings on save (roblox.com/asset/?id=N
+        // vs rbxassetid://N) — compare normalized so the same asset is equal
+        (Variant::Content(a), Variant::Content(b)) => {
+            use crate::hash::normalize_asset_uri;
+            use rbx_types::ContentType;
+            match (a.value(), b.value()) {
+                (ContentType::None, ContentType::None) => true,
+                (ContentType::Uri(ua), ContentType::Uri(ub)) => {
+                    normalize_asset_uri(ua) == normalize_asset_uri(ub)
+                }
+                // Object refs into the DOM: treat as equal (rare; ref identity
+                // is covered by the instances themselves)
+                (ContentType::Object(_), ContentType::Object(_)) => true,
+                _ => false,
+            }
+        }
+        (Variant::ContentId(a), Variant::ContentId(b)) => {
+            crate::hash::normalize_asset_uri(a.as_str()) == crate::hash::normalize_asset_uri(b.as_str())
         }
         (Variant::UniqueId(_), Variant::UniqueId(_)) => true, // Skip uniqueid
         _ => a == b,

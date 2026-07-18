@@ -35,6 +35,34 @@ fn vector_hash(hasher: &mut Hasher, vector: Vector3) {
     n_hash!(hasher, round!(vector.x), round!(vector.y), round!(vector.z))
 }
 
+/// Normalize a Roblox asset URI to a canonical form so different spellings of
+/// the same asset compare equal — Studio rewrites e.g.
+/// `http://www.roblox.com/asset/?id=123` to `rbxassetid://123` on save.
+pub(crate) fn normalize_asset_uri(uri: &str) -> String {
+    let s = uri.trim();
+    let lower = s.to_ascii_lowercase();
+
+    let digits_at = |start: usize| -> String {
+        s[start..].chars().take_while(|c| c.is_ascii_digit()).collect()
+    };
+
+    if let Some(pos) = lower.find("roblox.com/asset") {
+        if let Some(id_pos) = lower[pos..].find("id=") {
+            let digits = digits_at(pos + id_pos + 3);
+            if !digits.is_empty() {
+                return format!("rbxassetid://{digits}");
+            }
+        }
+    }
+    if let Some(rest_pos) = lower.strip_prefix("rbxassetid://").map(|_| "rbxassetid://".len()) {
+        let digits = digits_at(rest_pos);
+        if !digits.is_empty() {
+            return format!("rbxassetid://{digits}");
+        }
+    }
+    s.to_string()
+}
+
 /// Lazy shallow hash cache - computes hashes on demand.
 /// Provides two hash variants for multi-pass matching:
 /// - `get()`: Full hash (all properties including Refs)
@@ -241,7 +269,22 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
                 n_hash!(hasher, round!(kp.time), round!(kp.color.r), round!(kp.color.g), round!(kp.color.b));
             }
         }
-        Variant::Content(_) => { hasher.update(&[0x01]); }
+        Variant::Content(content) => {
+            use rbx_types::ContentType;
+            match content.value() {
+                ContentType::None => { hasher.update(&[0x00]); }
+                ContentType::Uri(uri) => {
+                    hasher.update(&[0x01]);
+                    hasher.update(normalize_asset_uri(uri).as_bytes());
+                }
+                // Object refs point at DOM instances; skip like Variant::Ref
+                ContentType::Object(_) => { hasher.update(&[0x02]); }
+                _ => { hasher.update(&[0x03]); }
+            }
+        }
+        Variant::ContentId(id) => {
+            hasher.update(normalize_asset_uri(id.as_str()).as_bytes());
+        }
         Variant::Enum(e) => { n_hash!(hasher, e.to_u32()); }
         Variant::Faces(f) => { hasher.update(&[f.bits()]); }
         Variant::Float32(n) => { n_hash!(hasher, round!(*n)); }
@@ -376,6 +419,17 @@ pub fn get_comparable_properties(class_name: &str) -> &'static HashSet<String> {
     unsafe { &*ptr }
 }
 
+/// Serialized-but-not-scriptable properties that carry real user content.
+/// The scriptability filter below would drop these, making the diff blind to
+/// CSG edits, terrain sculpting, and collision group changes. Derived/volatile
+/// None-scriptability props (PhysicsData, UnscaledVolume, UniqueId, ...) stay
+/// excluded — extend this list for new cases rather than widening the filter.
+const CONTENT_PROPERTY_EXCEPTIONS: &[(&str, &[&str])] = &[
+    ("PartOperation", &["MeshData", "MeshData2", "ChildData", "ChildData2", "AssetId"]),
+    ("Terrain", &["SmoothGrid", "Decoration"]),
+    ("Workspace", &["CollisionGroupData"]),
+];
+
 fn build_comparable_properties(class_name: &str) -> HashSet<String> {
     let database = rbx_reflection_database::get().unwrap();
     let mut result = HashSet::new();
@@ -388,8 +442,18 @@ fn build_comparable_properties(class_name: &str) -> HashSet<String> {
             None => break,
         };
 
+        for (class, props) in CONTENT_PROPERTY_EXCEPTIONS {
+            if *class == current_class {
+                for prop in *props {
+                    result.insert((*prop).to_string());
+                }
+            }
+        }
+
         for (prop_name, prop_data) in &class_data.properties {
-            if matches!(prop_data.scriptability, Scriptability::None) {
+            // Skip non-scriptable and read-only properties: users can't set them
+            // and a merge can't apply them (e.g. UnionOperation.TriangleCount)
+            if matches!(prop_data.scriptability, Scriptability::None | Scriptability::Read) {
                 continue;
             }
             let dominated = match &prop_data.kind {
