@@ -45,6 +45,9 @@ local StyleLink = require("@self/wind/StyleLink")
 local StyleSheet = require("@self/wind/StyleSheet")
 local WindRules = require("@self/wind/WindRules")
 
+local getBoundingBox = require("@self/viewport/getBoundingBox")
+local getIdealCameraCFrame = require("@self/viewport/getIdealCameraCFrame")
+
 local CONTAINER_NAME = "__RbxDiffMerge"
 
 local UNRESOLVED_COLOR = Color3.fromRGB(255, 170, 0)
@@ -238,9 +241,16 @@ local function complete()
 	end)
 end
 
+-- Frame the whole target in view — fitted distance from its bounding box and
+-- the live camera FOV/aspect (vendored miu-viewport math), not a fixed offset
+-- that lands inside or behind geometry depending on target size.
 local function focusOn(conflict: Conflict)
-	local pivot = (conflict.target :: PVInstance):GetPivot()
-	workspace.CurrentCamera.CFrame = CFrame.lookAt(pivot.Position + Vector3.new(12, 8, 12), pivot.Position)
+	local camera = workspace.CurrentCamera
+	local cframe, size = getBoundingBox(conflict.target :: PVInstance)
+	camera.CFrame = getIdealCameraCFrame(cframe, size, {
+		fov = camera.FieldOfView,
+		aspectRatio = camera.ViewportSize.X / camera.ViewportSize.Y,
+	})
 end
 
 -- ============================================================================
@@ -420,34 +430,10 @@ local function Panel()
 	end)
 end
 
--- ============================================================================
--- Frame loop; the run stays alive until finalized
--- ============================================================================
-
--- Self-terminating render loop. Two death signals: this run's runtime entry
--- vanishing from _G.__rodeo_procs (the run ended or was killed — the UI
--- would otherwise linger looking alive while every process.run parks
--- forever on a dead bridge), or the panel being destroyed by a newer
--- session's boot cleanup. Either way: tear the UI down and stop rendering.
-local myEid = _G.__rodeo_eid :: string
-local screenGui: Instance? = nil
-local connection
-local function teardown()
-	connection:Disconnect()
-	if screenGui then
-		screenGui:Destroy()
-		screenGui = nil
-	end
-	finished = true
-end
-connection = RunService.Heartbeat:Connect(function()
-	if _G.__rodeo_procs[myEid] == nil or (screenGui and screenGui.Parent == nil) then
-		teardown()
-		return
-	end
+RunService.Heartbeat:Connect(function()
 	updateHighlights()
 	Portal(CoreGui, "rbx-diff-resolver", function()
-		local guiNode = Element("ScreenGui", {
+		Element("ScreenGui", {
 			id = "gui",
 			Name = "RbxDiffResolver",
 			ResetOnSpawn = false,
@@ -462,7 +448,6 @@ connection = RunService.Heartbeat:Connect(function()
 			end))
 			Panel()
 		end)
-		screenGui = (guiNode :: any).instance
 	end)
 end)
 
@@ -477,15 +462,6 @@ end
 
 while not finished do
 	task.wait(0.25)
-end
-task.wait(2) -- let the success state render briefly
-
-connection:Disconnect()
-if screenGui then
-	screenGui:Destroy()
-end
-for _, highlight in liveHighlights do
-	highlight:Destroy()
 end
 
 return `finalized {#conflicts} conflict(s) — {mergedFile} is clean`
