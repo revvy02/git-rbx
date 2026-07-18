@@ -1,9 +1,12 @@
 --[[
 	rbx-diff studio resolver — visual front end over the in-file conflict state.
 
-	Run against a Studio that has the conflicted place open:
+	Run against the conflicted file (places open directly; models import
+	into a preview folder). The run owns the Studio it spawns, so Studio
+	closes itself when the session completes — pass --detach to keep it open:
 
-	  rodeo run --place ./merged.rbxl --focus --detach src -- ./merged.rbxl
+	  rodeo run --place ./merged.rbxl --focus src -- ./merged.rbxl
+	  rodeo run --place --focus src -- ./merged.rbxm
 
 	Discovery is entirely in-DOM (the __RbxDiffMerge container + RbxDiffConflict
 	tags that `rbx-diff merge` stamped). Decisions are STAGED in the session —
