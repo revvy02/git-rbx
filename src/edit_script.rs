@@ -263,13 +263,26 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
 /// into (a DOM diff-equal to) the new DOM. `new_dom` supplies subtree payloads
 /// for AddSubtree ops.
 pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditScript) {
+    apply_ops(target, new_dom, &script.ops, &script.matched);
+}
+
+/// Apply a subset of ops (all computed against `target`'s original state, with
+/// payloads/anchors in `source_dom` terms). Used directly by the merge
+/// combiner to apply each branch's surviving ops from its own source DOM.
+pub(crate) fn apply_ops(
+    target: &mut WeakDom,
+    source_dom: &WeakDom,
+    ops: &[EditOp],
+    matched: &HashMap<Ref, Ref>,
+) {
+    let new_dom = source_dom;
     // new_ref → target ref, for every instance apply creates
     let mut created: HashMap<Ref, Ref> = HashMap::new();
     // new_ref → old (target) ref for matched instances
-    let reverse: HashMap<Ref, Ref> = script.matched.iter().map(|(o, n)| (*n, *o)).collect();
+    let reverse: HashMap<Ref, Ref> = matched.iter().map(|(o, n)| (*n, *o)).collect();
 
     // 1. Adds — clone subtrees out of the new DOM
-    for op in &script.ops {
+    for op in ops {
         if let EditOp::AddSubtree { parent, new_ref } = op {
             let parent_ref = resolve_anchor(*parent, &created);
             let builder = build_subtree(new_dom, *new_ref);
@@ -279,21 +292,21 @@ pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditS
     }
 
     // 2. Moves — emitted in new-side depth order by the builder
-    for op in &script.ops {
+    for op in ops {
         if let EditOp::Move { old_ref, new_parent } = op {
             target.transfer_within(*old_ref, resolve_anchor(*new_parent, &created));
         }
     }
 
     // 3. Removes
-    for op in &script.ops {
+    for op in ops {
         if let EditOp::RemoveSubtree { old_ref } = op {
             target.destroy(*old_ref);
         }
     }
 
     // 4. Names and properties
-    for op in &script.ops {
+    for op in ops {
         match op {
             EditOp::SetName { old_ref, name } => {
                 if let Some(inst) = target.get_by_ref_mut(*old_ref) {

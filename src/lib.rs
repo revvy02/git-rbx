@@ -4,12 +4,14 @@ mod diff;
 mod edit_script;
 mod hash;
 mod match_instances;
+mod merge;
 mod move_detect;
 pub mod output;
 
 pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use edit_script::{apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript};
+pub use merge::{merge_doms, ConflictKind, MergeConflict, MergeResult, MergeStats};
 
 use rbx_dom_weak::WeakDom;
 
