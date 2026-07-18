@@ -49,12 +49,7 @@ parser:option("--auto", "Debug: stage every conflict to this side and Complete i
 
 -- pparse: argparse's error path calls process.exit, which suspends the run
 -- under rodeo's lune adapter — fail with a readable return instead
-local parseOk, args = parser:pparse(process.args)
-if not parseOk then
-	warn(`{args}`)
-	return parser:get_usage()
-end
-
+local args = parser:parse(process.args)
 local mergedFile = args.file
 local rbxDiffBin = args.rbxDiffBin
 
@@ -74,6 +69,25 @@ type Conflict = {
 }
 
 local container = game:FindFirstChild(CONTAINER_NAME, true)
+
+-- Model files can't be opened as a place: import the conflicted rbxm into a
+-- preview folder in Workspace instead. The disk file stays authoritative
+-- exactly as with places — the import is only ever eyes and highlights.
+if not container and mergedFile:match("%.rbxmx?$") then
+	local roblox = require("@rodeo/roblox")
+	local stalePreview = workspace:FindFirstChild("RbxDiffModelPreview")
+	if stalePreview then
+		stalePreview:Destroy()
+	end
+	local preview = Instance.new("Folder")
+	preview.Name = "RbxDiffModelPreview"
+	for _, root in roblox.import(mergedFile) do
+		root.Parent = preview
+	end
+	preview.Parent = workspace
+	container = game:FindFirstChild(CONTAINER_NAME, true)
+end
+
 if not container then
 	warn(`no {CONTAINER_NAME} container in this place — nothing to resolve`)
 	return "no-conflicts"
@@ -206,16 +220,25 @@ local function complete()
 					return
 				end
 				args = {
-					rbxDiffBin, "resolve", mergedFile,
-					"--take", "custom",
-					"--entry", conflict.name,
-					"--value", HttpService:JSONEncode(encoded),
+					rbxDiffBin,
+					"resolve",
+					mergedFile,
+					"--take",
+					"custom",
+					"--entry",
+					conflict.name,
+					"--value",
+					HttpService:JSONEncode(encoded),
 				}
 			else
 				args = {
-					rbxDiffBin, "resolve", mergedFile,
-					"--take", conflict.resolved :: string,
-					"--entry", conflict.name,
+					rbxDiffBin,
+					"resolve",
+					mergedFile,
+					"--take",
+					conflict.resolved :: string,
+					"--entry",
+					conflict.name,
 				}
 			end
 			local result = process.run(args)
@@ -259,9 +282,7 @@ local liveHighlights: { [string]: Highlight } = {}
 local function updateHighlights()
 	for _, conflict in conflicts do
 		local target = conflict.target
-		local spatial = target ~= nil
-			and target:IsDescendantOf(workspace)
-			and target:IsA("PVInstance")
+		local spatial = target ~= nil and target:IsDescendantOf(workspace) and target:IsA("PVInstance")
 		if not spatial or finished then
 			local existing = liveHighlights[conflict.name]
 			if existing then
@@ -344,8 +365,7 @@ local function ConflictRow(conflict: Conflict)
 
 		Label("path", conflict.path, statusColor(conflict))
 
-		local detail = conflict.kind
-			.. (if conflict.property then ` ({conflict.property})` else "")
+		local detail = conflict.kind .. (if conflict.property then ` ({conflict.property})` else "")
 		Element("TextLabel", {
 			id = "detail",
 			Text = detail,
@@ -475,9 +495,7 @@ local function Panel()
 				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 				else "Complete",
 			Size = UDim2.new(1, 0, 0, 30),
-			BackgroundColor3 = if canComplete
-				then Color3.fromRGB(60, 160, 90)
-				else Color3.fromRGB(55, 55, 60),
+			BackgroundColor3 = if canComplete then Color3.fromRGB(60, 160, 90) else Color3.fromRGB(55, 55, 60),
 			TextColor3 = Color3.fromRGB(240, 240, 240),
 			TextSize = 14,
 			Font = Enum.Font.GothamMedium,
