@@ -3,10 +3,10 @@
 	requires so rodeo's darklua bundling can resolve it — the pesde shims use
 	instance-path requires that don't survive single-file bundling.
 ]]
-local Context = require("./Context")
-local Instance = require("./Instance")
-local Portal = require("./Portal")
-local scope = require("./scope")
+local Context = require("@self/Context")
+local Instance = require("@self/Instance")
+local Portal = require("@self/Portal")
+local scope = require("@self/scope")
 
 export type MiuNode<T = {}> = scope.MiuNode<T>
 
