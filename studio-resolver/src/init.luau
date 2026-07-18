@@ -243,7 +243,9 @@ end
 
 -- Frame the whole target in view — fitted distance from its bounding box and
 -- the live camera FOV/aspect (vendored miu-viewport math), not a fixed offset
--- that lands inside or behind geometry depending on target size.
+-- that lands inside or behind geometry depending on target size. Focus is the
+-- edit camera's orbit pivot: it must be written together with the CFrame, or
+-- Studio keeps steering around the stale pivot and the view drifts off target.
 local function focusOn(conflict: Conflict)
 	local camera = workspace.CurrentCamera
 	local cframe, size = getBoundingBox(conflict.target :: PVInstance)
@@ -251,6 +253,7 @@ local function focusOn(conflict: Conflict)
 		fov = camera.FieldOfView,
 		aspectRatio = camera.ViewportSize.X / camera.ViewportSize.Y,
 	})
+	camera.Focus = cframe
 end
 
 -- ============================================================================
