@@ -294,8 +294,8 @@ fn merge_scripts(
     stats.ours_applied = ours_survivors.len();
     stats.theirs_applied = theirs_survivors.len();
 
-    apply_ops(base, ours_dom, &ours_survivors, &ours.matched);
-    apply_ops(base, theirs_dom, &theirs_survivors, &theirs.matched);
+    apply_ops(base, ours_dom, &ours_survivors, &ours.matched, &ours.moved_destinations);
+    apply_ops(base, theirs_dom, &theirs_survivors, &theirs.matched, &theirs.moved_destinations);
 
     info!(
         ours_applied = stats.ours_applied,

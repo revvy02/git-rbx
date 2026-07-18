@@ -56,6 +56,10 @@ pub struct EditScript {
     /// Identity mapping (old_ref → new_ref) for every matched instance,
     /// including moved pairs and instances inside unchanged subtrees.
     pub matched: HashMap<Ref, Ref>,
+    /// New-DOM refs that are Move destinations. A destination can sit inside
+    /// an added subtree (moved into a new group); cloning that subtree must
+    /// skip these positions — the Move op supplies the real instance.
+    pub moved_destinations: HashSet<Ref>,
 }
 
 /// Compute the edit script transforming `old_dom` into `new_dom`.
@@ -129,7 +133,7 @@ pub fn compute_edit_script(old_dom: &WeakDom, new_dom: &WeakDom, config: &DiffCo
     }
 
     info!(ops = ops.len(), matched = matched.len(), "edit script built");
-    EditScript { ops, matched }
+    EditScript { ops, matched, moved_destinations: moved_new }
 }
 
 struct BuildCtx<'a> {
@@ -263,7 +267,7 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
 /// into (a DOM diff-equal to) the new DOM. `new_dom` supplies subtree payloads
 /// for AddSubtree ops.
 pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditScript) {
-    apply_ops(target, new_dom, &script.ops, &script.matched);
+    apply_ops(target, new_dom, &script.ops, &script.matched, &script.moved_destinations);
 }
 
 /// Apply a subset of ops (all computed against `target`'s original state, with
@@ -274,6 +278,7 @@ pub(crate) fn apply_ops(
     source_dom: &WeakDom,
     ops: &[EditOp],
     matched: &HashMap<Ref, Ref>,
+    moved_destinations: &HashSet<Ref>,
 ) {
     let new_dom = source_dom;
     // new_ref → target ref, for every instance apply creates
@@ -285,9 +290,9 @@ pub(crate) fn apply_ops(
     for op in ops {
         if let EditOp::AddSubtree { parent, new_ref } = op {
             let parent_ref = resolve_anchor(*parent, &created);
-            let builder = build_subtree(new_dom, *new_ref);
+            let builder = build_subtree(new_dom, *new_ref, moved_destinations);
             let created_root = target.insert(parent_ref, builder);
-            record_created(new_dom, *new_ref, target, created_root, &mut created);
+            record_created(new_dom, *new_ref, target, created_root, moved_destinations, &mut created);
         }
     }
 
@@ -378,7 +383,9 @@ fn remap_ref_value(value: Variant, reverse: &HashMap<Ref, Ref>, created: &HashMa
 
 /// Recursively clone a new-DOM subtree into an InstanceBuilder (full fidelity —
 /// every property verbatim, no comparability filtering; this is a copy).
-fn build_subtree(new_dom: &WeakDom, referent: Ref) -> InstanceBuilder {
+/// Move destinations are skipped: their content is an existing instance the
+/// Move op relocates here, not new content to duplicate.
+fn build_subtree(new_dom: &WeakDom, referent: Ref, moved_destinations: &HashSet<Ref>) -> InstanceBuilder {
     let inst = new_dom.get_by_ref(referent).unwrap();
     let mut builder = InstanceBuilder::new(inst.class.as_str()).with_name(inst.name.as_str());
     for (name, value) in &inst.properties {
@@ -387,25 +394,34 @@ fn build_subtree(new_dom: &WeakDom, referent: Ref) -> InstanceBuilder {
     let children: Vec<InstanceBuilder> = inst
         .children()
         .iter()
-        .map(|&child| build_subtree(new_dom, child))
+        .filter(|child| !moved_destinations.contains(child))
+        .map(|&child| build_subtree(new_dom, child, moved_destinations))
         .collect();
     builder.with_children(children)
 }
 
 /// Walk the source subtree and the freshly created target subtree in parallel,
 /// recording new_ref → created_ref for every instance. Children were built in
-/// source order, so positional pairing is exact.
+/// source order minus skipped move destinations, so pairing filters the same
+/// refs to stay positional.
 fn record_created(
     new_dom: &WeakDom,
     new_ref: Ref,
     target: &WeakDom,
     created_ref: Ref,
+    moved_destinations: &HashSet<Ref>,
     created: &mut HashMap<Ref, Ref>,
 ) {
     created.insert(new_ref, created_ref);
-    let source_children = new_dom.get_by_ref(new_ref).unwrap().children();
-    let target_children = target.get_by_ref(created_ref).unwrap().children().to_vec();
-    for (source_child, target_child) in source_children.iter().zip(target_children) {
-        record_created(new_dom, *source_child, target, target_child, created);
+    let source_children = new_dom
+        .get_by_ref(new_ref)
+        .unwrap()
+        .children()
+        .iter()
+        .copied()
+        .filter(|c| !moved_destinations.contains(c));
+    let target_children = target.get_by_ref(created_ref).unwrap().children().iter().copied();
+    for (source_child, target_child) in source_children.zip(target_children) {
+        record_created(new_dom, source_child, target, target_child, moved_destinations, created);
     }
 }

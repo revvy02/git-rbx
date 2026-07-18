@@ -96,8 +96,6 @@ fn round_trip_move_into_added_subtree() {
             .with_child(folder("A"))
             .with_child(folder("NewParent").with_child(part("P"))),
     );
-    // Note: today P-into-NewParent may pair as a move OR fall out as
-    // remove+add depending on similarity — either applies correctly.
     assert_round_trip(old, new);
 }
 
@@ -241,4 +239,44 @@ fn round_trip_full_place() {
         "tests-new/fixtures/rc_manually_saved_build.rbxl",
         "tests-new/models-moved/rc_build_saved_manually_with_1_tree_moved.rbxl",
     );
+}
+
+#[test]
+fn round_trip_group_dupes_into_new_container() {
+    // Multiple same-named instances gathered under a new container: the
+    // clone of the added container must not duplicate the moved-in content.
+    let dup = |t: f32| {
+        InstanceBuilder::new("Part")
+            .with_name("P")
+            .with_property("Anchored", Variant::Bool(true))
+            .with_property("Transparency", Variant::Float32(t))
+    };
+    let old = WeakDom::new(
+        folder("root").with_child(folder("A").with_child(dup(0.1)).with_child(dup(0.2))),
+    );
+    let new = WeakDom::new(
+        folder("root").with_child(
+            folder("A").with_child(folder("Group").with_child(dup(0.1)).with_child(dup(0.2))),
+        ),
+    );
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+    let move_ops = script.ops.iter().filter(|op| matches!(op, EditOp::Move { .. })).count();
+    let removes = script.ops.iter().filter(|op| matches!(op, EditOp::RemoveSubtree { .. })).count();
+    assert_eq!(move_ops, 2, "{:?}", script.ops);
+    assert_eq!(removes, 0, "{:?}", script.ops);
+
+    assert_round_trip(old, new);
+}
+
+#[test]
+fn round_trip_move_out_of_removed_folder() {
+    let old = WeakDom::new(
+        folder("root")
+            .with_child(folder("Doomed").with_child(part("Keep")).with_child(folder("Junk")))
+            .with_child(folder("B")),
+    );
+    let new = WeakDom::new(
+        folder("root").with_child(folder("B").with_child(part("Keep"))),
+    );
+    assert_round_trip(old, new);
 }

@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use crate::edit_script::{Anchor, EditOp};
 use crate::match_instances::get_instance_path;
-use crate::merge::{ConflictKind, MergeConflict, MergeResult};
+use crate::merge::{ConflictKind, MergeResult};
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
 pub const CONFLICT_TAG: &str = "RbxDiffConflict";

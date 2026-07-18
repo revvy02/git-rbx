@@ -193,3 +193,64 @@ fn plain_add_and_remove_still_work() {
     assert_eq!(modified, 0);
     assert_eq!(moved, 0);
 }
+
+#[test]
+fn move_into_added_group_is_detected() {
+    // The group_workspace_dupes pattern: existing instances get gathered
+    // under a brand-new container. The container is added; the contents are
+    // moves, not remove+add pairs.
+    let old = WeakDom::new(
+        folder("root").with_child(
+            folder("A")
+                .with_child(part_with_color("P", 0.1))
+                .with_child(part_with_color("P", 0.2)),
+        ),
+    );
+    let new = WeakDom::new(
+        folder("root").with_child(
+            folder("A").with_child(
+                folder("Group")
+                    .with_child(part_with_color("P", 0.1))
+                    .with_child(part_with_color("P", 0.2)),
+            ),
+        ),
+    );
+
+    let diffs = diff_doms(&old, &new);
+    let (added, removed, modified, moved) = summarize(&diffs);
+    assert_eq!(moved, 2, "both parts should move into the group: {diffs:?}");
+    assert_eq!(added, 1, "only the group itself is new: {diffs:?}");
+    assert_eq!(removed, 0, "{diffs:?}");
+    assert_eq!(modified, 0, "{diffs:?}");
+}
+
+#[test]
+fn move_out_of_removed_folder_is_detected() {
+    // A folder is deleted but one of its children was rescued elsewhere.
+    let old = WeakDom::new(
+        folder("root")
+            .with_child(
+                folder("Doomed")
+                    .with_child(part_with_color("Keep", 0.3))
+                    .with_child(part_with_color("Junk", 0.4)),
+            )
+            .with_child(folder("B")),
+    );
+    let new = WeakDom::new(
+        folder("root").with_child(folder("B").with_child(part_with_color("Keep", 0.3))),
+    );
+
+    let diffs = diff_doms(&old, &new);
+    let (added, removed, modified, moved) = summarize(&diffs);
+    assert_eq!(moved, 1, "Keep should be a move: {diffs:?}");
+    assert_eq!(removed, 1, "Doomed (with Junk inside) is removed: {diffs:?}");
+    assert_eq!(added, 0, "{diffs:?}");
+    assert_eq!(modified, 0, "{diffs:?}");
+}
+
+fn part_with_color(name: &str, transparency: f32) -> InstanceBuilder {
+    InstanceBuilder::new("Part")
+        .with_name(name)
+        .with_property("Anchored", Variant::Bool(true))
+        .with_property("Transparency", Variant::Float32(transparency))
+}
