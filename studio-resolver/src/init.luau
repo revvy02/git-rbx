@@ -100,6 +100,13 @@ table.sort(conflicts, function(a, b)
 	return a.name < b.name
 end)
 
+-- A previous resolver run in this Studio leaves its ScreenGui behind
+-- (portal targets outlive the run) — clear it so sessions don't stack
+local stale = CoreGui:FindFirstChild("RbxDiffResolver")
+if stale then
+	stale:Destroy()
+end
+
 print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
 
 local function statusColor(conflict: Conflict): Color3
@@ -282,17 +289,18 @@ end
 -- UI (immediate mode, CoreGui overlay — the same surface rojo mounts on)
 -- ============================================================================
 
-local function Label(id: string, text: string, size: UDim2, color: Color3?)
+local function Label(id: string, text: string, color: Color3?)
 	Element("TextLabel", {
 		id = id,
 		Text = text,
-		Size = size,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
 		TextColor3 = color or Color3.fromRGB(230, 230, 230),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextSize = 14,
 		Font = Enum.Font.Gotham,
-		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextWrapped = true,
 	})
 end
 
@@ -315,7 +323,8 @@ end
 local function ConflictRow(conflict: Conflict)
 	Element("Frame", {
 		id = conflict.name,
-		Size = UDim2.new(1, 0, 0, 62),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundColor3 = Color3.fromRGB(40, 40, 46),
 	}, function()
 		Element("UICorner", { id = "corner", CornerRadius = UDim.new(0, 6) })
@@ -323,30 +332,35 @@ local function ConflictRow(conflict: Conflict)
 			id = "pad",
 			PaddingLeft = UDim.new(0, 8),
 			PaddingRight = UDim.new(0, 8),
-			PaddingTop = UDim.new(0, 4),
-			PaddingBottom = UDim.new(0, 4),
+			PaddingTop = UDim.new(0, 6),
+			PaddingBottom = UDim.new(0, 6),
+		})
+		Element("UIListLayout", {
+			id = "layout",
+			Padding = UDim.new(0, 4),
+			SortOrder = Enum.SortOrder.LayoutOrder,
 		})
 
-		Label("path", conflict.path, UDim2.new(1, 0, 0, 16), statusColor(conflict))
+		Label("path", conflict.path, statusColor(conflict))
 
 		local detail = conflict.kind
 			.. (if conflict.property then ` ({conflict.property})` else "")
 		Element("TextLabel", {
 			id = "detail",
 			Text = detail,
-			Size = UDim2.new(1, 0, 0, 12),
-			Position = UDim2.new(0, 8, 0, 20),
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
 			BackgroundTransparency = 1,
 			TextColor3 = Color3.fromRGB(160, 160, 170),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextSize = 12,
 			Font = Enum.Font.Gotham,
+			TextWrapped = true,
 		})
 
 		Element("Frame", {
 			id = "buttons",
-			Size = UDim2.new(1, -16, 0, 22),
-			Position = UDim2.new(0, 8, 1, -26),
+			Size = UDim2.new(1, 0, 0, 22),
 			BackgroundTransparency = 1,
 		}, function()
 			Element("UIListLayout", {
@@ -382,9 +396,16 @@ local function Panel()
 		end
 	end
 
+	-- Cap the scrolling row list so the panel's automatic height stops at
+	-- the bottom of the viewport; past that the canvas extends and scrolls.
+	local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.Y or 1080
+	local chromeHeight = 16 + 20 + 30 + (10 * 2) + (6 * 2) + 16 -- top margin, title, button, padding, gaps, bottom margin
+	local maxListHeight = math.max(120, viewport - chromeHeight)
+
 	Element("Frame", {
 		id = "panel",
-		Size = UDim2.new(0, 340, 0, math.min(96 + #conflicts * 68, 620)),
+		Size = UDim2.new(0, 340, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		Position = UDim2.new(1, -356, 0, 16),
 		BackgroundColor3 = Color3.fromRGB(28, 28, 32),
 	}, function()
@@ -407,7 +428,6 @@ local function Panel()
 			if finished
 				then "Merge complete — file written"
 				else `rbx-diff: {#conflicts - unresolved}/{#conflicts} decided`,
-			UDim2.new(1, 0, 0, 20),
 			if finished then Color3.fromRGB(120, 220, 140) else nil
 		)
 
@@ -415,9 +435,35 @@ local function Panel()
 			return
 		end
 
-		for _, conflict in conflicts do
-			ConflictRow(conflict)
-		end
+		Element("ScrollingFrame", {
+			id = "rows",
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			CanvasSize = UDim2.new(0, 0, 0, 0),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 4,
+			ScrollingDirection = Enum.ScrollingDirection.Y,
+		}, function()
+			Element("UISizeConstraint", {
+				id = "clamp",
+				MaxSize = Vector2.new(math.huge, maxListHeight),
+			})
+			Element("UIListLayout", {
+				id = "layout",
+				Padding = UDim.new(0, 6),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			})
+			Element("UIPadding", {
+				id = "pad",
+				PaddingRight = UDim.new(0, 6),
+			})
+
+			for _, conflict in conflicts do
+				ConflictRow(conflict)
+			end
+		end)
 
 		local canComplete = unresolved == 0 and not completing
 		Element("TextButton", {
