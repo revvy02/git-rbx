@@ -6,14 +6,17 @@
 	  rodeo run --place ./merged.rbxl --focus --detach src -- ./merged.rbxl
 
 	Discovery is entirely in-DOM (the __RbxDiffMerge container + RbxDiffConflict
-	tags that `rbx-diff merge` stamped). Decisions shell out host-side via
-	@rodeo/process to the canonical CLI:
+	tags that `rbx-diff merge` stamped). Decisions are STAGED in the session —
+	click Ours/Theirs to pick (click again to unpick), change freely — and
+	nothing touches the disk file until Complete, which batches the canonical
+	CLI calls host-side via @rodeo/process:
 
-	  rbx-diff resolve <file> --take <side> --entry <Conflict_N>
+	  rbx-diff resolve <file> --take <side> --entry <Conflict_N>   (per decision)
 	  rbx-diff resolve <file> --finalize
 
 	The Studio DOM is a COPY of the file — the disk file stays authoritative and
-	only rbx-diff writes it. This script is just eyes and buttons.
+	only rbx-diff writes it, only at Complete. Abandoning the session leaves the
+	conflicted file exactly as `rbx-diff merge` wrote it.
 
 	Args: <merged-file> [--rbx-diff <path-to-binary>]
 ]]
@@ -65,7 +68,6 @@ type Conflict = {
 	resolved: string?,
 	target: Instance?,
 	entry: Instance,
-	pending: boolean,
 }
 
 local container = game:FindFirstChild(CONTAINER_NAME, true)
@@ -90,7 +92,6 @@ for _, entry in container:GetChildren() do
 		resolved = if typeof(resolved) == "string" and resolved ~= "" then resolved else nil,
 		target = if targetValue and targetValue:IsA("ObjectValue") then targetValue.Value else nil,
 		entry = entry,
-		pending = false,
 	})
 end
 table.sort(conflicts, function(a, b)
@@ -113,40 +114,47 @@ end
 -- ============================================================================
 
 local finished = false
-local finalizing = false
-local finalizeError: string? = nil
+local completing = false
+local completeError: string? = nil
 
-local function emit(conflict: Conflict, side: string)
-	if conflict.pending or conflict.resolved == side then
+-- Staged decision: session-local only, freely revisable. Clicking the chosen
+-- side again unpicks it. Nothing is written anywhere until Complete.
+local function choose(conflict: Conflict, side: string)
+	if completing or finished then
 		return
 	end
-	conflict.pending = true
-	task.spawn(function()
-		local result = process.run({ rbxDiffBin, "resolve", mergedFile, "--take", side, "--entry", conflict.name })
-		if result.ok then
-			conflict.resolved = side
-			conflict.entry:SetAttribute("Resolved", side)
-		else
-			warn(`rbx-diff --take failed for {conflict.name}: {result.stderr}`)
-		end
-		conflict.pending = false
-	end)
+	conflict.resolved = if conflict.resolved == side then nil else side
 end
 
-local function finalize()
-	if finalizing then
+-- Commit every staged decision through the canonical CLI, then finalize.
+local function complete()
+	if completing or finished then
 		return
 	end
-	finalizing = true
+	completing = true
+	completeError = nil
 	task.spawn(function()
+		for _, conflict in conflicts do
+			local result = process.run({
+				rbxDiffBin, "resolve", mergedFile,
+				"--take", conflict.resolved :: string,
+				"--entry", conflict.name,
+			})
+			if not result.ok then
+				completeError = `--take {conflict.name} failed: {result.stderr}`
+				warn(completeError)
+				completing = false
+				return
+			end
+		end
 		local result = process.run({ rbxDiffBin, "resolve", mergedFile, "--finalize" })
 		if result.ok then
 			finished = true
 		else
-			finalizeError = result.stderr
-			warn(`finalize failed: {result.stderr}`)
+			completeError = `finalize failed: {result.stderr}`
+			warn(completeError)
 		end
-		finalizing = false
+		completing = false
 	end)
 end
 
@@ -252,7 +260,6 @@ local function ConflictRow(conflict: Conflict)
 
 		local detail = conflict.kind
 			.. (if conflict.property then ` ({conflict.property})` else "")
-			.. (if conflict.pending then "  …" else "")
 		Element("TextLabel", {
 			id = "detail",
 			Text = detail,
@@ -277,10 +284,10 @@ local function ConflictRow(conflict: Conflict)
 				Padding = UDim.new(0, 6),
 			})
 			Button("ours", "Ours", conflict.resolved == "ours", OURS_COLOR, function()
-				emit(conflict, "ours")
+				choose(conflict, "ours")
 			end)
 			Button("theirs", "Theirs", conflict.resolved == "theirs", THEIRS_COLOR, function()
-				emit(conflict, "theirs")
+				choose(conflict, "theirs")
 			end)
 			if conflict.target and conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
 				Button("view", "View", false, Color3.fromRGB(80, 80, 90), function()
@@ -322,8 +329,8 @@ local function Panel()
 		Label(
 			"title",
 			if finished
-				then "Merge finalized — file written"
-				else `rbx-diff: {unresolved}/{#conflicts} unresolved`,
+				then "Merge complete — file written"
+				else `rbx-diff: {#conflicts - unresolved}/{#conflicts} decided`,
 			UDim2.new(1, 0, 0, 20),
 			if finished then Color3.fromRGB(120, 220, 140) else nil
 		)
@@ -336,15 +343,16 @@ local function Panel()
 			ConflictRow(conflict)
 		end
 
-		local canFinalize = unresolved == 0 and not finalizing
+		local canComplete = unresolved == 0 and not completing
 		Element("TextButton", {
-			id = "finalize",
-			Text = if finalizing
-				then "Finalizing…"
-				elseif finalizeError then "Finalize failed — retry"
-				else "Finalize",
+			id = "complete",
+			Text = if completing
+				then "Completing…"
+				elseif completeError then "Complete failed — retry"
+				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
+				else "Complete",
 			Size = UDim2.new(1, 0, 0, 30),
-			BackgroundColor3 = if canFinalize
+			BackgroundColor3 = if canComplete
 				then Color3.fromRGB(60, 160, 90)
 				else Color3.fromRGB(55, 55, 60),
 			TextColor3 = Color3.fromRGB(240, 240, 240),
@@ -352,8 +360,8 @@ local function Panel()
 			Font = Enum.Font.GothamMedium,
 			events = {
 				Activated = function()
-					if canFinalize then
-						finalize()
+					if canComplete then
+						complete()
 					end
 				end,
 			},
