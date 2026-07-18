@@ -1,5 +1,6 @@
 //! rbx-diff: Compare two Roblox DOMs and report differences.
 
+mod conflict_file;
 mod diff;
 mod edit_script;
 mod hash;
@@ -11,6 +12,10 @@ pub mod output;
 pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use edit_script::{apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript};
+pub use conflict_file::{
+    finalize, find_container, list_entries, mark_entry, stamp_conflicts, ConflictEntry,
+    CONFLICT_TAG, CONTAINER_NAME, ENTRY_TAG,
+};
 pub use merge::{merge_doms, ConflictKind, MergeConflict, MergeResult, MergeStats};
 
 use rbx_dom_weak::WeakDom;

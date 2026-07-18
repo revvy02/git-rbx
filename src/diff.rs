@@ -528,6 +528,10 @@ pub(crate) fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, inst: &rbx_dom_
         Some(p) => p,
         None => return false,
     };
+    // The rbx-diff conflict container is tool metadata, never content
+    if inst.name == crate::conflict_file::CONTAINER_NAME {
+        return true;
+    }
     if parent_ref != dom.root_ref() || parent.class.as_str() != "DataModel" {
         return false;
     }

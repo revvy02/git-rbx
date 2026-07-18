@@ -10,7 +10,10 @@ use tracing::info_span;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
-use rbx_diff::{diff_doms_with_config, merge_doms, ConflictKind, DiffConfig};
+use rbx_diff::{
+    diff_doms_with_config, finalize, find_container, list_entries, mark_entry, merge_doms,
+    stamp_conflicts, ConflictKind, DiffConfig, CONTAINER_NAME,
+};
 
 #[derive(Parser)]
 #[command(name = "rbx-diff")]
@@ -68,6 +71,36 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         ignore_property: Vec<String>,
     },
+    /// Inspect and resolve conflicts stored in a merged file
+    Resolve {
+        /// The conflicted file written by `rbx-diff merge`
+        file: String,
+
+        /// List conflicts and their resolution state
+        #[arg(long)]
+        list: bool,
+
+        /// Resolve toward this side: ours | theirs
+        #[arg(long, value_name = "SIDE")]
+        take: Option<String>,
+
+        /// Base path of the conflict to resolve (with --take)
+        #[arg(long)]
+        path: Option<String>,
+
+        /// Resolve every remaining conflict (with --take)
+        #[arg(long)]
+        all: bool,
+
+        /// Apply all resolutions, strip conflict state, write the clean file
+        #[arg(long)]
+        finalize: bool,
+    },
+    /// Exit nonzero if the file contains unresolved merge conflict state
+    Check {
+        /// File to check
+        file: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -86,6 +119,10 @@ fn main() -> Result<()> {
         Command::Merge { base, ours, theirs, output, ignore_property } => {
             cmd_merge(&base, &ours, &theirs, output.as_deref(), &ignore_property)
         }
+        Command::Resolve { file, list, take, path, all, finalize } => {
+            cmd_resolve(&file, list, take.as_deref(), path.as_deref(), all, finalize)
+        }
+        Command::Check { file } => cmd_check(&file),
     }
 }
 
@@ -175,6 +212,13 @@ fn cmd_merge(
         result.stats.conflicted,
     );
 
+    // Conflicted merges carry their conflict state in the file itself:
+    // competing versions materialized as instances, targets tagged for
+    // discovery. `rbx-diff resolve` (or Studio) consumes it.
+    if !result.conflicts.is_empty() {
+        stamp_conflicts(&mut base, &ours, &theirs, &result);
+    }
+
     let out_path = output.unwrap_or(ours_path);
     save_file(out_path, &base)?;
     eprintln!("Wrote merged result to {}", out_path);
@@ -194,8 +238,100 @@ fn cmd_merge(
         eprintln!("  ! {} — {} (base content kept)", conflict.path, kind);
     }
 
+    eprintln!();
+    eprintln!("Conflict state is stored in the file ({CONTAINER_NAME}); resolve with:");
+    eprintln!("  rbx-diff resolve {} --list", out_path);
+
     // Nonzero exit tells git the merge needs manual resolution
     std::process::exit(1);
+}
+
+fn cmd_resolve(
+    file: &str,
+    list: bool,
+    take: Option<&str>,
+    path: Option<&str>,
+    all: bool,
+    do_finalize: bool,
+) -> Result<()> {
+    let mut dom = load_file(file)?;
+    let Some(container) = find_container(&dom) else {
+        bail!("{file} has no conflict container — nothing to resolve");
+    };
+
+    if list {
+        for entry in list_entries(&dom, container) {
+            let state = entry.resolved.as_deref().unwrap_or("UNRESOLVED");
+            let detail = entry
+                .property
+                .as_deref()
+                .map(|p| format!(" ({p})"))
+                .unwrap_or_default();
+            println!("[{state}] {} — {}{}", entry.path, entry.kind, detail);
+        }
+        return Ok(());
+    }
+
+    if let Some(side) = take {
+        let entries = list_entries(&dom, container);
+        let targets: Vec<_> = entries
+            .iter()
+            .filter(|e| match path {
+                Some(p) => e.path == p,
+                None => all,
+            })
+            .collect();
+        if targets.is_empty() {
+            bail!("no conflicts matched (use --path <base path> or --all)");
+        }
+        let count = targets.len();
+        let refs: Vec<_> = targets.iter().map(|e| e.entry_ref).collect();
+        for entry_ref in refs {
+            mark_entry(&mut dom, entry_ref, side)?;
+        }
+        save_file(file, &dom)?;
+        eprintln!("Marked {count} conflict(s) as '{side}'");
+
+        let remaining = list_entries(&dom, container)
+            .iter()
+            .filter(|e| e.resolved.is_none())
+            .count();
+        if remaining == 0 {
+            eprintln!("All conflicts resolved — run: rbx-diff resolve {file} --finalize");
+        } else {
+            eprintln!("{remaining} conflict(s) still unresolved");
+        }
+        return Ok(());
+    }
+
+    if do_finalize {
+        let count = finalize(&mut dom)?;
+        save_file(file, &dom)?;
+        eprintln!("Applied {count} resolution(s); conflict state stripped from {file}");
+        return Ok(());
+    }
+
+    bail!("specify --list, --take <ours|theirs> (--path/--all), or --finalize");
+}
+
+fn cmd_check(file: &str) -> Result<()> {
+    let dom = load_file(file)?;
+    match find_container(&dom) {
+        Some(container) => {
+            let unresolved = list_entries(&dom, container)
+                .iter()
+                .filter(|e| e.resolved.is_none())
+                .count();
+            eprintln!(
+                "{file}: contains merge conflict state ({unresolved} unresolved)"
+            );
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("{file}: clean");
+            Ok(())
+        }
+    }
 }
 
 fn build_config(ignore_property: &[String]) -> DiffConfig {

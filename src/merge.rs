@@ -49,6 +49,10 @@ pub struct MergeStats {
 pub struct MergeResult {
     pub conflicts: Vec<MergeConflict>,
     pub stats: MergeStats,
+    /// Identity mapping base_ref → ours_ref for every matched instance.
+    pub ours_matched: HashMap<Ref, Ref>,
+    /// Identity mapping base_ref → theirs_ref for every matched instance.
+    pub theirs_matched: HashMap<Ref, Ref>,
 }
 
 /// Three-way merge: mutate `base` into the merged result, applying every
@@ -301,7 +305,12 @@ fn merge_scripts(
         "merge complete"
     );
 
-    MergeResult { conflicts, stats }
+    MergeResult {
+        conflicts,
+        stats,
+        ours_matched: ours.matched.clone(),
+        theirs_matched: theirs.matched.clone(),
+    }
 }
 
 /// The base-DOM instances an op touches: the primary target, plus the
