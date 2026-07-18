@@ -170,3 +170,39 @@ fn save_vs_save_menu_gui_removal() {
         .collect();
     assert_eq!(removed, vec!["StarterGui.Menu"], "{diffs:?}");
 }
+
+#[test]
+fn obj_value_identical_twins_diff_shape() {
+    // Two identical "Uniform Giver" models: setting each PrimaryPart to its
+    // own ClickPart must diff as exactly two modifications — twin identity
+    // must not cross the refs up.
+    let d = "tests-new/referential-properties/obj-value";
+    let Some(diffs) = diff_files(
+        &format!("{d}/police-station.rbxm"),
+        &format!("{d}/police-station-with-2-identical-uni-givers-with-primary-part.rbxm"),
+    ) else {
+        return;
+    };
+    let (added, removed, modified, moved) = counts(&diffs);
+    assert_eq!((added, removed, modified, moved), (0, 0, 2, 0), "{diffs:#?}");
+    for diff in &diffs {
+        match diff {
+            DiffEntry::Modified { property_changes, .. } => {
+                assert_eq!(property_changes.len(), 1, "{property_changes:?}");
+                assert_eq!(property_changes[0].name, "PrimaryPart");
+            }
+            other => panic!("expected Modified, got {other:?}"),
+        }
+    }
+
+    // Adding cross-referencing ObjectValues (each pointing at the OTHER
+    // twin's ClickPart) is exactly two additions — no ref fallout.
+    let Some(diffs) = diff_files(
+        &format!("{d}/police-station-with-2-identical-uni-givers-with-primary-part.rbxm"),
+        &format!("{d}/police-station-with-the-uni-primary-parts-but-with-obj-value-that-references-the-other-uni-giver.rbxm"),
+    ) else {
+        return;
+    };
+    let (added, removed, modified, moved) = counts(&diffs);
+    assert_eq!((added, removed, modified, moved), (2, 0, 0, 0), "{diffs:#?}");
+}

@@ -280,3 +280,83 @@ fn round_trip_move_out_of_removed_folder() {
     );
     assert_round_trip(old, new);
 }
+
+#[test]
+fn round_trip_obj_value_cross_refs_between_identical_twins() {
+    // Two identical "Uniform Giver" twins where each holds an ObjectValue
+    // pointing at the OTHER twin's ClickPart. After applying the edit script,
+    // the topology the fixture README specifies must hold with the right
+    // polarity — a symmetric swap would slip past a diff-empty check alone.
+    let d = "tests-new/referential-properties/obj-value";
+    let old_path = format!("{d}/police-station-with-2-identical-uni-givers-with-primary-part.rbxm");
+    let new_path = format!("{d}/police-station-with-the-uni-primary-parts-but-with-obj-value-that-references-the-other-uni-giver.rbxm");
+    let (Some(mut old), Some(new)) = (load(&old_path), load(&new_path)) else {
+        return;
+    };
+
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+    apply_edit_script(&mut old, &new, &script);
+    let residual = diff_doms(&old, &new);
+    assert!(residual.is_empty(), "{residual:#?}");
+
+    let applied = &old;
+    let givers: Vec<_> = applied
+        .descendants()
+        .filter(|i| i.name == "Uniform Giver" && i.class.as_str() == "Model")
+        .collect();
+    assert_eq!(givers.len(), 2);
+
+    let primary_of = |giver: &rbx_dom_weak::Instance| -> rbx_dom_weak::types::Ref {
+        match giver.properties.get(&"PrimaryPart".into()) {
+            Some(Variant::Ref(r)) => *r,
+            other => panic!("PrimaryPart missing: {other:?}"),
+        }
+    };
+    let is_inside = |node: rbx_dom_weak::types::Ref, root: rbx_dom_weak::types::Ref| {
+        let mut current = node;
+        while let Some(inst) = applied.get_by_ref(current) {
+            if current == root {
+                return true;
+            }
+            current = inst.parent();
+        }
+        false
+    };
+
+    for (index, giver) in givers.iter().enumerate() {
+        let own_primary = primary_of(giver);
+        let primary_inst = applied.get_by_ref(own_primary).expect("primary exists");
+        assert_eq!(primary_inst.name, "ClickPart");
+        assert!(
+            is_inside(own_primary, giver.referent()),
+            "giver {index}: PrimaryPart must be its own descendant"
+        );
+
+        let value = applied
+            .get_by_ref(giver.referent())
+            .unwrap()
+            .children()
+            .iter()
+            .find_map(|&c| {
+                applied
+                    .get_by_ref(c)
+                    .filter(|i| i.class.as_str() == "ObjectValue" && i.name == "Value")
+            })
+            .expect("ObjectValue child");
+        let pointee = match value.properties.get(&"Value".into()) {
+            Some(Variant::Ref(r)) => *r,
+            other => panic!("ObjectValue.Value missing: {other:?}"),
+        };
+
+        let other_giver = &givers[1 - index];
+        assert_eq!(
+            pointee,
+            primary_of(other_giver),
+            "giver {index}: ObjectValue must point at the OTHER twin's PrimaryPart"
+        );
+        assert!(
+            !is_inside(pointee, giver.referent()),
+            "giver {index}: cross-ref must not point inside itself"
+        );
+    }
+}
