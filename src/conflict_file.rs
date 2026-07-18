@@ -268,6 +268,8 @@ fn untag_instance(dom: &mut WeakDom, referent: Ref, tag: &str) {
 #[derive(Debug)]
 pub struct ConflictEntry {
     pub entry_ref: Ref,
+    /// Unique entry name within the container (e.g. "Conflict_2")
+    pub name: String,
     pub kind: String,
     pub path: String,
     pub property: Option<String>,
@@ -296,6 +298,7 @@ pub fn list_entries(dom: &WeakDom, container: Ref) -> Vec<ConflictEntry> {
             let get_str = |key: &str| attr_string(attrs, key);
             Some(ConflictEntry {
                 entry_ref,
+                name: inst.name.clone(),
                 kind: get_str("Kind")?,
                 path: get_str("Path")?,
                 property: get_str("Property"),

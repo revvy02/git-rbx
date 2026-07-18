@@ -84,9 +84,14 @@ enum Command {
         #[arg(long, value_name = "SIDE")]
         take: Option<String>,
 
-        /// Base path of the conflict to resolve (with --take)
+        /// Base path of the conflict(s) to resolve (with --take).
+        /// May match several entries (e.g. two properties on one instance)
         #[arg(long)]
         path: Option<String>,
+
+        /// Entry name (e.g. Conflict_2) — the unique key, from --list
+        #[arg(long)]
+        entry: Option<String>,
 
         /// Resolve every remaining conflict (with --take)
         #[arg(long)]
@@ -119,8 +124,8 @@ fn main() -> Result<()> {
         Command::Merge { base, ours, theirs, output, ignore_property } => {
             cmd_merge(&base, &ours, &theirs, output.as_deref(), &ignore_property)
         }
-        Command::Resolve { file, list, take, path, all, finalize } => {
-            cmd_resolve(&file, list, take.as_deref(), path.as_deref(), all, finalize)
+        Command::Resolve { file, list, take, path, entry, all, finalize } => {
+            cmd_resolve(&file, list, take.as_deref(), path.as_deref(), entry.as_deref(), all, finalize)
         }
         Command::Check { file } => cmd_check(&file),
     }
@@ -251,6 +256,7 @@ fn cmd_resolve(
     list: bool,
     take: Option<&str>,
     path: Option<&str>,
+    entry_name: Option<&str>,
     all: bool,
     do_finalize: bool,
 ) -> Result<()> {
@@ -267,7 +273,7 @@ fn cmd_resolve(
                 .as_deref()
                 .map(|p| format!(" ({p})"))
                 .unwrap_or_default();
-            println!("[{state}] {} — {}{}", entry.path, entry.kind, detail);
+            println!("[{state}] {} {} — {}{}", entry.name, entry.path, entry.kind, detail);
         }
         return Ok(());
     }
@@ -276,13 +282,14 @@ fn cmd_resolve(
         let entries = list_entries(&dom, container);
         let targets: Vec<_> = entries
             .iter()
-            .filter(|e| match path {
-                Some(p) => e.path == p,
-                None => all,
+            .filter(|e| match (entry_name, path) {
+                (Some(name), _) => e.name == name,
+                (None, Some(p)) => e.path == p,
+                (None, None) => all,
             })
             .collect();
         if targets.is_empty() {
-            bail!("no conflicts matched (use --path <base path> or --all)");
+            bail!("no conflicts matched (use --entry <name>, --path <base path>, or --all)");
         }
         let count = targets.len();
         let refs: Vec<_> = targets.iter().map(|e| e.entry_ref).collect();
