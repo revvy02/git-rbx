@@ -235,7 +235,7 @@ pub fn compute_diff(
 /// Phase 1: Recursively match all instances, building the global ref mapping.
 /// Only recurses into non-pruned subtrees (where deep hashes differ).
 /// Collects removed/added subtree roots along the way for global move detection.
-fn build_ref_mapping(
+pub(crate) fn build_ref_mapping(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
     old_ref: Ref,
@@ -369,12 +369,21 @@ fn diff_pass(
 // Property comparison
 // ============================================================================
 
-/// Compare properties between two matched instances.
-/// Detects name changes (for renamed instances matched via class fallback)
-/// and uses the ref mapping for Ref property comparison.
-/// Filters out non-reflected, non-serializable, and default-valued properties
-/// to avoid false positives from serialization differences.
-fn diff_properties(
+/// A property difference carrying raw Variants — the applicable form used by
+/// the edit-script layer. Name changes are NOT included (Instance.name lives
+/// outside the property map; callers handle it separately).
+#[derive(Debug, Clone)]
+pub(crate) struct RawPropertyChange {
+    pub name: String,
+    pub old: Option<Variant>,
+    pub new: Option<Variant>,
+}
+
+/// Compare properties between two matched instances at the Variant level.
+/// Uses the ref mapping for Ref property comparison. Filters out
+/// non-reflected, non-serializable, and default-valued properties to avoid
+/// false positives from serialization differences.
+pub(crate) fn raw_property_changes(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
     old_ref: Ref,
@@ -383,7 +392,7 @@ fn diff_properties(
     ref_mapping: &HashMap<Ref, Ref>,
     old_deep: &DeepHashCache,
     new_deep: &DeepHashCache,
-) -> Vec<PropertyChange> {
+) -> Vec<RawPropertyChange> {
     let old_inst = old_dom.get_by_ref(old_ref).unwrap();
     let new_inst = new_dom.get_by_ref(new_ref).unwrap();
 
@@ -396,15 +405,6 @@ fn diff_properties(
 
     let mut changes = Vec::new();
     let mut visited = HashSet::new();
-
-    // Detect name changes (inst.name is separate from inst.properties in rbx_dom_weak)
-    if old_inst.name != new_inst.name {
-        changes.push(PropertyChange {
-            name: "Name".to_string(),
-            old_value: Some(PropertyValue::String { value: old_inst.name.clone() }),
-            new_value: Some(PropertyValue::String { value: new_inst.name.clone() }),
-        });
-    }
 
     // Check properties in new instance
     for (name, new_value) in &new_inst.properties {
@@ -419,10 +419,10 @@ fn diff_properties(
         match old_inst.properties.get(name) {
             Some(old_value) => {
                 if !variants_equal(old_dom, new_dom, old_value, new_value, ref_mapping, old_deep, new_deep) {
-                    changes.push(PropertyChange {
+                    changes.push(RawPropertyChange {
                         name: name.to_string(),
-                        old_value: Some(variant_to_property_value(old_value)),
-                        new_value: Some(variant_to_property_value(new_value)),
+                        old: Some(old_value.clone()),
+                        new: Some(new_value.clone()),
                     });
                 }
             }
@@ -435,10 +435,10 @@ fn diff_properties(
                 if matches!(new_value, Variant::Ref(r) if r.is_none()) {
                     continue;
                 }
-                changes.push(PropertyChange {
+                changes.push(RawPropertyChange {
                     name: name.to_string(),
-                    old_value: None,
-                    new_value: Some(variant_to_property_value(new_value)),
+                    old: None,
+                    new: Some(new_value.clone()),
                 });
             }
         }
@@ -461,12 +461,51 @@ fn diff_properties(
             if matches!(old_value, Variant::Ref(r) if r.is_none()) {
                 continue;
             }
-            changes.push(PropertyChange {
+            changes.push(RawPropertyChange {
                 name: name.to_string(),
-                old_value: Some(variant_to_property_value(old_value)),
-                new_value: None,
+                old: Some(old_value.clone()),
+                new: None,
             });
         }
+    }
+
+    changes
+}
+
+/// Compare properties between two matched instances, for display.
+/// Detects name changes (inst.name is separate from inst.properties) and
+/// converts raw variants into display-oriented PropertyValues.
+fn diff_properties(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    old_ref: Ref,
+    new_ref: Ref,
+    config: &DiffConfig,
+    ref_mapping: &HashMap<Ref, Ref>,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
+) -> Vec<PropertyChange> {
+    let old_inst = old_dom.get_by_ref(old_ref).unwrap();
+    let new_inst = new_dom.get_by_ref(new_ref).unwrap();
+
+    let mut changes = Vec::new();
+
+    if old_inst.name != new_inst.name {
+        changes.push(PropertyChange {
+            name: "Name".to_string(),
+            old_value: Some(PropertyValue::String { value: old_inst.name.clone() }),
+            new_value: Some(PropertyValue::String { value: new_inst.name.clone() }),
+        });
+    }
+
+    for raw in raw_property_changes(
+        old_dom, new_dom, old_ref, new_ref, config, ref_mapping, old_deep, new_deep,
+    ) {
+        changes.push(PropertyChange {
+            name: raw.name,
+            old_value: raw.old.as_ref().map(variant_to_property_value),
+            new_value: raw.new.as_ref().map(variant_to_property_value),
+        });
     }
 
     changes
@@ -484,7 +523,7 @@ fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
 /// class-based, NOT position-based: rbx_binary gives model files a
 /// DataModel-class root too, and top-level model content (Parts, Models, ...)
 /// must still diff normally.
-fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, inst: &rbx_dom_weak::Instance) -> bool {
+pub(crate) fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, inst: &rbx_dom_weak::Instance) -> bool {
     let parent = match dom.get_by_ref(parent_ref) {
         Some(p) => p,
         None => return false,

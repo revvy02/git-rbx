@@ -1,0 +1,398 @@
+//! Applicable edit scripts: the difference between two DOMs as a sequence of
+//! operations that transform the old DOM into the new one.
+//!
+//! This is the layer the future merge combiner consumes. Basis ops are
+//! AddSubtree / RemoveSubtree / SetName / SetProperty; Move is the derived
+//! identity op (a paired remove+add). Ops address existing instances by their
+//! ref in the OLD dom and subtree payloads by their ref in the NEW dom.
+//!
+//! Unlike the display diff, the builder walks the full tree without deep-hash
+//! pruning so the identity mapping covers every matched instance — Ref-valued
+//! properties can then always be remapped at apply time without heuristics.
+//! This trades some speed for correctness; display diffing keeps its pruning.
+
+use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
+use rbx_types::Variant;
+use std::collections::{HashMap, HashSet};
+use tracing::info;
+
+use crate::diff::{is_studio_artifact, raw_property_changes, DiffConfig};
+use crate::hash::{DeepHashCache, LazyHashCache};
+use crate::match_instances::match_children;
+use crate::move_detect::detect_moves;
+
+/// Where a parent lives when an op needs one: an instance that exists in the
+/// old DOM, or one that an AddSubtree op creates (addressed by its new-DOM ref).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    Old(Ref),
+    Added(Ref),
+}
+
+#[derive(Debug, Clone)]
+pub enum EditOp {
+    /// Copy the subtree rooted at `new_ref` (in the new DOM) under `parent`.
+    AddSubtree { parent: Anchor, new_ref: Ref },
+    /// Delete the subtree rooted at this old-DOM instance.
+    RemoveSubtree { old_ref: Ref },
+    /// Reparent an old-DOM instance (derived identity op; lowers to
+    /// RemoveSubtree + AddSubtree).
+    Move { old_ref: Ref, new_parent: Anchor },
+    /// Rename a matched instance (Name lives outside the property map).
+    SetName { old_ref: Ref, name: String },
+    /// Set (`Some`) or remove (`None`) a property on a matched instance.
+    /// `value` variants are expressed in new-DOM terms; Ref values are
+    /// remapped through the identity mapping at apply time.
+    SetProperty {
+        old_ref: Ref,
+        name: String,
+        value: Option<Variant>,
+    },
+}
+
+/// An applicable difference between two DOMs.
+pub struct EditScript {
+    pub ops: Vec<EditOp>,
+    /// Identity mapping (old_ref → new_ref) for every matched instance,
+    /// including moved pairs and instances inside unchanged subtrees.
+    pub matched: HashMap<Ref, Ref>,
+}
+
+/// Compute the edit script transforming `old_dom` into `new_dom`.
+pub fn compute_edit_script(old_dom: &WeakDom, new_dom: &WeakDom, config: &DiffConfig) -> EditScript {
+    let old_hashes = LazyHashCache::new(old_dom);
+    let new_hashes = LazyHashCache::new(new_dom);
+    let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
+    let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
+
+    // Full (unpruned) match walk: identity for every matched instance
+    let mut matched = HashMap::new();
+    let mut removed_roots = Vec::new();
+    let mut added_roots = Vec::new();
+    build_full_mapping(
+        old_dom, new_dom,
+        old_dom.root_ref(), new_dom.root_ref(),
+        &old_hashes, &new_hashes,
+        &mut matched, &mut removed_roots, &mut added_roots,
+    );
+
+    // Pair moves globally, then map inside moved subtrees too
+    let moves = detect_moves(old_dom, new_dom, removed_roots, added_roots, &old_deep, &new_deep);
+    let moved_old: HashSet<Ref> = moves.iter().map(|(o, _)| *o).collect();
+    let moved_new: HashSet<Ref> = moves.iter().map(|(_, n)| *n).collect();
+    for (old_root, new_root) in &moves {
+        matched.insert(*old_root, *new_root);
+        build_full_mapping(
+            old_dom, new_dom, *old_root, *new_root,
+            &old_hashes, &new_hashes,
+            &mut matched, &mut Vec::new(), &mut Vec::new(),
+        );
+    }
+
+    let mut ops = Vec::new();
+
+    // Move ops first in new-side depth order (parents settle before children),
+    // so applying in script order can never transfer into an unsettled spot.
+    let mut moves_by_depth: Vec<(usize, &(Ref, Ref))> = moves
+        .iter()
+        .map(|pair| (new_side_depth(new_dom, pair.1), pair))
+        .collect();
+    moves_by_depth.sort_by_key(|(depth, _)| *depth);
+    for (_, (old_root, new_root)) in moves_by_depth {
+        let new_parent = new_dom
+            .get_by_ref(*new_root)
+            .map(|inst| inst.parent())
+            .unwrap_or_else(Ref::none);
+        ops.push(EditOp::Move {
+            old_ref: *old_root,
+            new_parent: anchor_for(new_parent, &matched),
+        });
+    }
+
+    // Structural + property ops from the matched walk
+    let ctx = BuildCtx {
+        old_dom,
+        new_dom,
+        old_hashes: &old_hashes,
+        new_hashes: &new_hashes,
+        old_deep: &old_deep,
+        new_deep: &new_deep,
+        config,
+        matched: &matched,
+        moved_old: &moved_old,
+        moved_new: &moved_new,
+    };
+    emit_ops(&ctx, old_dom.root_ref(), new_dom.root_ref(), &mut ops);
+    for (old_root, new_root) in &moves {
+        emit_instance_edits(&ctx, *old_root, *new_root, &mut ops);
+        emit_ops(&ctx, *old_root, *new_root, &mut ops);
+    }
+
+    info!(ops = ops.len(), matched = matched.len(), "edit script built");
+    EditScript { ops, matched }
+}
+
+struct BuildCtx<'a> {
+    old_dom: &'a WeakDom,
+    new_dom: &'a WeakDom,
+    old_hashes: &'a LazyHashCache<'a>,
+    new_hashes: &'a LazyHashCache<'a>,
+    old_deep: &'a DeepHashCache<'a>,
+    new_deep: &'a DeepHashCache<'a>,
+    config: &'a DiffConfig,
+    matched: &'a HashMap<Ref, Ref>,
+    moved_old: &'a HashSet<Ref>,
+    moved_new: &'a HashSet<Ref>,
+}
+
+fn build_full_mapping(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    old_ref: Ref,
+    new_ref: Ref,
+    old_hashes: &LazyHashCache,
+    new_hashes: &LazyHashCache,
+    mapping: &mut HashMap<Ref, Ref>,
+    removed_roots: &mut Vec<Ref>,
+    added_roots: &mut Vec<Ref>,
+) {
+    let result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
+    removed_roots.extend_from_slice(&result.removed);
+    added_roots.extend_from_slice(&result.added);
+    for (old_child, new_child) in &result.matched {
+        mapping.insert(*old_child, *new_child);
+        build_full_mapping(
+            old_dom, new_dom, *old_child, *new_child,
+            old_hashes, new_hashes, mapping, removed_roots, added_roots,
+        );
+    }
+}
+
+fn new_side_depth(new_dom: &WeakDom, mut referent: Ref) -> usize {
+    let mut depth = 0;
+    while let Some(inst) = new_dom.get_by_ref(referent) {
+        referent = inst.parent();
+        depth += 1;
+    }
+    depth
+}
+
+/// Address a new-DOM instance as an apply-time parent: through the identity
+/// mapping when it matched, otherwise it must be part of an added subtree.
+fn anchor_for(new_ref: Ref, matched: &HashMap<Ref, Ref>) -> Anchor {
+    // matched is old→new; reverse lookup (small n of anchors, built rarely)
+    for (old, new) in matched {
+        if *new == new_ref {
+            return Anchor::Old(*old);
+        }
+    }
+    Anchor::Added(new_ref)
+}
+
+fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
+    let result = match_children(
+        ctx.old_dom, ctx.new_dom, old_ref, new_ref, ctx.old_hashes, ctx.new_hashes,
+    );
+
+    for removed in &result.removed {
+        if ctx.moved_old.contains(removed) {
+            continue;
+        }
+        if let Some(inst) = ctx.old_dom.get_by_ref(*removed) {
+            if is_studio_artifact(ctx.old_dom, old_ref, inst) {
+                continue;
+            }
+        }
+        ops.push(EditOp::RemoveSubtree { old_ref: *removed });
+    }
+
+    for added in &result.added {
+        if ctx.moved_new.contains(added) {
+            continue;
+        }
+        if let Some(inst) = ctx.new_dom.get_by_ref(*added) {
+            if is_studio_artifact(ctx.new_dom, new_ref, inst) {
+                continue;
+            }
+        }
+        ops.push(EditOp::AddSubtree {
+            parent: Anchor::Old(old_ref),
+            new_ref: *added,
+        });
+    }
+
+    for (old_child, new_child) in &result.matched {
+        // Pruning is safe here: mapping is already complete, and identical
+        // subtrees need no ops.
+        if ctx.old_deep.get(*old_child) == ctx.new_deep.get(*new_child) {
+            continue;
+        }
+        emit_instance_edits(ctx, *old_child, *new_child, ops);
+        emit_ops(ctx, *old_child, *new_child, ops);
+    }
+}
+
+fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
+    let old_inst = ctx.old_dom.get_by_ref(old_ref).unwrap();
+    let new_inst = ctx.new_dom.get_by_ref(new_ref).unwrap();
+
+    if old_inst.name != new_inst.name {
+        ops.push(EditOp::SetName {
+            old_ref,
+            name: new_inst.name.clone(),
+        });
+    }
+
+    for change in raw_property_changes(
+        ctx.old_dom, ctx.new_dom, old_ref, new_ref,
+        ctx.config, ctx.matched, ctx.old_deep, ctx.new_deep,
+    ) {
+        ops.push(EditOp::SetProperty {
+            old_ref,
+            name: change.name,
+            value: change.new,
+        });
+    }
+}
+
+// ============================================================================
+// Apply
+// ============================================================================
+
+/// Apply an edit script to the DOM it was computed against, transforming it
+/// into (a DOM diff-equal to) the new DOM. `new_dom` supplies subtree payloads
+/// for AddSubtree ops.
+pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditScript) {
+    // new_ref → target ref, for every instance apply creates
+    let mut created: HashMap<Ref, Ref> = HashMap::new();
+    // new_ref → old (target) ref for matched instances
+    let reverse: HashMap<Ref, Ref> = script.matched.iter().map(|(o, n)| (*n, *o)).collect();
+
+    // 1. Adds — clone subtrees out of the new DOM
+    for op in &script.ops {
+        if let EditOp::AddSubtree { parent, new_ref } = op {
+            let parent_ref = resolve_anchor(*parent, &created);
+            let builder = build_subtree(new_dom, *new_ref);
+            let created_root = target.insert(parent_ref, builder);
+            record_created(new_dom, *new_ref, target, created_root, &mut created);
+        }
+    }
+
+    // 2. Moves — emitted in new-side depth order by the builder
+    for op in &script.ops {
+        if let EditOp::Move { old_ref, new_parent } = op {
+            target.transfer_within(*old_ref, resolve_anchor(*new_parent, &created));
+        }
+    }
+
+    // 3. Removes
+    for op in &script.ops {
+        if let EditOp::RemoveSubtree { old_ref } = op {
+            target.destroy(*old_ref);
+        }
+    }
+
+    // 4. Names and properties
+    for op in &script.ops {
+        match op {
+            EditOp::SetName { old_ref, name } => {
+                if let Some(inst) = target.get_by_ref_mut(*old_ref) {
+                    inst.name = name.clone();
+                }
+            }
+            EditOp::SetProperty { old_ref, name, value } => {
+                if let Some(inst) = target.get_by_ref_mut(*old_ref) {
+                    match value {
+                        None => {
+                            inst.properties.remove(&name.as_str().into());
+                        }
+                        Some(v) => {
+                            let v = remap_ref_value(v.clone(), &reverse, &created);
+                            inst.properties.insert(name.as_str().into(), v);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 5. Cloned subtrees copied their properties verbatim — their Ref values
+    // still point into the new DOM. Remap them into the target.
+    let created_targets: Vec<Ref> = created.values().copied().collect();
+    for target_ref in created_targets {
+        let Some(inst) = target.get_by_ref(target_ref) else {
+            continue;
+        };
+        let ref_props: Vec<(String, Ref)> = inst
+            .properties
+            .iter()
+            .filter_map(|(name, value)| match value {
+                Variant::Ref(r) if !r.is_none() => Some((name.to_string(), *r)),
+                _ => None,
+            })
+            .collect();
+        for (name, new_target_ref) in ref_props {
+            let remapped = remap_ref(new_target_ref, &reverse, &created);
+            if let Some(inst) = target.get_by_ref_mut(target_ref) {
+                inst.properties.insert(name.as_str().into(), Variant::Ref(remapped));
+            }
+        }
+    }
+}
+
+fn resolve_anchor(anchor: Anchor, created: &HashMap<Ref, Ref>) -> Ref {
+    match anchor {
+        Anchor::Old(r) => r,
+        Anchor::Added(new_ref) => created.get(&new_ref).copied().unwrap_or_else(Ref::none),
+    }
+}
+
+fn remap_ref(new_ref: Ref, reverse: &HashMap<Ref, Ref>, created: &HashMap<Ref, Ref>) -> Ref {
+    reverse
+        .get(&new_ref)
+        .or_else(|| created.get(&new_ref))
+        .copied()
+        .unwrap_or_else(Ref::none)
+}
+
+fn remap_ref_value(value: Variant, reverse: &HashMap<Ref, Ref>, created: &HashMap<Ref, Ref>) -> Variant {
+    match value {
+        Variant::Ref(r) if !r.is_none() => Variant::Ref(remap_ref(r, reverse, created)),
+        other => other,
+    }
+}
+
+/// Recursively clone a new-DOM subtree into an InstanceBuilder (full fidelity —
+/// every property verbatim, no comparability filtering; this is a copy).
+fn build_subtree(new_dom: &WeakDom, referent: Ref) -> InstanceBuilder {
+    let inst = new_dom.get_by_ref(referent).unwrap();
+    let mut builder = InstanceBuilder::new(inst.class.as_str()).with_name(inst.name.as_str());
+    for (name, value) in &inst.properties {
+        builder = builder.with_property(name.as_str(), value.clone());
+    }
+    let children: Vec<InstanceBuilder> = inst
+        .children()
+        .iter()
+        .map(|&child| build_subtree(new_dom, child))
+        .collect();
+    builder.with_children(children)
+}
+
+/// Walk the source subtree and the freshly created target subtree in parallel,
+/// recording new_ref → created_ref for every instance. Children were built in
+/// source order, so positional pairing is exact.
+fn record_created(
+    new_dom: &WeakDom,
+    new_ref: Ref,
+    target: &WeakDom,
+    created_ref: Ref,
+    created: &mut HashMap<Ref, Ref>,
+) {
+    created.insert(new_ref, created_ref);
+    let source_children = new_dom.get_by_ref(new_ref).unwrap().children();
+    let target_children = target.get_by_ref(created_ref).unwrap().children().to_vec();
+    for (source_child, target_child) in source_children.iter().zip(target_children) {
+        record_created(new_dom, *source_child, target, target_child, created);
+    }
+}

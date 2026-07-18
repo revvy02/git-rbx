@@ -1,6 +1,7 @@
 //! rbx-diff: Compare two Roblox DOMs and report differences.
 
 mod diff;
+mod edit_script;
 mod hash;
 mod match_instances;
 mod move_detect;
@@ -8,6 +9,7 @@ pub mod output;
 
 pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
+pub use edit_script::{apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript};
 
 use rbx_dom_weak::WeakDom;
 
