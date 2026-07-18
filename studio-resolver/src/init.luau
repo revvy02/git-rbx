@@ -45,6 +45,7 @@ local CUSTOM_COLOR = Color3.fromRGB(80, 200, 160)
 local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
 parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
 parser:option("--rbx-diff", "Path to the rbx-diff binary"):target("rbxDiffBin"):default("rbx-diff")
+parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
 
 -- pparse: argparse's error path calls process.exit, which suspends the run
 -- under rodeo's lune adapter — fail with a readable return instead
@@ -497,10 +498,21 @@ end
 -- Frame loop; the run stays alive until finalized
 -- ============================================================================
 
-local connection = RunService.Heartbeat:Connect(function()
+-- Self-terminating render loop: if this session's panel disappears (a newer
+-- resolver run's boot cleanup destroyed it, or the run was killed), stop
+-- rendering — a killed run's Heartbeat connection otherwise survives and
+-- errors every frame trying to reparent a destroyed ScreenGui.
+local screenGui: Instance? = nil
+local connection
+connection = RunService.Heartbeat:Connect(function()
+	if screenGui and screenGui.Parent == nil then
+		connection:Disconnect()
+		finished = true
+		return
+	end
 	updateHighlights()
 	Portal(CoreGui, "rbx-diff-resolver", function()
-		Element("ScreenGui", {
+		local guiNode = Element("ScreenGui", {
 			id = "gui",
 			Name = "RbxDiffResolver",
 			ResetOnSpawn = false,
@@ -509,8 +521,18 @@ local connection = RunService.Heartbeat:Connect(function()
 		}, function()
 			Panel()
 		end)
+		screenGui = (guiNode :: any).instance
 	end)
 end)
+
+-- Debug drive-through: stage everything to one side and Complete, so the
+-- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
+if args.autoSide then
+	for _, conflict in conflicts do
+		conflict.resolved = args.autoSide
+	end
+	complete()
+end
 
 while not finished do
 	task.wait(0.25)
