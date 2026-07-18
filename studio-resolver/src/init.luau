@@ -69,6 +69,12 @@ local rbxDiffBin = args.rbxDiffBin
 -- and mirrored onto the live entries so other in-Studio tools see it too.
 -- ============================================================================
 
+type SideInfo = {
+	clone: Instance?, -- this side's version (nil = this side deletes the target)
+	destination: Instance?, -- MoveTarget: the parent this side moves the target to
+	destinationPath: string?,
+}
+
 type Conflict = {
 	name: string,
 	kind: string,
@@ -77,6 +83,14 @@ type Conflict = {
 	resolved: string?,
 	target: Instance,
 	entry: Instance,
+
+	-- 3D preview state, filled by the rendering boot pass
+	ours: SideInfo?,
+	theirs: SideInfo?,
+	baseValue: any, -- Property: value to restore on unpick
+	baseParent: Instance?, -- MoveTarget: parent to restore on unpick
+	targetParts: { [BasePart]: number }?, -- DeleteVsEdit: true transparencies
+	rendered: string?, -- staged state the 3D layer currently reflects
 }
 
 local container = game:FindFirstChild(CONTAINER_NAME, true)
@@ -257,9 +271,243 @@ local function focusOn(conflict: Conflict)
 end
 
 -- ============================================================================
--- 3D highlights: plain instances keyed by conflict, colored by state
--- (miu owns only the 2D panel)
+-- 3D rendering: status highlight on the target, ghost twins of both sides
+-- (spawned from the stamped Ours/Theirs clones), and a live preview — staging
+-- a side morphs the Studio COPY toward that outcome (property values, parents,
+-- delete fades) and unpicking restores the boot-time base state. None of this
+-- touches the disk file; the CLI at Complete is still the only writer.
+-- Ghost + status highlights each cost a Highlight instance (engine cap ~31
+-- concurrent) — fine at typical conflict counts, revisit for huge merges.
 -- ============================================================================
+
+local staleGhosts = workspace:FindFirstChild("__RbxDiffGhosts")
+if staleGhosts then
+	staleGhosts:Destroy()
+end
+local ghostRoot = Instance.new("Folder")
+ghostRoot.Name = "__RbxDiffGhosts"
+ghostRoot.Archivable = false
+ghostRoot.Parent = workspace
+
+type Ghost = {
+	root: Instance,
+	parts: { [BasePart]: number }, -- part -> the clone's true transparency
+	highlight: Highlight,
+	truePivot: CFrame, -- where this version actually lives
+	flankPivot: CFrame, -- parked beside the target for comparison
+}
+
+local ghosts: { [string]: Ghost } = {} -- key: `{conflict.name}/{side}`
+local destinationHighlights: { [string]: Highlight } = {} -- MoveTarget, same key
+
+local function eachPart(root: Instance, fn: (BasePart) -> ())
+	if root:IsA("BasePart") then
+		fn(root)
+	end
+	for _, descendant in root:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			fn(descendant)
+		end
+	end
+end
+
+local function sideInfo(entry: Instance, sideName: string): SideInfo
+	local info: SideInfo = {}
+	local folder = entry:FindFirstChild(sideName)
+	if folder then
+		for _, child in folder:GetChildren() do
+			if child.Name == "Destination" and child:IsA("ObjectValue") then
+				info.destination = child.Value
+			else
+				info.clone = child
+			end
+		end
+		info.destinationPath = folder:GetAttribute("DestinationPath") :: string?
+	end
+	return info
+end
+
+local function makeGhost(conflict: Conflict, side: string, clone: Instance, flankOffset: Vector3): Ghost?
+	if not clone:IsA("PVInstance") then
+		return nil
+	end
+	local root = clone:Clone()
+	root.Name = `{conflict.name}_{side}`
+	local parts: { [BasePart]: number } = {}
+	eachPart(root, function(part)
+		parts[part] = part.Transparency
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Locked = true
+	end)
+	local color = if side == "ours" then OURS_COLOR else THEIRS_COLOR
+	local highlight = Instance.new("Highlight")
+	highlight.FillColor = color
+	highlight.OutlineColor = color
+	highlight.Adornee = root
+	highlight.Parent = root
+	local truePivot = (clone :: PVInstance):GetPivot()
+	root.Parent = ghostRoot
+	local ghost: Ghost = {
+		root = root,
+		parts = parts,
+		highlight = highlight,
+		truePivot = truePivot,
+		flankPivot = truePivot + flankOffset,
+	}
+	(root :: PVInstance):PivotTo(ghost.flankPivot)
+	return ghost
+end
+
+-- "dim": translucent reference beside the target. "solid": the true look, for
+-- a version previewed in place. "hidden": the target itself shows it already.
+local function setGhostState(ghost: Ghost, state: "dim" | "solid" | "hidden", pivot: CFrame?)
+	for part, original in ghost.parts do
+		part.Transparency = if state == "solid" then original elseif state == "dim" then 1 - (1 - original) * 0.35 else 1
+	end
+	ghost.highlight.Enabled = state ~= "hidden"
+	ghost.highlight.FillTransparency = if state == "solid" then 0.8 else 0.92
+	ghost.highlight.OutlineTransparency = if state == "solid" then 0 else 0.5
+	if pivot then
+		(ghost.root :: PVInstance):PivotTo(pivot)
+	end
+end
+
+-- Boot pass: side clones, base snapshots (for unpick restore), ghost twins.
+-- Ghosts spawn for spatial targets only, and not for Name conflicts (both
+-- twins would look identical — the panel summary carries those).
+for _, conflict in conflicts do
+	conflict.ours = sideInfo(conflict.entry, "Ours")
+	conflict.theirs = sideInfo(conflict.entry, "Theirs")
+	conflict.rendered = "__init"
+
+	local target = conflict.target
+	if conflict.kind == "Property" then
+		conflict.baseValue = liveValue(conflict)
+	elseif conflict.kind == "MoveTarget" then
+		conflict.baseParent = target.Parent
+	elseif conflict.kind == "DeleteVsEdit" then
+		local parts: { [BasePart]: number } = {}
+		eachPart(target, function(part)
+			parts[part] = part.Transparency
+		end)
+		conflict.targetParts = parts
+	end
+
+	local spatial = target:IsA("PVInstance") and target:IsDescendantOf(workspace)
+	if spatial and (conflict.kind == "Property" and conflict.property ~= "Name" or conflict.kind == "DeleteVsEdit") then
+		local _, size = getBoundingBox(target :: PVInstance)
+		local gap = size.X + 3
+		for side, offset in { ours = Vector3.new(-gap, 0, 0), theirs = Vector3.new(gap, 0, 0) } :: { [string]: Vector3 } do
+			local clone = ((if side == "ours" then conflict.ours else conflict.theirs) :: SideInfo).clone
+			if clone then
+				local ghost = makeGhost(conflict, side, clone, offset)
+				if ghost then
+					ghosts[`{conflict.name}/{side}`] = ghost
+				end
+			end
+		end
+	end
+	if conflict.kind == "MoveTarget" then
+		for side, info in
+			{ ours = conflict.ours :: SideInfo, theirs = conflict.theirs :: SideInfo } :: { [string]: SideInfo }
+		do
+			local destination = info.destination
+			if destination and destination:IsA("PVInstance") and destination:IsDescendantOf(workspace) then
+				local color = if side == "ours" then OURS_COLOR else THEIRS_COLOR
+				local highlight = Instance.new("Highlight")
+				highlight.FillColor = color
+				highlight.OutlineColor = color
+				highlight.FillTransparency = 0.92
+				highlight.OutlineTransparency = 0.5
+				highlight.Adornee = destination
+				highlight.Parent = ghostRoot
+				destinationHighlights[`{conflict.name}/{side}`] = highlight
+			end
+		end
+	end
+end
+
+-- Morph the Studio copy toward the staged outcome; nil (unpicked) restores
+-- the base snapshot. Ghost emphasis follows: the staged side's ghost hides
+-- (the target now previews it), the rejected side stays dim for comparison.
+local function applyPreview(conflict: Conflict)
+	local staged = conflict.resolved
+
+	if conflict.kind == "Property" then
+		if staged ~= "custom" then
+			local sideClone = if staged == "ours"
+				then (conflict.ours :: SideInfo).clone
+				elseif staged == "theirs" then (conflict.theirs :: SideInfo).clone
+				else nil
+			local property = conflict.property :: string
+			if sideClone then
+				(conflict.target :: any)[property] = (sideClone :: any)[property]
+			elseif staged == nil then
+				(conflict.target :: any)[property] = conflict.baseValue
+			end
+		end
+	elseif conflict.kind == "MoveTarget" then
+		local destination = if staged == "ours"
+			then (conflict.ours :: SideInfo).destination
+			elseif staged == "theirs" then (conflict.theirs :: SideInfo).destination
+			else nil
+		-- A side with no live destination (moved into the other branch's added
+		-- content) previews as base rather than sticking at a stale parent.
+		destination = destination or conflict.baseParent
+		if destination then
+			conflict.target.Parent = destination
+		end
+	elseif conflict.kind == "DeleteVsEdit" then
+		-- Staging the delete side fades the target to a remnant; staging the
+		-- edit side swaps the edited ghost in solid at the true position and
+		-- hides the base target entirely.
+		local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
+		local fade = if staged == nil then nil elseif staged == editSide then 1 else 0.92
+		for part, original in conflict.targetParts :: { [BasePart]: number } do
+			part.Transparency = fade or original
+		end
+		local ghost = ghosts[`{conflict.name}/{editSide}`]
+		if ghost then
+			if staged == editSide then
+				setGhostState(ghost, "solid", ghost.truePivot)
+			else
+				setGhostState(ghost, "dim", ghost.flankPivot)
+			end
+		end
+		return
+	end
+
+	for _, side in { "ours", "theirs" } do
+		local ghost = ghosts[`{conflict.name}/{side}`]
+		if ghost then
+			setGhostState(ghost, if staged == side then "hidden" else "dim")
+		end
+		local highlight = destinationHighlights[`{conflict.name}/{side}`]
+		if highlight then
+			highlight.FillTransparency = if staged == side then 0.75 else 0.92
+			highlight.OutlineTransparency = if staged == side then 0 else 0.5
+		end
+	end
+end
+
+local function renderPreviews()
+	if finished then
+		if ghostRoot.Parent then
+			ghostRoot:Destroy()
+		end
+		return
+	end
+	for _, conflict in conflicts do
+		local state = conflict.resolved or "unresolved"
+		if conflict.rendered ~= state then
+			conflict.rendered = state
+			applyPreview(conflict)
+		end
+	end
+end
 
 local liveHighlights: { [string]: Highlight } = {}
 
@@ -323,6 +571,43 @@ local function Button(id: string, text: string, highlighted: boolean, color: Col
 	})
 end
 
+local function escapeRich(s: string): string
+	return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+local function formatValue(v: any): string
+	local t = typeof(v)
+	if t == "Color3" then
+		return `{math.round(v.R * 255)}, {math.round(v.G * 255)}, {math.round(v.B * 255)}`
+	elseif t == "number" then
+		return string.format("%.4g", v)
+	elseif t == "string" then
+		return `"{escapeRich(v)}"`
+	elseif t == "boolean" then
+		return tostring(v)
+	end
+	return t
+end
+
+-- What choosing this side means, one glance: the property value it sets, the
+-- destination it moves to, or whether it keeps (edited) / deletes the target.
+local function sideSummary(conflict: Conflict, side: string): string?
+	local info = (if side == "ours" then conflict.ours else conflict.theirs) :: SideInfo?
+	if not info then
+		return nil
+	end
+	if conflict.kind == "Property" then
+		local clone = info.clone
+		return clone and formatValue((clone :: any)[conflict.property :: string])
+	elseif conflict.kind == "MoveTarget" then
+		local path = info.destinationPath
+		return path and `→ {escapeRich(path)}`
+	elseif conflict.kind == "DeleteVsEdit" then
+		return if info.clone then "keep (edited)" else "delete"
+	end
+	return nil
+end
+
 local function ConflictRow(conflict: Conflict)
 	Element("Frame", {
 		id = conflict.name,
@@ -342,6 +627,22 @@ local function ConflictRow(conflict: Conflict)
 			Font = Enum.Font.Gotham,
 			TextWrapped = true,
 		})
+
+		local oursSummary = sideSummary(conflict, "ours")
+		local theirsSummary = sideSummary(conflict, "theirs")
+		if oursSummary or theirsSummary then
+			Element("TextLabel", {
+				id = "values",
+				RichText = true,
+				Text = `<font color="#46A0FF">{oursSummary or "?"}</font>  ·  <font color="#AA5AFF">{theirsSummary or "?"}</font>`,
+				tags = { "text-base", "auto-size-y" },
+				TextColor3 = Color3.fromRGB(200, 200, 205),
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextSize = 12,
+				Font = Enum.Font.RobotoMono,
+				TextWrapped = true,
+			})
+		end
 
 		Element("Frame", {
 			id = "buttons",
@@ -434,6 +735,7 @@ local function Panel()
 end
 
 RunService.Heartbeat:Connect(function()
+	renderPreviews()
 	updateHighlights()
 	Portal(CoreGui, "rbx-diff-resolver", function()
 		Element("ScreenGui", {
