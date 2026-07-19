@@ -13,16 +13,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
-// ============================================================================
-// Helper macros (must be defined before use)
-// ============================================================================
-
-macro_rules! round {
-    ($value:expr) => {
-        (($value * 10.0).round() / 10.0)
-    };
-}
-
 macro_rules! n_hash {
     ($hash:ident, $($num:expr),*) => {
         {$(
@@ -31,8 +21,35 @@ macro_rules! n_hash {
     };
 }
 
+/// Hash floats exactly as Roblox stores them. Zero has two IEEE encodings and
+/// NaN has many; canonicalizing those keeps semantically identical values on
+/// one hash without discarding any finite precision.
+fn f32_hash(hasher: &mut Hasher, value: f32) {
+    let bits = if value == 0.0 {
+        0
+    } else if value.is_nan() {
+        f32::NAN.to_bits()
+    } else {
+        value.to_bits()
+    };
+    hasher.update(&bits.to_le_bytes());
+}
+
+fn f64_hash(hasher: &mut Hasher, value: f64) {
+    let bits = if value == 0.0 {
+        0
+    } else if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    };
+    hasher.update(&bits.to_le_bytes());
+}
+
 fn vector_hash(hasher: &mut Hasher, vector: Vector3) {
-    n_hash!(hasher, round!(vector.x), round!(vector.y), round!(vector.z))
+    f32_hash(hasher, vector.x);
+    f32_hash(hasher, vector.y);
+    f32_hash(hasher, vector.z);
 }
 
 /// The target's position in the tree as child indices from the root,
@@ -276,16 +293,19 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
             vector_hash(hasher, cf.orientation.z);
         }
         Variant::Color3(color) => {
-            n_hash!(hasher, round!(color.r), round!(color.g), round!(color.b));
+            f32_hash(hasher, color.r);
+            f32_hash(hasher, color.g);
+            f32_hash(hasher, color.b);
         }
         Variant::Color3uint8(color) => { hasher.update(&[color.r, color.g, color.b]); }
         Variant::ColorSequence(seq) => {
             let mut keypoints: Vec<_> = seq.keypoints.iter().collect();
-            keypoints.sort_unstable_by(|a, b| {
-                round!(a.time).partial_cmp(&round!(b.time)).unwrap()
-            });
+            keypoints.sort_unstable_by(|a, b| a.time.total_cmp(&b.time));
             for kp in keypoints {
-                n_hash!(hasher, round!(kp.time), round!(kp.color.r), round!(kp.color.g), round!(kp.color.b));
+                f32_hash(hasher, kp.time);
+                f32_hash(hasher, kp.color.r);
+                f32_hash(hasher, kp.color.g);
+                f32_hash(hasher, kp.color.b);
             }
         }
         Variant::Content(content) => {
@@ -306,22 +326,25 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
         }
         Variant::Enum(e) => { n_hash!(hasher, e.to_u32()); }
         Variant::Faces(f) => { hasher.update(&[f.bits()]); }
-        Variant::Float32(n) => { n_hash!(hasher, round!(*n)); }
-        Variant::Float64(n) => { n_hash!(hasher, round!(n)); }
+        Variant::Float32(n) => { f32_hash(hasher, *n); }
+        Variant::Float64(n) => { f64_hash(hasher, *n); }
         Variant::Font(f) => {
             n_hash!(hasher, f.weight as u16, f.style as u8);
             hasher.update(f.family.as_bytes());
         }
         Variant::Int32(n) => { n_hash!(hasher, n); }
         Variant::Int64(n) => { n_hash!(hasher, n); }
-        Variant::NumberRange(nr) => { n_hash!(hasher, round!(nr.max), round!(nr.min)); }
+        Variant::NumberRange(nr) => {
+            f32_hash(hasher, nr.max);
+            f32_hash(hasher, nr.min);
+        }
         Variant::NumberSequence(seq) => {
             let mut keypoints: Vec<_> = seq.keypoints.iter().collect();
-            keypoints.sort_unstable_by(|a, b| {
-                round!(a.time).partial_cmp(&round!(b.time)).unwrap()
-            });
+            keypoints.sort_unstable_by(|a, b| a.time.total_cmp(&b.time));
             for kp in keypoints {
-                n_hash!(hasher, round!(kp.time), round!(kp.value), round!(kp.envelope));
+                f32_hash(hasher, kp.time);
+                f32_hash(hasher, kp.value);
+                f32_hash(hasher, kp.envelope);
             }
         }
         Variant::OptionalCFrame(maybe_cf) => {
@@ -340,14 +363,11 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
                 PhysicalProperties::Default => { hasher.update(&[0x00]); }
                 PhysicalProperties::Custom(custom) => {
                     hasher.update(&[0x01]);
-                    n_hash!(
-                        hasher,
-                        round!(custom.density()),
-                        round!(custom.friction()),
-                        round!(custom.elasticity()),
-                        round!(custom.friction_weight()),
-                        round!(custom.elasticity_weight())
-                    );
+                    f32_hash(hasher, custom.density());
+                    f32_hash(hasher, custom.friction());
+                    f32_hash(hasher, custom.elasticity());
+                    f32_hash(hasher, custom.friction_weight());
+                    f32_hash(hasher, custom.elasticity_weight());
                 }
             }
         }
@@ -356,13 +376,10 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
             vector_hash(hasher, ray.direction);
         }
         Variant::Rect(rect) => {
-            n_hash!(
-                hasher,
-                round!(rect.max.x),
-                round!(rect.max.y),
-                round!(rect.min.x),
-                round!(rect.min.y)
-            );
+            f32_hash(hasher, rect.max.x);
+            f32_hash(hasher, rect.max.y);
+            f32_hash(hasher, rect.min.x);
+            f32_hash(hasher, rect.min.y);
         }
         Variant::Ref(target_ref) => {
             if target_ref.is_none() {
@@ -405,15 +422,20 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
                 hasher.update(tag.as_bytes());
             }
         }
-        Variant::UDim(udim) => { n_hash!(hasher, round!(udim.scale), udim.offset); }
-        Variant::UDim2(udim) => {
-            n_hash!(
-                hasher,
-                round!(udim.x.scale), udim.x.offset,
-                round!(udim.y.scale), udim.y.offset
-            );
+        Variant::UDim(udim) => {
+            f32_hash(hasher, udim.scale);
+            n_hash!(hasher, udim.offset);
         }
-        Variant::Vector2(v2) => { n_hash!(hasher, round!(v2.x), round!(v2.y)); }
+        Variant::UDim2(udim) => {
+            f32_hash(hasher, udim.x.scale);
+            n_hash!(hasher, udim.x.offset);
+            f32_hash(hasher, udim.y.scale);
+            n_hash!(hasher, udim.y.offset);
+        }
+        Variant::Vector2(v2) => {
+            f32_hash(hasher, v2.x);
+            f32_hash(hasher, v2.y);
+        }
         Variant::Vector2int16(v2) => { n_hash!(hasher, v2.x, v2.y); }
         Variant::Vector3(v3) => { vector_hash(hasher, *v3); }
         Variant::Vector3int16(v3) => { n_hash!(hasher, v3.x, v3.y, v3.z); }
@@ -429,21 +451,23 @@ pub fn get_comparable_properties(class_name: &str) -> &'static HashSet<String> {
     use std::sync::OnceLock;
     use std::sync::Mutex;
 
-    static CLASS_PROPS: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+    static CLASS_PROPS: OnceLock<Mutex<HashMap<String, &'static HashSet<String>>>> = OnceLock::new();
 
     let map_mutex = CLASS_PROPS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = map_mutex.lock().unwrap();
 
     if !map.contains_key(class_name) {
-        let props = build_comparable_properties(class_name);
+        // One allocation per reflection class for the process lifetime. The
+        // stable allocation lets callers release the mutex before reading the
+        // set; storing HashSet values directly here was unsound because a
+        // later HashMap reallocation invalidated previously returned refs.
+        let props = Box::leak(Box::new(build_comparable_properties(class_name)));
         map.insert(class_name.to_string(), props);
     }
 
-    // Safety: we never remove entries, only add — pointer remains valid
-    let ptr = map.get(class_name).unwrap() as *const HashSet<String>;
-    // Release the lock before returning
+    let props = *map.get(class_name).unwrap();
     drop(map);
-    unsafe { &*ptr }
+    props
 }
 
 /// Serialized-but-not-scriptable properties that carry real user content.
@@ -502,4 +526,36 @@ fn build_comparable_properties(class_name: &str) -> HashSet<String> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_comparable_properties;
+
+    #[test]
+    fn comparable_property_references_survive_cache_growth_and_concurrency() {
+        let part_properties = get_comparable_properties("Part");
+        assert!(part_properties.contains("CFrame"));
+
+        let classes: Vec<String> = rbx_reflection_database::get()
+            .unwrap()
+            .classes
+            .keys()
+            .map(|name| name.to_string())
+            .collect();
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for class in &classes {
+                        let _ = get_comparable_properties(class);
+                    }
+                });
+            }
+        });
+
+        // This reference predates every insertion above. It must still point
+        // to the same stable set after the backing HashMap has grown.
+        assert!(part_properties.contains("CFrame"));
+    }
 }

@@ -134,8 +134,8 @@ fn format_property_value(v: &PropertyValue) -> String {
         PropertyValue::Bool { value } => value.to_string(),
         PropertyValue::Int32 { value } => value.to_string(),
         PropertyValue::Int64 { value } => value.to_string(),
-        PropertyValue::Float32 { value } => format!("{:.2}", value),
-        PropertyValue::Float64 { value } => format!("{:.2}", value),
+        PropertyValue::Float32 { value } => value.to_string(),
+        PropertyValue::Float64 { value } => value.to_string(),
         PropertyValue::String { value } => {
             if value.len() > 50 {
                 format!("\"{}...\"", &value[..47])
@@ -145,19 +145,33 @@ fn format_property_value(v: &PropertyValue) -> String {
         }
         PropertyValue::BinaryString { len } => format!("<binary {} bytes>", len),
         PropertyValue::Ref { value } => format!("Ref({})", &value[..8.min(value.len())]),
-        PropertyValue::Vector2 { x, y } => format!("({:.2}, {:.2})", x, y),
-        PropertyValue::Vector3 { x, y, z } => format!("({:.2}, {:.2}, {:.2})", x, y, z),
-        PropertyValue::CFrame { position, .. } => {
-            format!("CFrame({:.2}, {:.2}, {:.2})", position[0], position[1], position[2])
+        PropertyValue::Vector2 { x, y } => format!("({}, {})", x, y),
+        PropertyValue::Vector3 { x, y, z } => format!("({}, {}, {})", x, y, z),
+        PropertyValue::CFrame { position, orientation } => {
+            format!(
+                "CFrame(position=({}, {}, {}), orientation=[({}, {}, {}), ({}, {}, {}), ({}, {}, {})])",
+                position[0],
+                position[1],
+                position[2],
+                orientation[0][0],
+                orientation[0][1],
+                orientation[0][2],
+                orientation[1][0],
+                orientation[1][1],
+                orientation[1][2],
+                orientation[2][0],
+                orientation[2][1],
+                orientation[2][2],
+            )
         }
-        PropertyValue::Color3 { r, g, b } => format!("Color3({:.2}, {:.2}, {:.2})", r, g, b),
+        PropertyValue::Color3 { r, g, b } => format!("Color3({}, {}, {})", r, g, b),
         PropertyValue::BrickColor { value } => format!("BrickColor({})", value),
         PropertyValue::Enum { value } => format!("Enum({})", value),
-        PropertyValue::UDim { scale, offset } => format!("UDim({:.2}, {})", scale, offset),
+        PropertyValue::UDim { scale, offset } => format!("UDim({}, {})", scale, offset),
         PropertyValue::UDim2 { x_scale, x_offset, y_scale, y_offset } => {
-            format!("UDim2({{{:.2}, {}}}, {{{:.2}, {}}})", x_scale, x_offset, y_scale, y_offset)
+            format!("UDim2({{{}, {}}}, {{{}, {}}})", x_scale, x_offset, y_scale, y_offset)
         }
-        PropertyValue::NumberRange { min, max } => format!("NumberRange({:.2}, {:.2})", min, max),
+        PropertyValue::NumberRange { min, max } => format!("NumberRange({}, {})", min, max),
         PropertyValue::NumberSequence { keypoints } => {
             format!("NumberSequence({} keypoints)", keypoints.len())
         }
@@ -165,7 +179,7 @@ fn format_property_value(v: &PropertyValue) -> String {
             format!("ColorSequence({} keypoints)", keypoints.len())
         }
         PropertyValue::Rect { min_x, min_y, max_x, max_y } => {
-            format!("Rect({:.2}, {:.2}, {:.2}, {:.2})", min_x, min_y, max_x, max_y)
+            format!("Rect({}, {}, {}, {})", min_x, min_y, max_x, max_y)
         }
         PropertyValue::Other { type_name } => format!("<{}>", type_name),
     }
@@ -241,4 +255,30 @@ fn print_json(diffs: &[DiffEntry]) {
     };
 
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pretty_output_preserves_sub_millistud_positions() {
+        let value = PropertyValue::CFrame {
+            position: [1.00001, 2.0, 3.0],
+            orientation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        };
+
+        assert!(format_property_value(&value).contains("1.00001"));
+    }
+
+    #[test]
+    fn pretty_output_includes_cframe_orientation() {
+        let value = PropertyValue::CFrame {
+            position: [0.0; 3],
+            orientation: [[1.0, 0.00001, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        };
+
+        assert!(format_property_value(&value).contains("orientation"));
+        assert!(format_property_value(&value).contains("0.00001"));
+    }
 }

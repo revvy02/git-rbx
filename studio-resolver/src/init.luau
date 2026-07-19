@@ -473,12 +473,39 @@ local function escapeRich(s: string): string
 	return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
 end
 
+-- Roblox spatial/color values are backed by float32 components. Nine
+-- significant digits are enough to distinguish every float32 value without
+-- filling the conflict list with double-precision conversion noise.
+local function formatFloat32(v: number): string
+	return string.format("%.9g", v)
+end
+
+local function formatFloat32Components(values: { number }): string
+	local formatted = table.create(#values)
+	for i, value in values do
+		formatted[i] = formatFloat32(value)
+	end
+	return table.concat(formatted, ", ")
+end
+
 local function formatValue(v: any): string
 	local t = typeof(v)
 	if t == "Color3" then
-		return `{math.round(v.R * 255)}, {math.round(v.G * 255)}, {math.round(v.B * 255)}`
+		return `Color3({formatFloat32Components({ v.R, v.G, v.B })})`
 	elseif t == "number" then
-		return string.format("%.4g", v)
+		-- tostring uses Luau's shortest round-trippable representation, which
+		-- preserves double-backed properties as well as ordinary compact values.
+		return tostring(v)
+	elseif t == "Vector2" then
+		return `Vector2({formatFloat32Components({ v.X, v.Y })})`
+	elseif t == "Vector3" then
+		return `Vector3({formatFloat32Components({ v.X, v.Y, v.Z })})`
+	elseif t == "CFrame" then
+		return `CFrame({formatFloat32Components({ v:GetComponents() })})`
+	elseif t == "UDim" then
+		return `UDim({formatFloat32(v.Scale)}, {v.Offset})`
+	elseif t == "UDim2" then
+		return `UDim2({formatFloat32(v.X.Scale)}, {v.X.Offset}, {formatFloat32(v.Y.Scale)}, {v.Y.Offset})`
 	elseif t == "string" then
 		return `"{escapeRich(v)}"`
 	elseif t == "boolean" then

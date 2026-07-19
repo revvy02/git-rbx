@@ -166,7 +166,7 @@ fn merge_scripts(
                     EditOp::SetProperty { old_ref: a, name: an, value: av },
                     EditOp::SetProperty { old_ref: b, name: bn, value: bv },
                 ) if a == b && an == bn => {
-                    if values_equal(ours_dom, theirs_dom, av, bv, &ours_to_base, &theirs_to_base) {
+                    if values_equal(av, bv, &ours_to_base, &theirs_to_base) {
                         dropped_theirs.insert(j);
                         stats.deduped += 1;
                     } else {
@@ -365,8 +365,6 @@ fn find_remove(ops: &[EditOp], root: Ref, conflicted: &mut HashSet<usize>) -> Ve
 /// Cross-branch value equality. Ref values compare through the base identity
 /// (same logical target); anything unmappable is conservatively unequal.
 fn values_equal(
-    ours_dom: &WeakDom,
-    theirs_dom: &WeakDom,
     a: &Option<Variant>,
     b: &Option<Variant>,
     ours_to_base: &HashMap<Ref, Ref>,
@@ -383,13 +381,7 @@ fn values_equal(
                 _ => false,
             }
         }
-        (Some(va), Some(vb)) => {
-            let mut ha = blake3::Hasher::new();
-            crate::hash::hash_variant(ours_dom, &mut ha, va);
-            let mut hb = blake3::Hasher::new();
-            crate::hash::hash_variant(theirs_dom, &mut hb, vb);
-            ha.finalize() == hb.finalize()
-        }
+        (Some(va), Some(vb)) => crate::diff::non_ref_variants_equal(va, vb),
         _ => false,
     }
 }

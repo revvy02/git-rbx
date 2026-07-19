@@ -561,17 +561,70 @@ fn is_default_value(
     false
 }
 
-/// Compare two variants for equality (with tolerance for floats).
-/// Uses ref mapping for Ref comparison (checks logical identity of targets).
-fn variants_equal(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
-    a: &Variant,
-    b: &Variant,
-    ref_mapping: &HashMap<Ref, Ref>,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
-) -> bool {
+const F32_ABS_TOLERANCE: f32 = 1.0e-7;
+const F64_ABS_TOLERANCE: f64 = 1.0e-12;
+const MAX_FLOAT_ULPS: u32 = 2;
+
+fn ordered_f32_bits(value: f32) -> u32 {
+    let bits = value.to_bits();
+    if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits | 0x8000_0000
+    }
+}
+
+fn ordered_f64_bits(value: f64) -> u64 {
+    let bits = value.to_bits();
+    if bits & 0x8000_0000_0000_0000 != 0 {
+        !bits
+    } else {
+        bits | 0x8000_0000_0000_0000
+    }
+}
+
+fn f32_equal(a: f32, b: f32) -> bool {
+    if a == b || (a.is_nan() && b.is_nan()) {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    (a - b).abs() <= F32_ABS_TOLERANCE
+        || ordered_f32_bits(a).abs_diff(ordered_f32_bits(b)) <= MAX_FLOAT_ULPS
+}
+
+fn f64_equal(a: f64, b: f64) -> bool {
+    if a == b || (a.is_nan() && b.is_nan()) {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    (a - b).abs() <= F64_ABS_TOLERANCE
+        || ordered_f64_bits(a).abs_diff(ordered_f64_bits(b)) <= u64::from(MAX_FLOAT_ULPS)
+}
+
+fn vector2_equal(a: rbx_types::Vector2, b: rbx_types::Vector2) -> bool {
+    f32_equal(a.x, b.x) && f32_equal(a.y, b.y)
+}
+
+fn vector3_equal(a: rbx_types::Vector3, b: rbx_types::Vector3) -> bool {
+    f32_equal(a.x, b.x) && f32_equal(a.y, b.y) && f32_equal(a.z, b.z)
+}
+
+fn cframe_equal(a: rbx_types::CFrame, b: rbx_types::CFrame) -> bool {
+    vector3_equal(a.position, b.position)
+        && vector3_equal(a.orientation.x, b.orientation.x)
+        && vector3_equal(a.orientation.y, b.orientation.y)
+        && vector3_equal(a.orientation.z, b.orientation.z)
+}
+
+/// Semantic equality for variants without cross-DOM Ref identity. Float-backed
+/// Roblox types share one strict policy: an absolute floor near zero or at
+/// most two adjacent float representations. Keeping this separate from hashing
+/// is intentional; exact hashes remain a conservative pruning accelerator.
+pub(crate) fn non_ref_variants_equal(a: &Variant, b: &Variant) -> bool {
     use std::mem::discriminant;
 
     if discriminant(a) != discriminant(b) {
@@ -579,31 +632,75 @@ fn variants_equal(
     }
 
     match (a, b) {
-        (Variant::Float32(x), Variant::Float32(y)) => {
-            x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
+        (Variant::Float32(x), Variant::Float32(y)) => f32_equal(*x, *y),
+        (Variant::Float64(x), Variant::Float64(y)) => f64_equal(*x, *y),
+        (Variant::Vector2(x), Variant::Vector2(y)) => vector2_equal(*x, *y),
+        (Variant::Vector3(x), Variant::Vector3(y)) => vector3_equal(*x, *y),
+        (Variant::CFrame(x), Variant::CFrame(y)) => cframe_equal(*x, *y),
+        (Variant::OptionalCFrame(x), Variant::OptionalCFrame(y)) => match (x, y) {
+            (Some(x), Some(y)) => cframe_equal(*x, *y),
+            (None, None) => true,
+            _ => false,
+        },
+        (Variant::Color3(x), Variant::Color3(y)) => {
+            f32_equal(x.r, y.r) && f32_equal(x.g, y.g) && f32_equal(x.b, y.b)
         }
-        (Variant::Float64(x), Variant::Float64(y)) => {
-            x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
+        (Variant::ColorSequence(x), Variant::ColorSequence(y)) => {
+            x.keypoints.len() == y.keypoints.len()
+                && x.keypoints.iter().zip(&y.keypoints).all(|(x, y)| {
+                    f32_equal(x.time, y.time)
+                        && f32_equal(x.color.r, y.color.r)
+                        && f32_equal(x.color.g, y.color.g)
+                        && f32_equal(x.color.b, y.color.b)
+                })
         }
-        (Variant::Vector3(x), Variant::Vector3(y)) => {
-            (x.x - y.x).abs() < 0.01 && (x.y - y.y).abs() < 0.01 && (x.z - y.z).abs() < 0.01
+        (Variant::NumberRange(x), Variant::NumberRange(y)) => {
+            f32_equal(x.min, y.min) && f32_equal(x.max, y.max)
         }
-        (Variant::CFrame(x), Variant::CFrame(y)) => {
-            // Compare all components (position + rotation matrix), like rojo's
-            // trueEquals — position-only comparison silently drops pure rotations
-            let vec_eq = |a: rbx_types::Vector3, b: rbx_types::Vector3| {
-                (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01 && (a.z - b.z).abs() < 0.01
-            };
-            vec_eq(x.position, y.position)
-                && vec_eq(x.orientation.x, y.orientation.x)
-                && vec_eq(x.orientation.y, y.orientation.y)
-                && vec_eq(x.orientation.z, y.orientation.z)
+        (Variant::NumberSequence(x), Variant::NumberSequence(y)) => {
+            x.keypoints.len() == y.keypoints.len()
+                && x.keypoints.iter().zip(&y.keypoints).all(|(x, y)| {
+                    f32_equal(x.time, y.time)
+                        && f32_equal(x.value, y.value)
+                        && f32_equal(x.envelope, y.envelope)
+                })
         }
-        (Variant::Ref(old_target), Variant::Ref(new_target)) => {
-            refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping, old_deep, new_deep)
+        (Variant::PhysicalProperties(x), Variant::PhysicalProperties(y)) => match (x, y) {
+            (rbx_types::PhysicalProperties::Default, rbx_types::PhysicalProperties::Default) => {
+                true
+            }
+            (
+                rbx_types::PhysicalProperties::Custom(x),
+                rbx_types::PhysicalProperties::Custom(y),
+            ) => {
+                f32_equal(x.density(), y.density())
+                    && f32_equal(x.friction(), y.friction())
+                    && f32_equal(x.elasticity(), y.elasticity())
+                    && f32_equal(x.friction_weight(), y.friction_weight())
+                    && f32_equal(x.elasticity_weight(), y.elasticity_weight())
+            }
+            _ => false,
+        },
+        (Variant::Ray(x), Variant::Ray(y)) => {
+            vector3_equal(x.origin, y.origin) && vector3_equal(x.direction, y.direction)
+        }
+        (Variant::Rect(x), Variant::Rect(y)) => {
+            vector2_equal(x.min, y.min) && vector2_equal(x.max, y.max)
+        }
+        (Variant::Region3(x), Variant::Region3(y)) => {
+            vector3_equal(x.min, y.min) && vector3_equal(x.max, y.max)
+        }
+        (Variant::UDim(x), Variant::UDim(y)) => {
+            f32_equal(x.scale, y.scale) && x.offset == y.offset
+        }
+        (Variant::UDim2(x), Variant::UDim2(y)) => {
+            f32_equal(x.x.scale, y.x.scale)
+                && x.x.offset == y.x.offset
+                && f32_equal(x.y.scale, y.y.scale)
+                && x.y.offset == y.y.offset
         }
         // Asset URIs: Studio rewrites URL spellings on save (roblox.com/asset/?id=N
-        // vs rbxassetid://N) — compare normalized so the same asset is equal
+        // vs rbxassetid://N) — compare normalized so the same asset is equal.
         (Variant::Content(a), Variant::Content(b)) => {
             use crate::hash::normalize_asset_uri;
             use rbx_types::ContentType;
@@ -613,16 +710,36 @@ fn variants_equal(
                     normalize_asset_uri(ua) == normalize_asset_uri(ub)
                 }
                 // Object refs into the DOM: treat as equal (rare; ref identity
-                // is covered by the instances themselves)
+                // is covered by the instances themselves).
                 (ContentType::Object(_), ContentType::Object(_)) => true,
                 _ => false,
             }
         }
         (Variant::ContentId(a), Variant::ContentId(b)) => {
-            crate::hash::normalize_asset_uri(a.as_str()) == crate::hash::normalize_asset_uri(b.as_str())
+            crate::hash::normalize_asset_uri(a.as_str())
+                == crate::hash::normalize_asset_uri(b.as_str())
         }
-        (Variant::UniqueId(_), Variant::UniqueId(_)) => true, // Skip uniqueid
+        (Variant::UniqueId(_), Variant::UniqueId(_)) => true,
         _ => a == b,
+    }
+}
+
+/// Compare two variants for equality. Ref values use the global identity map;
+/// other values use the shared strict floating-point policy above.
+fn variants_equal(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    a: &Variant,
+    b: &Variant,
+    ref_mapping: &HashMap<Ref, Ref>,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
+) -> bool {
+    match (a, b) {
+        (Variant::Ref(old_target), Variant::Ref(new_target)) => {
+            refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping, old_deep, new_deep)
+        }
+        _ => non_ref_variants_equal(a, b),
     }
 }
 
