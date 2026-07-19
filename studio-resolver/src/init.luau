@@ -24,7 +24,9 @@
 	conflicted file exactly as `rbx-diff merge` wrote it.
 
 	Layout: the ecs/ world is the source of truth — conflict entities +
-	session singletons (ecs/cts.luau), mirror/preview/conflicts systems.
+	session singletons (ecs/cts.luau), shared query/staging APIs in
+	ecs/library/, and self-registering systems in ecs/systems/ (each returns
+	function(world, cts, scheduler) and calls scheduler:addSystem itself).
 	config.luau (launch config), format.luau (value/path text), transport.luau
 	(Complete → CLI), components/ (miu panels: Explorer + PropertiesPanel in
 	the sidebar widget, Panel with ConflictRows in the conflicts widget).
@@ -47,13 +49,12 @@ local StyleSheet = packages.wind.StyleSheet
 local WindRules = packages.wind.WindRules
 
 local config = require("@self/config")
-local preview = require("@self/ecs/systems/preview")
+local preview = require("@self/ecs/library/preview")
 local theme = require("@self/theme")
 local transport = require("@self/transport")
 
 local cts = require("@self/ecs/cts")
-local ecsConflicts = require("@self/ecs/systems/conflicts")
-local mirror = require("@self/ecs/systems/mirror")
+local ecsConflicts = require("@self/ecs/library/conflicts")
 local scheduler = require("@self/ecs/scheduler")
 local world = require("@self/ecs/world")
 
@@ -189,9 +190,17 @@ end
 
 local Heartbeat = packages.planckRunService.Phases.Heartbeat
 
-scheduler:addSystem({ phase = Heartbeat, system = preview.renderPreviews })
-scheduler:addSystem({ phase = Heartbeat, system = mirror.sync })
-scheduler:addSystem({ phase = Heartbeat, system = preview.updateHighlights })
+-- ECS systems self-register on the scheduler (same-phase order = add order:
+-- previews render, the mirror diffs the DOM, highlights re-adorn, UI last).
+for _, registerSystem in
+	{
+		require("@self/ecs/systems/renderPreviews"),
+		require("@self/ecs/systems/mirror"),
+		require("@self/ecs/systems/updateHighlights"),
+	}
+do
+	registerSystem(world, cts, scheduler)
+end
 scheduler:addSystem({
 	phase = Heartbeat,
 	system = function()

@@ -52,7 +52,7 @@ end
 -- Every conflict entity in stable list order.
 function conflicts.all(): { any }
 	local out: { any } = {}
-	for entity in world:query(cts.Order):iter() do
+	for entity in world:query(cts.Order) do
 		table.insert(out, entity)
 	end
 	table.sort(out, function(a: any, b: any)

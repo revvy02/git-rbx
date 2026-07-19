@@ -69,8 +69,36 @@ theme.textSize = 14
 theme.textSizeSmall = 12
 theme.headerSize = 12
 
--- Resolver style classes layered on top of WindRules.
+-- Resolver style classes layered on top of WindRules, after miu-wind's
+-- ThemeRules layering: role classes at priority 0, modifiers above them.
+-- Inline props still win over rules, so one-off elements just override.
 function theme.rules()
+	-- Text base + roles. `.text` is the left-aligned mono reset for labels;
+	-- buttons stay centered (TextButton default), so they take `.button`.
+	StyleRule(".text", {
+		BackgroundTransparency = 1,
+		Font = theme.font,
+		TextColor3 = theme.text,
+		TextSize = theme.textSize,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	StyleRule(".text-small", { TextSize = theme.textSizeSmall }, nil, 1)
+	StyleRule(".muted", { TextColor3 = theme.textMuted }, nil, 1)
+	StyleRule(".dim", { TextColor3 = theme.textDim }, nil, 1)
+	StyleRule(".prop-name", { TextColor3 = theme.propName }, nil, 1)
+
+	StyleRule(".button", { Font = theme.font, TextSize = theme.textSizeSmall })
+
+	-- Flush header/section band (centered: no `.text` underneath).
+	StyleRule(".header-band", {
+		BackgroundColor3 = theme.surfaceHigh,
+		BackgroundTransparency = 0,
+		Font = theme.font,
+		TextColor3 = theme.textMuted,
+		TextSize = theme.headerSize,
+	})
+
+	-- Surfaces
 	StyleRule(".surface", { BackgroundColor3 = theme.surface, BackgroundTransparency = 0 })
 	StyleRule(".surface-high", { BackgroundColor3 = theme.surfaceHigh, BackgroundTransparency = 0 })
 	StyleRule(".vs-border::UIStroke", {
@@ -79,6 +107,14 @@ function theme.rules()
 		Color = theme.border,
 		BorderStrokePosition = Enum.BorderStrokePosition.Inner,
 	})
+
+	-- Row backgrounds: the precedence waterfall as rule priorities —
+	-- selected > on-path > stripe over an invisible `.row` base, so a row
+	-- just carries whichever state tags apply.
+	StyleRule(".row", { BackgroundColor3 = theme.bg, BackgroundTransparency = 1 })
+	StyleRule(".stripe", { BackgroundColor3 = theme.bg, BackgroundTransparency = 0.5 }, nil, 1)
+	StyleRule(".on-path", { BackgroundColor3 = theme.selection, BackgroundTransparency = 0.85 }, nil, 2)
+	StyleRule(".selected", { BackgroundColor3 = theme.selection, BackgroundTransparency = 0 }, nil, 3)
 end
 
 return theme

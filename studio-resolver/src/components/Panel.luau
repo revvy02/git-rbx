@@ -3,7 +3,7 @@ local Element = require("../packages").miu.Instance
 local theme = require("../theme")
 local transport = require("../transport")
 
-local conflicts = require("../ecs/systems/conflicts")
+local conflicts = require("../ecs/library/conflicts")
 local cts = require("../ecs/cts")
 local world = require("../ecs/world")
 

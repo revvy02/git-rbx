@@ -12,7 +12,7 @@ local process = require("@rodeo/process")
 local config = require("@self/config")
 local format = require("@self/format")
 
-local conflicts = require("@self/ecs/systems/conflicts")
+local conflicts = require("@self/ecs/library/conflicts")
 local cts = require("@self/ecs/cts")
 local world = require("@self/ecs/world")
 

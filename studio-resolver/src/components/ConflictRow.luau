@@ -2,10 +2,10 @@ local packages = require("../packages")
 local Element = packages.miu.Instance
 
 local format = require("../format")
-local preview = require("../ecs/systems/preview")
+local preview = require("../ecs/library/preview")
 local theme = require("../theme")
 
-local conflicts = require("../ecs/systems/conflicts")
+local conflicts = require("../ecs/library/conflicts")
 local cts = require("../ecs/cts")
 local world = require("../ecs/world")
 

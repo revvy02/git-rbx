@@ -21,9 +21,9 @@ local TreeRow = require("./TreeRow")
 local format = require("../format")
 local theme = require("../theme")
 
-local conflicts = require("../ecs/systems/conflicts")
+local conflicts = require("../ecs/library/conflicts")
 local cts = require("../ecs/cts")
-local mirror = require("../ecs/systems/mirror")
+local mirror = require("../ecs/library/mirror")
 local world = require("../ecs/world")
 
 type SideInfo = cts.SideInfo
@@ -47,7 +47,7 @@ local function seedExpansion()
 		return
 	end
 	seeded = true
-	for _, target in world:query(cts.Target):iter() do
+	for _, target in world:query(cts.Target) do
 		local node = (target :: Instance).Parent
 		while node and node ~= game do
 			expanded[node] = true
