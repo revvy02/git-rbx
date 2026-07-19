@@ -11,28 +11,15 @@
 	so conflict-scale stays readable on real maps without virtualization.
 ]]
 
-local StudioService = game:GetService("StudioService")
-
 local Element = require("../miu/Instance")
 
+local classIcon = require("./classIcon")
 local format = require("../format")
 local state = require("../state")
 local theme = require("../theme")
 
 type Conflict = state.Conflict
 type SideInfo = state.SideInfo
-
--- Studio's own explorer icons (spritesheet slices), cached per class.
-type ClassIcon = { Image: string, ImageRectOffset: Vector2, ImageRectSize: Vector2 }
-local iconCache: { [string]: ClassIcon } = {}
-local function classIcon(className: string): ClassIcon
-	local icon = iconCache[className]
-	if not icon then
-		icon = StudioService:GetClassIcon(className) :: ClassIcon
-		iconCache[className] = icon
-	end
-	return icon
-end
 
 type Row = {
 	inst: Instance?,
