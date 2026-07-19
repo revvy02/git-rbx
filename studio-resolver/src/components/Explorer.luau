@@ -21,7 +21,10 @@ local TreeRow = require("./TreeRow")
 local format = require("../format")
 local state = require("../state")
 local theme = require("../theme")
-local world = require("../world")
+
+local cts = require("../ecs/cts")
+local mirror = require("../ecs/systems/mirror")
+local world = require("../ecs/world")
 
 type Conflict = state.Conflict
 type SideInfo = state.SideInfo
@@ -125,12 +128,12 @@ local function resultRows(): { Row }
 	revealSelected()
 
 	local roots = treeRoots()
-	world.syncTree(roots)
+	mirror.syncTree(roots)
 
 	local rows: { Row } = {}
 	local function visit(entity: any, depth: number)
-		local inst = world.world:get(entity, world.Ref) :: Instance
-		local children = world.childrenOf(entity)
+		local inst = world:get(entity, cts.Ref) :: Instance
+		local children = mirror.childrenOf(entity)
 		local isExpanded = expanded[inst] == true
 		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
 		if isExpanded then
@@ -140,7 +143,7 @@ local function resultRows(): { Row }
 		end
 	end
 	for _, root in roots do
-		visit(world.entityFor(root), 0)
+		visit(mirror.entityFor(root), 0)
 	end
 	return rows
 end
