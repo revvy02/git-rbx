@@ -72,28 +72,6 @@ local function revealSelected()
 	end
 end
 
--- Model previews root at the imported content; places root at Workspace plus
--- any service holding a conflict target.
-local function treeRoots(): { Instance }
-	local previewFolder = workspace:FindFirstChild("RbxDiffModelPreview")
-	if previewFolder then
-		return previewFolder:GetChildren()
-	end
-	local roots: { Instance } = { workspace }
-	local seen: { [Instance]: boolean } = { [workspace :: Instance] = true }
-	for _, conflict in state.conflicts do
-		local top: Instance = conflict.target
-		while top.Parent and top.Parent ~= game do
-			top = top.Parent :: Instance
-		end
-		if not seen[top] then
-			seen[top] = true
-			table.insert(roots, top)
-		end
-	end
-	return roots
-end
-
 -- Session artifacts stay out of the tree.
 local function visibleChildren(inst: Instance): { Instance }
 	local out: { Instance } = {}
@@ -127,9 +105,6 @@ local function resultRows(): { Row }
 	seedExpansion()
 	revealSelected()
 
-	local roots = treeRoots()
-	mirror.syncTree(roots)
-
 	local rows: { Row } = {}
 	local function visit(entity: any, depth: number)
 		local inst = world:get(entity, cts.Ref) :: Instance
@@ -142,7 +117,7 @@ local function resultRows(): { Row }
 			end
 		end
 	end
-	for _, root in roots do
+	for _, root in mirror.roots() do
 		visit(mirror.entityFor(root), 0)
 	end
 	return rows

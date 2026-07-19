@@ -7,10 +7,10 @@
 	is still the only writer.
 ]]
 
-local state = require("@self/state")
+local state = require("../../state")
 
-local getBoundingBox = require("@self/viewport/getBoundingBox")
-local getIdealCameraCFrame = require("@self/viewport/getIdealCameraCFrame")
+local getBoundingBox = require("../../viewport/getBoundingBox")
+local getIdealCameraCFrame = require("../../viewport/getIdealCameraCFrame")
 
 type Conflict = state.Conflict
 type SideInfo = state.SideInfo

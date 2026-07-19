@@ -45,12 +45,13 @@ local StyleLink = packages.wind.StyleLink
 local StyleSheet = packages.wind.StyleSheet
 local WindRules = packages.wind.WindRules
 
-local preview = require("@self/preview")
+local preview = require("@self/ecs/systems/preview")
 local state = require("@self/state")
 local theme = require("@self/theme")
 local transport = require("@self/transport")
 
 local ecsConflicts = require("@self/ecs/systems/conflicts")
+local mirror = require("@self/ecs/systems/mirror")
 local scheduler = require("@self/ecs/scheduler")
 
 local Explorer = require("@self/components/Explorer")
@@ -182,6 +183,7 @@ end
 local Heartbeat = packages.planckRunService.Phases.Heartbeat
 
 scheduler:addSystem({ phase = Heartbeat, system = preview.renderPreviews })
+scheduler:addSystem({ phase = Heartbeat, system = mirror.sync })
 scheduler:addSystem({ phase = Heartbeat, system = preview.updateHighlights })
 scheduler:addSystem({
 	phase = Heartbeat,

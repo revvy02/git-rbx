@@ -1,7 +1,7 @@
 local Element = require("../packages").miu.Instance
 
 local format = require("../format")
-local preview = require("../preview")
+local preview = require("../ecs/systems/preview")
 local state = require("../state")
 local theme = require("../theme")
 

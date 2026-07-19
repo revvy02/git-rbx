@@ -7,6 +7,8 @@
 
 local packages = require("../../packages")
 
+local state = require("../../state")
+
 local cts = require("../cts")
 local world = require("../world")
 
@@ -23,6 +25,7 @@ function mirror.entityFor(inst: Instance): any
 	if not entity then
 		entity = world:entity()
 		world:set(entity, cts.Ref, inst)
+		world:set(entity, jecs.Name, inst.Name)
 		entities[inst] = entity
 	end
 	return entity
@@ -30,6 +33,40 @@ end
 
 function mirror.entityOf(inst: Instance): any?
 	return entities[inst]
+end
+
+-- Model previews root at the imported content; places root at Workspace plus
+-- any service holding a conflict target.
+local currentRoots: { Instance } = {}
+
+local function treeRoots(): { Instance }
+	local previewFolder = workspace:FindFirstChild("RbxDiffModelPreview")
+	if previewFolder then
+		return previewFolder:GetChildren()
+	end
+	local roots: { Instance } = { workspace }
+	local seen: { [Instance]: boolean } = { [workspace :: Instance] = true }
+	for _, conflict in state.conflicts do
+		local top: Instance = conflict.target
+		while top.Parent and top.Parent ~= game do
+			top = top.Parent :: Instance
+		end
+		if not seen[top] then
+			seen[top] = true
+			table.insert(roots, top)
+		end
+	end
+	return roots
+end
+
+function mirror.roots(): { Instance }
+	return currentRoots
+end
+
+-- The scheduled system: refresh roots and frame-diff the tree.
+function mirror.sync()
+	currentRoots = treeRoots()
+	mirror.syncTree(currentRoots)
 end
 
 function mirror.syncTree(roots: { Instance })
