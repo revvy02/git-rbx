@@ -10,7 +10,7 @@
 	ARE enumerable and complete.
 ]]
 
-local Element = require("../miu/Instance")
+local Element = require("../packages").miu.Instance
 
 local format = require("../format")
 local state = require("../state")

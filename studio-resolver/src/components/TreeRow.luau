@@ -9,7 +9,7 @@
 	State waterfall for the background: selected > on-path > tint.
 ]]
 
-local Element = require("../miu/Instance")
+local Element = require("../packages").miu.Instance
 
 local classIcon = require("./classIcon")
 local theme = require("../theme")

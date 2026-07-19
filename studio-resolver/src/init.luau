@@ -37,15 +37,15 @@ local process = require("@rodeo/process")
 
 local argparse = require("@pkg/argparse")
 
--- Leaf requires: rodeo's darklua bundling can't resolve a require to an
--- init.luau, so miu's aggregator (src/miu/init.luau) can't be the target —
--- the vendored package keeps its upstream shape regardless.
-local Element = require("@self/miu/Instance")
-local Portal = require("@self/miu/Portal")
+-- Real packages, not vendors: packages.luau rojo-builds roblox_packages and
+-- imports it, so the pesde shims resolve as instances.
+local packages = require("@self/packages")
+local Element = packages.miu.Instance
+local Portal = packages.miu.Portal
 
-local StyleLink = require("@self/wind/StyleLink")
-local StyleSheet = require("@self/wind/StyleSheet")
-local WindRules = require("@self/wind/WindRules")
+local StyleLink = packages.wind.StyleLink
+local StyleSheet = packages.wind.StyleSheet
+local WindRules = packages.wind.WindRules
 
 local preview = require("@self/preview")
 local state = require("@self/state")
@@ -62,6 +62,7 @@ local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts v
 parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
 parser:option("--rbx-diff", "Path to the rbx-diff binary"):target("rbxDiffBin"):default("rbx-diff")
 parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
+parser:option("--resolver-root", "Resolver checkout dir (read by packages.luau)"):target("resolverRoot"):default(".")
 
 local args = parser:parse(process.args)
 local mergedFile = args.file

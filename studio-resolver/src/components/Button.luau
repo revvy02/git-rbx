@@ -1,4 +1,4 @@
-local Element = require("../miu/Instance")
+local Element = require("../packages").miu.Instance
 
 local theme = require("../theme")
 

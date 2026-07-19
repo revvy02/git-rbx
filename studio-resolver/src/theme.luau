@@ -5,7 +5,7 @@
 	action blue, and the VS Code semantic palette for diff states.
 ]]
 
-local StyleRule = require("@self/wind/StyleRule")
+local StyleRule = require("@self/packages").wind.StyleRule
 
 local theme = {}
 

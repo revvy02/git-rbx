@@ -14,7 +14,7 @@
 	fully expanded; collapses stick either way.
 ]]
 
-local Element = require("../miu/Instance")
+local Element = require("../packages").miu.Instance
 
 local TreeRow = require("./TreeRow")
 

@@ -1,4 +1,4 @@
-local Element = require("../../miu/Instance")
+local Element = require("../../packages").miu.Instance
 
 local classIcon = require("../classIcon")
 local format = require("../../format")

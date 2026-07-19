@@ -360,11 +360,13 @@ fn cmd_resolve(
     bail!("specify --list, --take <ours|theirs> (--path/--all), --finalize, or --studio");
 }
 
-/// Entry point of the Studio resolver, resolved against this crate's checkout
-/// at build time. `resolve --studio` therefore needs the checkout present at
-/// its build location — fine while the tool is iterated and run from source;
-/// a self-contained binary (pre-bundled script embedded at build) is the
-/// eventual shape once the resolver stabilizes.
+/// The Studio resolver checkout, resolved against this crate at build time.
+/// `resolve --studio` therefore needs the checkout present at its build
+/// location — fine while the tool is iterated and run from source; a
+/// self-contained binary (pre-bundled script embedded at build) is the
+/// eventual shape once the resolver stabilizes. The root is also passed to
+/// the script (--resolver-root) so it can rojo-build roblox_packages.
+const RESOLVER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolver");
 const RESOLVER_ENTRY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolver/src/init.luau");
 
 /// Launch the visual resolver in Roblox Studio via rodeo. The session stages
@@ -404,7 +406,9 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         .arg("--")
         .arg(&abs_file)
         .arg("--rbx-diff")
-        .arg(std::env::current_exe()?);
+        .arg(std::env::current_exe()?)
+        .arg("--resolver-root")
+        .arg(RESOLVER_ROOT);
     if let Some(side) = auto {
         cmd.args(["--auto", side]);
     }
