@@ -144,42 +144,30 @@ return function()
 
 	-- Direct forms — apply to an explicit UIPadding instance tagged with the class (mirrors
 	-- the pseudo rules above, for when you create the UIPadding yourself).
-	StyleRule(
-		"UIPadding.p-xs",
-		{
-			PaddingTop = UDim.new(0, XS),
-			PaddingBottom = UDim.new(0, XS),
-			PaddingLeft = UDim.new(0, XS),
-			PaddingRight = UDim.new(0, XS),
-		}
-	)
-	StyleRule(
-		"UIPadding.p-sm",
-		{
-			PaddingTop = UDim.new(0, SM),
-			PaddingBottom = UDim.new(0, SM),
-			PaddingLeft = UDim.new(0, SM),
-			PaddingRight = UDim.new(0, SM),
-		}
-	)
-	StyleRule(
-		"UIPadding.p-md",
-		{
-			PaddingTop = UDim.new(0, MD),
-			PaddingBottom = UDim.new(0, MD),
-			PaddingLeft = UDim.new(0, MD),
-			PaddingRight = UDim.new(0, MD),
-		}
-	)
-	StyleRule(
-		"UIPadding.p-lg",
-		{
-			PaddingTop = UDim.new(0, XL),
-			PaddingBottom = UDim.new(0, XL),
-			PaddingLeft = UDim.new(0, XL),
-			PaddingRight = UDim.new(0, XL),
-		}
-	)
+	StyleRule("UIPadding.p-xs", {
+		PaddingTop = UDim.new(0, XS),
+		PaddingBottom = UDim.new(0, XS),
+		PaddingLeft = UDim.new(0, XS),
+		PaddingRight = UDim.new(0, XS),
+	})
+	StyleRule("UIPadding.p-sm", {
+		PaddingTop = UDim.new(0, SM),
+		PaddingBottom = UDim.new(0, SM),
+		PaddingLeft = UDim.new(0, SM),
+		PaddingRight = UDim.new(0, SM),
+	})
+	StyleRule("UIPadding.p-md", {
+		PaddingTop = UDim.new(0, MD),
+		PaddingBottom = UDim.new(0, MD),
+		PaddingLeft = UDim.new(0, MD),
+		PaddingRight = UDim.new(0, MD),
+	})
+	StyleRule("UIPadding.p-lg", {
+		PaddingTop = UDim.new(0, XL),
+		PaddingBottom = UDim.new(0, XL),
+		PaddingLeft = UDim.new(0, XL),
+		PaddingRight = UDim.new(0, XL),
+	})
 
 	StyleRule("UIPadding.pl-sm", { PaddingLeft = UDim.new(0, SM) }, nil, 1)
 	StyleRule("UIPadding.pl-md", { PaddingLeft = UDim.new(0, MD) }, nil, 1)

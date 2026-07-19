@@ -43,6 +43,12 @@ theme.custom = theme.added
 -- RichText hexes for the side colors
 theme.oursHex = "#9CDCFE"
 theme.theirsHex = "#C586C0"
+theme.propNameHex = "#9CDCFE"
+theme.textDimHex = "#606060"
+
+function theme.toHex(color: Color3): string
+	return string.format("#%02X%02X%02X", color.R * 255, color.G * 255, color.B * 255)
+end
 
 -- Typography: monospace everywhere, like the viewer's Consolas
 theme.font = Enum.Font.RobotoMono

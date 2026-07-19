@@ -55,6 +55,7 @@ local transport = require("@self/transport")
 
 local Explorer = require("@self/components/Explorer")
 local Panel = require("@self/components/Panel")
+local PropertiesPanel = require("@self/components/PropertiesPanel")
 
 local CONTAINER_NAME = "__RbxDiffMerge"
 
@@ -115,6 +116,7 @@ end)
 
 state.conflicts = conflicts
 state.selected = conflicts[1]
+state.selectedInstance = if conflicts[1] then conflicts[1].target else nil
 state.mergedFile = mergedFile
 state.rbxDiffBin = args.rbxDiffBin
 
@@ -145,6 +147,7 @@ RunService.Heartbeat:Connect(function()
 				theme.rules()
 			end))
 			Explorer()
+			PropertiesPanel()
 			Panel()
 		end)
 	end)

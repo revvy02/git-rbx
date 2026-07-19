@@ -22,6 +22,7 @@ local function ConflictRow(conflict: Conflict)
 		events = {
 			Activated = function()
 				state.selected = conflict
+				state.selectedInstance = conflict.target
 			end,
 		},
 	}, function()

@@ -7,15 +7,11 @@ local theme = require("../theme")
 local Label = require("./Label")
 local OptionRow = require("./OptionRow")
 
--- base | ours | theirs for the selected conflict; clicking a row stages it
--- (base = unpick). When custom is staged, shows the live value Complete will
--- capture.
-local function ComparisonCard()
-	local conflict = state.selected
-	if not conflict then
-		return
-	end
+type Conflict = state.Conflict
 
+-- base | ours | theirs for a conflict; clicking a row stages it (base =
+-- unpick). When custom is staged, shows the live value Complete will capture.
+local function ComparisonCard(conflict: Conflict)
 	Element("Frame", {
 		id = "comparison",
 		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-sm", "surface", "vs-border" },
