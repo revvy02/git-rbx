@@ -3,7 +3,7 @@
 
 	Run against the conflicted file (places open directly; models import
 	into a preview folder). `rbx-diff resolve <file> --studio` launches this
-	from a copy of this tree embedded in the binary; from the checkout:
+	tree straight from the checkout; by hand:
 
 	  rodeo run --place ./merged.rbxl --focus src/init.luau -- ./merged.rbxl
 	  rodeo run --place --focus src/init.luau -- ./merged.rbxm
@@ -13,7 +13,6 @@
 
 	Discovery is entirely in-DOM (the __RbxDiffMerge container + RbxDiffConflict
 	tags that `rbx-diff merge` stamped). Decisions are STAGED in the session —
-	click Ours/Theirs to pick (click again to unpick), change freely — and
 	nothing touches the disk file until Complete, which batches the canonical
 	CLI calls host-side via @rodeo/process:
 
@@ -24,12 +23,16 @@
 	only rbx-diff writes it, only at Complete. Abandoning the session leaves the
 	conflicted file exactly as `rbx-diff merge` wrote it.
 
+	Layout: state.luau (shared model + staging), format.luau (value/path text),
+	transport.luau (Complete → CLI), preview.luau (3D: select-renders preview,
+	highlights, camera), components/ (miu panels: Explorer + ComparisonCard on
+	the left, Panel with ConflictRows on the right).
+
 	Args: <merged-file> [--rbx-diff <path-to-binary>] [--auto <side>]
 ]]
 
-local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
-local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
 local process = require("@rodeo/process")
 
@@ -45,15 +48,14 @@ local StyleLink = require("@self/wind/StyleLink")
 local StyleSheet = require("@self/wind/StyleSheet")
 local WindRules = require("@self/wind/WindRules")
 
-local getBoundingBox = require("@self/viewport/getBoundingBox")
-local getIdealCameraCFrame = require("@self/viewport/getIdealCameraCFrame")
+local preview = require("@self/preview")
+local state = require("@self/state")
+local transport = require("@self/transport")
+
+local Explorer = require("@self/components/Explorer")
+local Panel = require("@self/components/Panel")
 
 local CONTAINER_NAME = "__RbxDiffMerge"
-
-local UNRESOLVED_COLOR = Color3.fromRGB(255, 170, 0)
-local OURS_COLOR = Color3.fromRGB(70, 160, 255)
-local THEIRS_COLOR = Color3.fromRGB(170, 90, 255)
-local CUSTOM_COLOR = Color3.fromRGB(80, 200, 160)
 
 local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
 parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
@@ -62,37 +64,12 @@ parser:option("--auto", "Debug: stage every conflict to this side and Complete i
 
 local args = parser:parse(process.args)
 local mergedFile = args.file
-local rbxDiffBin = args.rbxDiffBin
 
 -- ============================================================================
--- Conflict model: read once from the DOM. Resolution state is kept locally
--- and mirrored onto the live entries so other in-Studio tools see it too.
+-- Conflict model: read once from the DOM into the shared state. Resolution
+-- state is kept locally and mirrored onto the live entries so other in-Studio
+-- tools see it too.
 -- ============================================================================
-
-type SideInfo = {
-	folder: Instance?, -- the stamped side folder (a swapped-out clone lives here)
-	clone: Instance?, -- this side's version (nil = this side deletes the target)
-	destination: Instance?, -- MoveTarget: the parent this side moves the target to
-	destinationPath: string?,
-}
-
-type Conflict = {
-	name: string,
-	kind: string,
-	path: string,
-	property: string?,
-	resolved: string?,
-	target: Instance,
-	entry: Instance,
-
-	-- 3D preview state, filled by the rendering boot pass
-	ours: SideInfo?,
-	theirs: SideInfo?,
-	baseValue: any, -- Property: value to restore on unpick
-	baseParent: Instance?, -- MoveTarget: parent to restore on unpick
-	targetParts: { [BasePart]: number }?, -- DeleteVsEdit: true transparencies
-	rendered: string?, -- staged state the 3D layer currently reflects
-}
 
 local container = game:FindFirstChild(CONTAINER_NAME, true)
 
@@ -105,12 +82,12 @@ if not container and mergedFile:match("%.rbxmx?$") then
 	if stalePreview then
 		stalePreview:Destroy()
 	end
-	local preview = Instance.new("Folder")
-	preview.Name = "RbxDiffModelPreview"
+	local previewFolder = Instance.new("Folder")
+	previewFolder.Name = "RbxDiffModelPreview"
 	for _, root in roblox.import(mergedFile) do
-		root.Parent = preview
+		root.Parent = previewFolder
 	end
-	preview.Parent = workspace
+	previewFolder.Parent = workspace
 	container = game:FindFirstChild(CONTAINER_NAME, true)
 end
 
@@ -119,7 +96,7 @@ if not container then
 	return "no-conflicts"
 end
 
-local conflicts: { Conflict } = {}
+local conflicts: { state.Conflict } = {}
 for _, entry in container:GetChildren() do
 	table.insert(conflicts, {
 		name = entry.Name,
@@ -135,843 +112,22 @@ table.sort(conflicts, function(a, b)
 	return a.name < b.name
 end)
 
+state.conflicts = conflicts
+state.selected = conflicts[1]
+state.mergedFile = mergedFile
+state.rbxDiffBin = args.rbxDiffBin
+
+preview.boot(container :: Instance)
+
 print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
 
-local function statusColor(conflict: Conflict): Color3
-	if conflict.resolved == "ours" then
-		return OURS_COLOR
-	elseif conflict.resolved == "theirs" then
-		return THEIRS_COLOR
-	elseif conflict.resolved == "custom" then
-		return CUSTOM_COLOR
-	end
-	return UNRESOLVED_COLOR
-end
-
--- The live value of the conflicted property on the (copy) target instance.
-local function liveValue(conflict: Conflict): any
-	if conflict.property == "Name" then
-		return conflict.target.Name
-	end
-	return (conflict.target :: any)[conflict.property :: string]
-end
-
--- Encode a captured value as the plain JSON the CLI coerces by property type.
--- Returns nil for types custom resolution doesn't support.
-local function encodeValue(v: any): any
-	local t = typeof(v)
-	if t == "number" or t == "string" or t == "boolean" then
-		return v
-	elseif t == "Color3" then
-		return { v.R, v.G, v.B }
-	elseif t == "Vector3" then
-		return { v.X, v.Y, v.Z }
-	elseif t == "Vector2" then
-		return { v.X, v.Y }
-	elseif t == "CFrame" then
-		return { v:GetComponents() }
-	elseif t == "UDim" then
-		return { v.Scale, v.Offset }
-	elseif t == "UDim2" then
-		return { v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset }
-	end
-	return nil
-end
-
--- Custom = "edit the instance in Studio, that edit is the resolution".
--- Available for Property conflicts whose live value has an encodable type.
-local function canCustom(conflict: Conflict): boolean
-	return conflict.kind == "Property" and encodeValue(liveValue(conflict)) ~= nil
-end
-
 -- ============================================================================
--- Decision transport: the canonical CLI, host-side
+-- Frame loop; the run stays alive until finalized
 -- ============================================================================
-
-local finished = false
-local completing = false
-local completeError: string? = nil
-
--- The conflict the explorer + comparison panels are focused on.
-local selected: Conflict? = conflicts[1]
-
--- Staged decisions are session-local only and freely revisable; nothing is
--- written anywhere until Complete. stage() sets an explicit state (nil =
--- unpicked/base); choose() is the toggle the side buttons use.
-local function stage(conflict: Conflict, side: string?)
-	if completing or finished then
-		return
-	end
-	conflict.resolved = side
-end
-
-local function choose(conflict: Conflict, side: string)
-	stage(conflict, if conflict.resolved == side then nil else side)
-end
-
--- Commit every staged decision through the canonical CLI, then finalize.
-local function complete()
-	if completing or finished then
-		return
-	end
-	completing = true
-	completeError = nil
-	task.spawn(function()
-		for _, conflict in conflicts do
-			local args
-			if conflict.resolved == "custom" then
-				-- Capture the live value NOW — the final state of the user's
-				-- in-Studio edit is the resolution
-				local encoded = encodeValue(liveValue(conflict))
-				args = {
-					rbxDiffBin,
-					"resolve",
-					mergedFile,
-					"--take",
-					"custom",
-					"--entry",
-					conflict.name,
-					"--value",
-					HttpService:JSONEncode(encoded),
-				}
-			else
-				args = {
-					rbxDiffBin,
-					"resolve",
-					mergedFile,
-					"--take",
-					conflict.resolved :: string,
-					"--entry",
-					conflict.name,
-				}
-			end
-			local ok, result = pcall(process.run, args)
-			if not ok or not result.ok then
-				completeError = `--take {conflict.name} failed: {if ok then result.err else result}`
-				warn(completeError)
-				completing = false
-				return
-			end
-		end
-		local ok, result = pcall(process.run, { rbxDiffBin, "resolve", mergedFile, "--finalize" })
-		if ok and result.ok then
-			finished = true
-		else
-			completeError = `finalize failed: {if ok then result.err else result}`
-			warn(completeError)
-		end
-		completing = false
-	end)
-end
-
--- Frame the whole target in view — fitted distance from its bounding box and
--- the live camera FOV/aspect (vendored miu-viewport math), not a fixed offset
--- that lands inside or behind geometry depending on target size. Focus is the
--- edit camera's orbit pivot: it must be written together with the CFrame, or
--- Studio keeps steering around the stale pivot and the view drifts off target.
-local function focusOn(conflict: Conflict)
-	local camera = workspace.CurrentCamera
-	local cframe, size = getBoundingBox(conflict.target :: PVInstance)
-	camera.CFrame = getIdealCameraCFrame(cframe, size, {
-		fov = camera.FieldOfView,
-		aspectRatio = camera.ViewportSize.X / camera.ViewportSize.Y,
-	})
-	camera.Focus = cframe
-end
-
--- ============================================================================
--- 3D rendering: the scene shows exactly what is currently selected — staging
--- Ours renders ours' version, Theirs renders theirs', unpicked renders base.
--- Property values apply to the target, moves reparent it, delete-vs-edit
--- swaps the stamped clone itself in and out of the scene. Unpicking restores
--- boot snapshots; none of this touches the disk file — the CLI at Complete
--- is still the only writer.
--- ============================================================================
-
--- The stamped container rides inside model files, so a model preview imports
--- it into workspace — where every clone renders on top of its target. It is
--- pure data for this session: stash it out of the scene (copy-only; the file
--- keeps its container until finalize strips it).
-local liveContainer = container :: Instance
-if liveContainer:IsDescendantOf(workspace) then
-	liveContainer.Parent = game:GetService("ServerStorage")
-end
-
-local function eachPart(root: Instance, fn: (BasePart) -> ())
-	if root:IsA("BasePart") then
-		fn(root)
-	end
-	for _, descendant in root:GetDescendants() do
-		if descendant:IsA("BasePart") then
-			fn(descendant)
-		end
-	end
-end
-
-local function sideInfo(entry: Instance, sideName: string): SideInfo
-	local info: SideInfo = {}
-	local folder = entry:FindFirstChild(sideName)
-	if folder then
-		info.folder = folder
-		for _, child in folder:GetChildren() do
-			if child.Name == "Destination" and child:IsA("ObjectValue") then
-				info.destination = child.Value
-			else
-				info.clone = child
-			end
-		end
-		info.destinationPath = folder:GetAttribute("DestinationPath") :: string?
-	end
-	return info
-end
-
--- Boot pass: side clones + the base snapshots that unpicking restores.
-for _, conflict in conflicts do
-	conflict.ours = sideInfo(conflict.entry, "Ours")
-	conflict.theirs = sideInfo(conflict.entry, "Theirs")
-	conflict.rendered = "__init"
-
-	local target = conflict.target
-	if conflict.kind == "Property" then
-		conflict.baseValue = liveValue(conflict)
-	elseif conflict.kind == "MoveTarget" then
-		conflict.baseParent = target.Parent
-	elseif conflict.kind == "DeleteVsEdit" then
-		local parts: { [BasePart]: number } = {}
-		eachPart(target, function(part)
-			parts[part] = part.Transparency
-		end)
-		conflict.targetParts = parts
-	end
-end
-
--- Render the staged selection; nil (unpicked) restores the base snapshot.
-local function applyPreview(conflict: Conflict)
-	local staged = conflict.resolved
-
-	if conflict.kind == "Property" then
-		if staged ~= "custom" then
-			local sideClone = if staged == "ours"
-				then (conflict.ours :: SideInfo).clone
-				elseif staged == "theirs" then (conflict.theirs :: SideInfo).clone
-				else nil
-			local property = conflict.property :: string
-			if sideClone then
-				(conflict.target :: any)[property] = (sideClone :: any)[property]
-			elseif staged == nil then
-				(conflict.target :: any)[property] = conflict.baseValue
-			end
-		end
-	elseif conflict.kind == "MoveTarget" then
-		local destination = if staged == "ours"
-			then (conflict.ours :: SideInfo).destination
-			elseif staged == "theirs" then (conflict.theirs :: SideInfo).destination
-			else nil
-		-- A side with no live destination (moved into the other branch's added
-		-- content) previews as base rather than sticking at a stale parent.
-		destination = destination or conflict.baseParent
-		if destination then
-			conflict.target.Parent = destination
-		end
-	elseif conflict.kind == "DeleteVsEdit" then
-		-- One side deletes, the other edits. Staging either side hides the
-		-- base target; staging the edit side additionally swaps its stamped
-		-- clone into the target's spot (it carries its own true coordinates).
-		local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
-		local editInfo = (if editSide == "ours" then conflict.ours else conflict.theirs) :: SideInfo
-		for part, original in conflict.targetParts :: { [BasePart]: number } do
-			part.Transparency = if staged == nil then original else 1
-		end
-		local clone = editInfo.clone
-		if clone then
-			clone.Parent = if staged == editSide then conflict.target.Parent else editInfo.folder
-		end
-	end
-end
-
-local function renderPreviews()
-	if finished then
-		return
-	end
-	for _, conflict in conflicts do
-		local state = conflict.resolved or "unresolved"
-		if conflict.rendered ~= state then
-			conflict.rendered = state
-			applyPreview(conflict)
-		end
-	end
-end
-
-local liveHighlights: { [string]: Highlight } = {}
-
-local function updateHighlights()
-	for _, conflict in conflicts do
-		local target = conflict.target
-		local spatial = target:IsDescendantOf(workspace) and target:IsA("PVInstance")
-		if not spatial or finished then
-			local existing = liveHighlights[conflict.name]
-			if existing then
-				existing:Destroy()
-				liveHighlights[conflict.name] = nil
-			end
-			continue
-		end
-
-		local highlight = liveHighlights[conflict.name]
-		if not highlight then
-			highlight = Instance.new("Highlight")
-			highlight.Name = `RbxDiffHighlight_{conflict.name}`
-			highlight.Parent = target
-			liveHighlights[conflict.name] = highlight
-		end
-
-		-- Adorn whatever the preview is actually rendering: normally the
-		-- target, but a staged edit side of a delete-vs-edit renders its
-		-- swapped-in clone instead.
-		local adornee: Instance = target
-		if conflict.kind == "DeleteVsEdit" then
-			local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
-			local info = (if editSide == "ours" then conflict.ours else conflict.theirs) :: SideInfo
-			if conflict.resolved == editSide and info.clone then
-				adornee = info.clone :: Instance
-			end
-		end
-		highlight.Adornee = adornee
-
-		local color = statusColor(conflict)
-		highlight.OutlineColor = color
-		highlight.FillColor = color
-		highlight.FillTransparency = 1 -- outline only
-	end
-end
-
--- ============================================================================
--- UI (immediate mode, CoreGui overlay — the same surface rojo mounts on)
--- ============================================================================
-
-local function Label(id: string, text: string, color: Color3?)
-	Element("TextLabel", {
-		id = id,
-		Text = text,
-		tags = { "text-base", "auto-size-y" },
-		TextColor3 = color or Color3.fromRGB(230, 230, 230),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextSize = 14,
-		Font = Enum.Font.Gotham,
-		TextWrapped = true,
-	})
-end
-
-local function Button(id: string, text: string, highlighted: boolean, color: Color3, onClick: () -> ())
-	Element("TextButton", {
-		id = id,
-		Text = text,
-		Size = UDim2.new(0, 64, 0, 22),
-		tags = { "corner-sm" },
-		BackgroundColor3 = if highlighted then color else Color3.fromRGB(60, 60, 65),
-		TextColor3 = Color3.fromRGB(240, 240, 240),
-		TextSize = 13,
-		Font = Enum.Font.GothamMedium,
-		AutoButtonColor = true,
-		events = { Activated = onClick },
-	})
-end
-
-local function escapeRich(s: string): string
-	return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
-end
-
--- Roblox spatial/color values are backed by float32 components. Nine
--- significant digits are enough to distinguish every float32 value without
--- filling the conflict list with double-precision conversion noise.
-local function formatFloat32(v: number): string
-	return string.format("%.9g", v)
-end
-
-local function formatFloat32Components(values: { number }): string
-	local formatted = table.create(#values)
-	for i, value in values do
-		formatted[i] = formatFloat32(value)
-	end
-	return table.concat(formatted, ", ")
-end
-
-local function formatValue(v: any): string
-	local t = typeof(v)
-	if t == "Color3" then
-		return `Color3({formatFloat32Components({ v.R, v.G, v.B })})`
-	elseif t == "number" then
-		-- tostring uses Luau's shortest round-trippable representation, which
-		-- preserves double-backed properties as well as ordinary compact values.
-		return tostring(v)
-	elseif t == "Vector2" then
-		return `Vector2({formatFloat32Components({ v.X, v.Y })})`
-	elseif t == "Vector3" then
-		return `Vector3({formatFloat32Components({ v.X, v.Y, v.Z })})`
-	elseif t == "CFrame" then
-		return `CFrame({formatFloat32Components({ v:GetComponents() })})`
-	elseif t == "UDim" then
-		return `UDim({formatFloat32(v.Scale)}, {v.Offset})`
-	elseif t == "UDim2" then
-		return `UDim2({formatFloat32(v.X.Scale)}, {v.X.Offset}, {formatFloat32(v.Y.Scale)}, {v.Y.Offset})`
-	elseif t == "string" then
-		return `"{escapeRich(v)}"`
-	elseif t == "boolean" then
-		return tostring(v)
-	end
-	return t
-end
-
--- What choosing this side means, one glance: the property value it sets, the
--- destination it moves to, or whether it keeps (edited) / deletes the target.
-local function sideSummary(conflict: Conflict, side: string): string?
-	local info = (if side == "ours" then conflict.ours else conflict.theirs) :: SideInfo?
-	if not info then
-		return nil
-	end
-	if conflict.kind == "Property" then
-		local clone = info.clone
-		return clone and formatValue((clone :: any)[conflict.property :: string])
-	elseif conflict.kind == "MoveTarget" then
-		local path = info.destinationPath
-		return path and `→ {escapeRich(path)}`
-	elseif conflict.kind == "DeleteVsEdit" then
-		return if info.clone then "keep (edited)" else "delete"
-	end
-	return nil
-end
-
--- ============================================================================
--- Merge explorer: a conflict-scoped tree (targets + their ancestor chains,
--- badged by state), not a DOM clone. A MoveTarget appears at its CURRENT
--- previewed position solid, with phantom entries at the other candidate
--- parents — clicking a phantom stages that side. Below it, the comparison
--- card shows base | ours | theirs for the selected conflict; clicking a row
--- stages it (base = unpick).
--- ============================================================================
-
-local previewPrefix = "Workspace.RbxDiffModelPreview."
-
-local function relPath(inst: Instance): string
-	local full = inst:GetFullName()
-	local trimmed = full:gsub("^" .. previewPrefix:gsub("%.", "%%."), "")
-	return trimmed
-end
-
-type ExplorerRow = {
-	label: string,
-	depth: number,
-	color: Color3,
-	conflict: Conflict?, -- clicking selects this conflict
-	stageSide: string?, -- phantom rows: clicking stages this side ("base" = unpick)
-}
-
-type TreeNode = {
-	inst: Instance,
-	children: { TreeNode },
-	conflicts: { Conflict },
-	phantoms: { { conflict: Conflict, side: string } },
-}
-
--- Conflict-scoped tree over the LIVE preview DOM: because staging actually
--- reparents/renames targets, the solid tree follows the staged state for free.
-local function flattenTree(): { ExplorerRow }
-	local nodes: { [Instance]: TreeNode } = {}
-	local roots: { TreeNode } = {}
-
-	local function nodeFor(inst: Instance): TreeNode
-		local existing = nodes[inst]
-		if existing then
-			return existing
-		end
-		local node: TreeNode = { inst = inst, children = {}, conflicts = {}, phantoms = {} }
-		nodes[inst] = node
-		local parent = inst.Parent
-		if parent and parent ~= game and parent ~= workspace then
-			table.insert(nodeFor(parent).children, node)
-		else
-			table.insert(roots, node)
-		end
-		return node
-	end
-
-	for _, conflict in conflicts do
-		local node = nodeFor(conflict.target)
-		table.insert(node.conflicts, conflict)
-		if conflict.kind == "MoveTarget" then
-			-- Phantoms at every candidate parent the target is NOT currently
-			-- under (including base when staged away from it).
-			local candidates: { [string]: Instance? } = {
-				ours = (conflict.ours :: SideInfo).destination,
-				theirs = (conflict.theirs :: SideInfo).destination,
-				base = conflict.baseParent,
-			}
-			for side, parent in candidates :: { [string]: Instance } do
-				if parent ~= conflict.target.Parent then
-					table.insert(nodeFor(parent).phantoms, { conflict = conflict, side = side })
-				end
-			end
-		end
-	end
-
-	local rows: { ExplorerRow } = {}
-	local function visit(node: TreeNode, depth: number)
-		local conflict = node.conflicts[1]
-		table.insert(rows, {
-			label = if conflict then `● {node.inst.Name}` else node.inst.Name,
-			depth = depth,
-			color = if conflict then statusColor(conflict) else Color3.fromRGB(150, 150, 158),
-			conflict = conflict,
-		})
-		for _, phantom in node.phantoms do
-			local sideColor = if phantom.side == "ours"
-				then OURS_COLOR
-				elseif phantom.side == "theirs" then THEIRS_COLOR
-				else Color3.fromRGB(120, 120, 128)
-			table.insert(rows, {
-				label = `◌ {phantom.conflict.target.Name} ({phantom.side})`,
-				depth = depth + 1,
-				color = sideColor,
-				conflict = phantom.conflict,
-				stageSide = phantom.side,
-			})
-		end
-		table.sort(node.children, function(a: TreeNode, b: TreeNode)
-			return a.inst.Name < b.inst.Name
-		end)
-		for _, child in node.children do
-			visit(child, depth + 1)
-		end
-	end
-	for _, root in roots do
-		visit(root, 0)
-	end
-	return rows
-end
-
--- Base-side description for the comparison card (what unpicking keeps).
-local function baseSummary(conflict: Conflict): string
-	if conflict.kind == "Property" then
-		return formatValue(conflict.baseValue)
-	elseif conflict.kind == "MoveTarget" then
-		local parent = conflict.baseParent
-		return if parent then `→ {escapeRich(relPath(parent))}` else "→ ?"
-	end
-	return "keep base"
-end
-
-local function OptionRow(id: string, name: string, value: string?, color: Color3, staged: boolean, onClick: () -> ())
-	Element("TextButton", {
-		id = id,
-		Text = "",
-		Size = UDim2.new(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		tags = { "corner-sm" },
-		BackgroundColor3 = if staged then color else Color3.fromRGB(52, 52, 58),
-		BackgroundTransparency = if staged then 0.6 else 0,
-		AutoButtonColor = true,
-		events = { Activated = onClick },
-	}, function()
-		Element("UIPadding", {
-			id = "pad",
-			PaddingLeft = UDim.new(0, 6),
-			PaddingRight = UDim.new(0, 6),
-			PaddingTop = UDim.new(0, 3),
-			PaddingBottom = UDim.new(0, 3),
-		})
-		Element("UIListLayout", {
-			id = "layout",
-			FillDirection = Enum.FillDirection.Horizontal,
-			Padding = UDim.new(0, 8),
-			VerticalAlignment = Enum.VerticalAlignment.Center,
-		})
-		Element("TextLabel", {
-			id = "name",
-			Text = name,
-			Size = UDim2.new(0, 44, 0, 16),
-			BackgroundTransparency = 1,
-			TextColor3 = color,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.GothamMedium,
-		})
-		Element("TextLabel", {
-			id = "value",
-			RichText = true,
-			Text = value or "?",
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = Color3.fromRGB(225, 225, 230),
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.RobotoMono,
-			TextWrapped = true,
-		})
-	end)
-end
-
-local function ComparisonCard()
-	local conflict = selected
-	if not conflict then
-		return
-	end
-
-	Element("Frame", {
-		id = "comparison",
-		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
-		BackgroundColor3 = Color3.fromRGB(28, 28, 32),
-	}, function()
-		Label("path", conflict.path, statusColor(conflict))
-		Element("TextLabel", {
-			id = "kind",
-			Text = conflict.kind .. (if conflict.property then ` ({conflict.property})` else ""),
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = Color3.fromRGB(160, 160, 170),
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.Gotham,
-		})
-
-		OptionRow(
-			"base",
-			"Base",
-			baseSummary(conflict),
-			Color3.fromRGB(170, 170, 178),
-			conflict.resolved == nil,
-			function()
-				stage(conflict, nil)
-			end
-		)
-		OptionRow("ours", "Ours", sideSummary(conflict, "ours"), OURS_COLOR, conflict.resolved == "ours", function()
-			stage(conflict, "ours")
-		end)
-		OptionRow(
-			"theirs",
-			"Theirs",
-			sideSummary(conflict, "theirs"),
-			THEIRS_COLOR,
-			conflict.resolved == "theirs",
-			function()
-				stage(conflict, "theirs")
-			end
-		)
-		if conflict.resolved == "custom" then
-			Label("custom", `custom — live: {formatValue(liveValue(conflict))}`, CUSTOM_COLOR)
-		end
-	end)
-end
-
-local function Explorer()
-	Element("ScrollingFrame", {
-		id = "explorer",
-		Position = UDim2.new(0, 16, 0, 16),
-		Size = UDim2.new(0, 300, 1, -32),
-		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-	}, function()
-		Element("TextLabel", {
-			id = "title",
-			Text = "rbx-diff: merge explorer",
-			Size = UDim2.new(1, 0, 0, 26),
-			tags = { "corner-md" },
-			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
-			TextColor3 = Color3.fromRGB(230, 230, 230),
-			TextSize = 14,
-			Font = Enum.Font.GothamMedium,
-		})
-
-		if finished then
-			return
-		end
-
-		Element("Frame", {
-			id = "tree",
-			tags = { "auto-size-y", "flex-col", "p-md", "corner-md" },
-			BackgroundColor3 = Color3.fromRGB(40, 40, 46),
-		}, function()
-			for index, row in flattenTree() do
-				local isSelected = row.conflict ~= nil and row.conflict == selected and row.stageSide == nil
-				Element("TextButton", {
-					id = `row{index}`,
-					Text = "",
-					LayoutOrder = index,
-					Size = UDim2.new(1, 0, 0, 18),
-					tags = { "corner-sm" },
-					BackgroundColor3 = Color3.fromRGB(55, 55, 62),
-					BackgroundTransparency = if isSelected then 0 else 1,
-					AutoButtonColor = row.conflict ~= nil,
-					events = {
-						Activated = function()
-							local conflict = row.conflict
-							if not conflict then
-								return
-							end
-							if row.stageSide then
-								stage(conflict, if row.stageSide == "base" then nil else row.stageSide)
-							end
-							selected = conflict
-						end,
-					},
-				}, function()
-					Element("UIPadding", {
-						id = "pad",
-						PaddingLeft = UDim.new(0, 4 + row.depth * 12),
-					})
-					Element("TextLabel", {
-						id = "label",
-						Text = row.label,
-						Size = UDim2.new(1, 0, 1, 0),
-						BackgroundTransparency = 1,
-						TextColor3 = row.color,
-						TextXAlignment = Enum.TextXAlignment.Left,
-						TextTruncate = Enum.TextTruncate.AtEnd,
-						TextSize = 13,
-						Font = Enum.Font.Gotham,
-					})
-				end)
-			end
-		end)
-
-		ComparisonCard()
-	end)
-end
-
-local function ConflictRow(conflict: Conflict)
-	Element("TextButton", {
-		id = conflict.name,
-		Text = "",
-		AutoButtonColor = false,
-		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
-		BackgroundColor3 = if selected == conflict then Color3.fromRGB(48, 48, 56) else Color3.fromRGB(40, 40, 46),
-		events = {
-			Activated = function()
-				selected = conflict
-			end,
-		},
-	}, function()
-		Label("path", conflict.path, statusColor(conflict))
-
-		local detail = conflict.kind .. (if conflict.property then ` ({conflict.property})` else "")
-		Element("TextLabel", {
-			id = "detail",
-			Text = detail,
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = Color3.fromRGB(160, 160, 170),
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.Gotham,
-			TextWrapped = true,
-		})
-
-		local oursSummary = sideSummary(conflict, "ours")
-		local theirsSummary = sideSummary(conflict, "theirs")
-		if oursSummary or theirsSummary then
-			Element("TextLabel", {
-				id = "values",
-				RichText = true,
-				Text = `<font color="#46A0FF">{oursSummary or "?"}</font>  ·  <font color="#AA5AFF">{theirsSummary or "?"}</font>`,
-				tags = { "text-base", "auto-size-y" },
-				TextColor3 = Color3.fromRGB(200, 200, 205),
-				TextXAlignment = Enum.TextXAlignment.Left,
-				TextSize = 12,
-				Font = Enum.Font.RobotoMono,
-				TextWrapped = true,
-			})
-		end
-
-		Element("Frame", {
-			id = "buttons",
-			Size = UDim2.new(1, 0, 0, 22),
-			tags = { "bg-none", "flex-row", "gap-sm" },
-		}, function()
-			Button("ours", "Ours", conflict.resolved == "ours", OURS_COLOR, function()
-				choose(conflict, "ours")
-			end)
-			Button("theirs", "Theirs", conflict.resolved == "theirs", THEIRS_COLOR, function()
-				choose(conflict, "theirs")
-			end)
-			if canCustom(conflict) then
-				Button("custom", "Custom", conflict.resolved == "custom", CUSTOM_COLOR, function()
-					choose(conflict, "custom")
-				end)
-			end
-			if conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
-				Button("view", "View", false, Color3.fromRGB(80, 80, 90), function()
-					focusOn(conflict)
-				end)
-			end
-		end)
-	end)
-end
-
-local function Panel()
-	local unresolved = 0
-	for _, conflict in conflicts do
-		if not conflict.resolved then
-			unresolved += 1
-		end
-	end
-
-	-- The scroller is the panel: invisible, stretched to the bottom of the
-	-- screen; rows and the button carry their own backgrounds, and
-	-- AutomaticCanvasSize extends past the viewport when content overflows.
-	Element("ScrollingFrame", {
-		id = "panel",
-		Position = UDim2.new(1, -356, 0, 16),
-		Size = UDim2.new(0, 340, 1, -32),
-		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-	}, function()
-		Element("TextLabel", {
-			id = "title",
-			Text = if finished
-				then "Merge complete — file written"
-				else `rbx-diff: {#conflicts - unresolved}/{#conflicts} decided`,
-			Size = UDim2.new(1, 0, 0, 26),
-			tags = { "corner-md" },
-			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
-			TextColor3 = if finished then Color3.fromRGB(120, 220, 140) else Color3.fromRGB(230, 230, 230),
-			TextSize = 14,
-			Font = Enum.Font.GothamMedium,
-		})
-
-		if finished then
-			return
-		end
-
-		for _, conflict in conflicts do
-			ConflictRow(conflict)
-		end
-
-		local canComplete = unresolved == 0 and not completing
-		Element("TextButton", {
-			id = "complete",
-			Text = if completing
-				then "Completing…"
-				elseif completeError then "Complete failed — retry"
-				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
-				else "Complete",
-			Size = UDim2.new(1, 0, 0, 30),
-			tags = { "corner-md" },
-			BackgroundColor3 = if canComplete then Color3.fromRGB(60, 160, 90) else Color3.fromRGB(55, 55, 60),
-			TextColor3 = Color3.fromRGB(240, 240, 240),
-			TextSize = 14,
-			Font = Enum.Font.GothamMedium,
-			events = {
-				Activated = function()
-					if canComplete then
-						complete()
-					end
-				end,
-			},
-		})
-	end)
-end
 
 RunService.Heartbeat:Connect(function()
-	renderPreviews()
-	updateHighlights()
+	preview.renderPreviews()
+	preview.updateHighlights()
 	Portal(CoreGui, "rbx-diff-resolver", function()
 		Element("ScreenGui", {
 			id = "gui",
@@ -980,9 +136,9 @@ RunService.Heartbeat:Connect(function()
 			DisplayOrder = 200,
 			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		}, function()
-			-- One sheet for the whole panel: the wind utility classes
+			-- One sheet for the whole overlay: the wind utility classes
 			-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) that
-			-- the elements below reference through `tags`.
+			-- the components reference through `tags`.
 			StyleLink(StyleSheet(function()
 				WindRules()
 			end))
@@ -998,10 +154,10 @@ if args.autoSide then
 	for _, conflict in conflicts do
 		conflict.resolved = args.autoSide
 	end
-	complete()
+	transport.complete()
 end
 
-while not finished do
+while not state.finished do
 	task.wait(0.25)
 end
 
