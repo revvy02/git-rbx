@@ -11,6 +11,8 @@
 	so conflict-scale stays readable on real maps without virtualization.
 ]]
 
+local StudioService = game:GetService("StudioService")
+
 local Element = require("../miu/Instance")
 
 local format = require("../format")
@@ -20,9 +22,23 @@ local theme = require("../theme")
 type Conflict = state.Conflict
 type SideInfo = state.SideInfo
 
+-- Studio's own explorer icons (spritesheet slices), cached per class.
+type ClassIcon = { Image: string, ImageRectOffset: Vector2, ImageRectSize: Vector2 }
+local iconCache: { [string]: ClassIcon } = {}
+local function classIcon(className: string): ClassIcon
+	local icon = iconCache[className]
+	if not icon then
+		icon = StudioService:GetClassIcon(className) :: ClassIcon
+		iconCache[className] = icon
+	end
+	return icon
+end
+
 type Row = {
 	inst: Instance?,
 	label: string,
+	className: string, -- drives the class icon (phantoms use their target's)
+	phantom: boolean,
 	depth: number,
 	color: Color3,
 	conflict: Conflict?, -- clicking selects this conflict
@@ -145,9 +161,9 @@ local function flattenTree(): { Row }
 		local name = format.escapeRich(inst.Name)
 		table.insert(rows, {
 			inst = inst,
-			label = if conflict
-				then `● {name}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`
-				else `{name}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
+			label = `{name}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
+			className = inst.ClassName,
+			phantom = false,
 			depth = depth,
 			color = if conflict then state.statusColor(conflict) else theme.text,
 			conflict = conflict,
@@ -163,7 +179,9 @@ local function flattenTree(): { Row }
 					else theme.textDim
 				table.insert(rows, {
 					inst = nil,
-					label = `◌ {format.escapeRich(phantom.conflict.target.Name)} ({phantom.side})`,
+					label = `{format.escapeRich(phantom.conflict.target.Name)} ({phantom.side})`,
+					className = phantom.conflict.target.ClassName,
+					phantom = true,
 					depth = depth + 1,
 					color = sideColor,
 					conflict = phantom.conflict,
@@ -230,11 +248,22 @@ local function ExplorerRow(index: number, row: Row)
 			},
 		})
 
+		local icon = classIcon(row.className)
+		Element("ImageLabel", {
+			id = "icon",
+			Image = icon.Image,
+			ImageRectOffset = icon.ImageRectOffset,
+			ImageRectSize = icon.ImageRectSize,
+			ImageTransparency = if row.phantom then 0.5 else 0,
+			Size = UDim2.new(0, 16, 0, 16),
+			BackgroundTransparency = 1,
+		})
+
 		Element("TextButton", {
 			id = "name",
 			RichText = true,
-			Text = row.label,
-			Size = UDim2.new(1, -16, 1, 0),
+			Text = ` {row.label}`,
+			Size = UDim2.new(1, -32, 1, 0),
 			BackgroundTransparency = 1,
 			TextColor3 = row.color,
 			TextXAlignment = Enum.TextXAlignment.Left,
