@@ -43,5 +43,7 @@ end
 return {
 	jecs = load("jecs"),
 	miu = load("miu"),
+	planck = load("planck"),
+	planckRunService = load("planck_run_service"),
 	wind = load("miu_wind"),
 }

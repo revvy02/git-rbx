@@ -31,8 +31,6 @@
 	Args: <merged-file> [--rbx-diff <path-to-binary>] [--auto <side>]
 ]]
 
-local RunService = game:GetService("RunService")
-
 local process = require("@rodeo/process")
 
 local argparse = require("@pkg/argparse")
@@ -53,6 +51,7 @@ local theme = require("@self/theme")
 local transport = require("@self/transport")
 
 local ecsConflicts = require("@self/ecs/systems/conflicts")
+local scheduler = require("@self/ecs/scheduler")
 
 local Explorer = require("@self/components/Explorer")
 local Panel = require("@self/components/Panel")
@@ -155,7 +154,7 @@ local sidebarWidget = createWidget("RbxDiffMergeExplorer", "rbx-diff", Enum.Init
 local conflictsWidget = createWidget("RbxDiffMergeConflicts", "rbx-diff — conflicts", Enum.InitialDockState.Right)
 
 -- ============================================================================
--- Frame loop; the run stays alive until finalized
+-- Systems; the run stays alive until finalized
 -- ============================================================================
 
 local function Sidebar()
@@ -180,24 +179,34 @@ local function ResolverSheet()
 	end))
 end
 
-RunService.Heartbeat:Connect(function()
-	preview.renderPreviews()
-	preview.updateHighlights()
-	Portal(sidebarWidget, "rbx-diff-sidebar", function()
-		ResolverSheet()
-		Sidebar()
-	end)
-	Portal(conflictsWidget, "rbx-diff-conflicts", function()
-		ResolverSheet()
-		Element("Frame", {
-			id = "conflicts",
-			Size = UDim2.new(1, 0, 1, 0),
-			tags = { "surface", "vs-border" },
-		}, function()
-			Panel()
+local Heartbeat = packages.planckRunService.Phases.Heartbeat
+
+scheduler:addSystem({ phase = Heartbeat, system = preview.renderPreviews })
+scheduler:addSystem({ phase = Heartbeat, system = preview.updateHighlights })
+scheduler:addSystem({
+	phase = Heartbeat,
+	system = function()
+		Portal(sidebarWidget, "rbx-diff-sidebar", function()
+			ResolverSheet()
+			Sidebar()
 		end)
-	end)
-end)
+	end,
+})
+scheduler:addSystem({
+	phase = Heartbeat,
+	system = function()
+		Portal(conflictsWidget, "rbx-diff-conflicts", function()
+			ResolverSheet()
+			Element("Frame", {
+				id = "conflicts",
+				Size = UDim2.new(1, 0, 1, 0),
+				tags = { "surface", "vs-border" },
+			}, function()
+				Panel()
+			end)
+		end)
+	end,
+})
 
 -- Debug drive-through: stage everything to one side and Complete, so the
 -- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
