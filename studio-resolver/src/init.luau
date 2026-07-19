@@ -146,8 +146,15 @@ RunService.Heartbeat:Connect(function()
 				WindRules()
 				theme.rules()
 			end))
-			Explorer()
-			PropertiesPanel()
+			-- One flush sidebar: explorer top half, properties bottom half.
+			Element("Frame", {
+				id = "sidebar",
+				Size = UDim2.new(0, 300, 1, 0),
+				tags = { "surface", "vs-border" },
+			}, function()
+				Explorer()
+				PropertiesPanel()
+			end)
 			Panel()
 		end)
 	end)

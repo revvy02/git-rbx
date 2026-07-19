@@ -46,9 +46,9 @@ local CLASS_PROPS: { { class: string, props: { string } } } = {
 local function PropertiesPanel()
 	Element("ScrollingFrame", {
 		id = "properties",
-		Position = UDim2.new(0, 16, 0.5, 0),
-		Size = UDim2.new(0, 300, 0.5, -16),
-		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0.5, 0),
+		tags = { "bg-none", "flex-col" },
 		ScrollingDirection = Enum.ScrollingDirection.Y,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, function()
@@ -58,7 +58,7 @@ local function PropertiesPanel()
 			id = "title",
 			Text = if inst then `PROPERTIES — {inst.Name}` else "PROPERTIES",
 			Size = UDim2.new(1, 0, 0, 24),
-			tags = { "corner-sm", "surface", "vs-border" },
+			BackgroundColor3 = theme.surfaceHigh,
 			TextColor3 = theme.textMuted,
 			TextSize = theme.headerSize,
 			Font = theme.font,
@@ -80,21 +80,22 @@ local function PropertiesPanel()
 				break
 			end
 		end
-		if conflict then
-			ComparisonCard(conflict)
-		end
 
 		Element("Frame", {
-			id = "props",
-			tags = { "auto-size-y", "flex-col", "gap-xs", "p-md", "corner-sm", "surface", "vs-border" },
+			id = "content",
+			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
 		}, function()
+			if conflict then
+				ComparisonCard(conflict :: Conflict)
+			end
+
 			local conflictedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
 			local conflictHex = if conflict then theme.toHex(state.statusColor(conflict)) else nil
 
 			-- BASE tab + conflicted target: the live instance may be previewing
 			-- a staged side, but base is what this tab claims — show the boot
 			-- snapshot for the contested property.
-			local baseOverride = state.viewTab == "base" and conflict ~= nil and conflict.target == inst
+			local baseOverride = state.viewTab == "base" and conflict ~= nil and (conflict :: Conflict).target == inst
 
 			local nameValue = if baseOverride and conflictedProperty == "Name"
 				then (conflict :: Conflict).baseValue

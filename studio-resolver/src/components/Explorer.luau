@@ -320,15 +320,22 @@ end
 local function TabBar()
 	Element("Frame", {
 		id = "tabs",
-		Size = UDim2.new(1, 0, 0, 20),
+		Size = UDim2.new(1, 0, 0, 26),
 		tags = { "bg-none", "flex-row", "gap-xs" },
 	}, function()
+		Element("UIPadding", {
+			id = "pad",
+			PaddingLeft = UDim.new(0, 4),
+			PaddingRight = UDim.new(0, 4),
+			PaddingTop = UDim.new(0, 3),
+			PaddingBottom = UDim.new(0, 3),
+		})
 		for _, tab in TABS do
 			local isActive = state.viewTab == tab
 			Element("TextButton", {
 				id = tab,
 				Text = tab:upper(),
-				Size = UDim2.new(0.25, -3, 1, 0),
+				Size = UDim2.new(0.25, -8, 1, 0),
 				tags = { "corner-sm", "vs-border" },
 				BackgroundColor3 = if isActive then theme.selection else theme.surface,
 				TextColor3 = if isActive then theme.textBright else tabColor(tab),
@@ -344,7 +351,6 @@ local function TabBar()
 	end)
 end
 
--- Ancestors of the selection light up as on-path.
 local function ancestorSet(): { [Instance]: boolean }
 	local set: { [Instance]: boolean } = {}
 	local node = state.selectedInstance
@@ -400,9 +406,8 @@ end
 local function Explorer()
 	Element("ScrollingFrame", {
 		id = "explorer",
-		Position = UDim2.new(0, 16, 0, 16),
-		Size = UDim2.new(0, 300, 0.5, -24),
-		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
+		Size = UDim2.new(1, 0, 0.5, 0),
+		tags = { "bg-none", "flex-col" },
 		ScrollingDirection = Enum.ScrollingDirection.Y,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, function()
@@ -410,7 +415,7 @@ local function Explorer()
 			id = "title",
 			Text = "MERGE EXPLORER",
 			Size = UDim2.new(1, 0, 0, 24),
-			tags = { "corner-sm", "surface", "vs-border" },
+			BackgroundColor3 = theme.surfaceHigh,
 			TextColor3 = theme.textMuted,
 			TextSize = theme.headerSize,
 			Font = theme.font,
@@ -422,12 +427,7 @@ local function Explorer()
 
 		TabBar()
 
-		Element("Frame", {
-			id = "tree",
-			tags = { "auto-size-y", "flex-col", "p-sm", "corner-sm", "surface", "vs-border" },
-		}, function()
-			renderRows(if state.viewTab == "result" then resultRows() else sideRows(state.viewTab))
-		end)
+		renderRows(if state.viewTab == "result" then resultRows() else sideRows(state.viewTab))
 	end)
 end
 
