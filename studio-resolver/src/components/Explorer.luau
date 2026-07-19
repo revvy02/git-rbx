@@ -21,7 +21,8 @@
 
 local Element = require("../miu/Instance")
 
-local classIcon = require("./classIcon")
+local TreeRow = require("./TreeRow")
+
 local format = require("../format")
 local state = require("../state")
 local theme = require("../theme")
@@ -34,7 +35,6 @@ type Row = {
 	label: string,
 	className: string?, -- drives the class icon (phantoms use their target's)
 	phantom: boolean,
-	caption: boolean, -- side tabs: the conflict header above a subtree
 	depth: number,
 	color: Color3,
 	conflict: Conflict?, -- clicking selects this conflict
@@ -135,7 +135,6 @@ local function instanceRow(
 		label = `{name}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
 		className = inst.ClassName,
 		phantom = false,
-		caption = false,
 		depth = depth,
 		color = if conflict then state.statusColor(conflict) else theme.text,
 		conflict = conflict,
@@ -191,7 +190,6 @@ local function resultRows(): { Row }
 					label = `{format.escapeRich(phantom.conflict.target.Name)} ({phantom.side})`,
 					className = phantom.conflict.target.ClassName,
 					phantom = true,
-					caption = false,
 					depth = depth + 1,
 					color = sideColor,
 					conflict = phantom.conflict,
@@ -284,7 +282,6 @@ local function sideRows(tab: string): { Row }
 					label = `{format.escapeRich(graft.conflict.target.Name)} (deleted on {tab})`,
 					className = graft.conflict.target.ClassName,
 					phantom = true,
-					caption = false,
 					depth = depth + 1,
 					color = theme.removed,
 					conflict = graft.conflict,
@@ -347,101 +344,57 @@ local function TabBar()
 	end)
 end
 
-local function ExplorerRow(index: number, row: Row)
-	local inst = row.inst
-	local isSelected = not row.caption and inst ~= nil and inst == state.selectedInstance
-
-	local background = theme.selection
-	local backgroundTransparency = 1
-	if isSelected then
-		backgroundTransparency = 0
-	elseif row.caption then
-		background = theme.surfaceHigh
-		backgroundTransparency = 0.3
-	elseif row.tint then
-		background = row.tint
-		backgroundTransparency = 0.85
+-- Ancestors of the selection light up as on-path.
+local function ancestorSet(): { [Instance]: boolean }
+	local set: { [Instance]: boolean } = {}
+	local node = state.selectedInstance
+	node = node and node.Parent
+	while node and node ~= game do
+		set[node] = true
+		node = node.Parent
 	end
+	return set
+end
 
-	Element("Frame", {
-		id = `row{index}`,
-		LayoutOrder = index,
-		Size = UDim2.new(1, 0, 0, 22),
-		BackgroundColor3 = background,
-		BackgroundTransparency = backgroundTransparency,
-	}, function()
-		Element("UIPadding", {
-			id = "pad",
-			PaddingLeft = UDim.new(0, 4 + row.depth * 12),
+local function renderRows(rows: { Row })
+	local onPath = ancestorSet()
+	for index, row in rows do
+		local inst = row.inst
+		TreeRow({
+			id = `row{index}`,
+			layoutOrder = index,
+			depth = row.depth,
+			label = row.label,
+			className = row.className,
+			phantom = row.phantom,
+			hasChildren = row.hasChildren,
+			expanded = row.isExpanded,
+			selected = inst ~= nil and inst == state.selectedInstance,
+			onPath = inst ~= nil and onPath[inst] == true,
+			color = row.color,
+			tint = row.tint,
+			onToggle = if inst and row.hasChildren
+				then function()
+					expanded[inst :: Instance] = not row.isExpanded
+				end
+				else nil,
+			onActivated = function()
+				local conflict = row.conflict
+				if row.stageSide and conflict then
+					state.stage(conflict, if row.stageSide == "base" then nil else row.stageSide)
+					state.selectedInstance = conflict.target
+					state.selected = conflict
+					return
+				end
+				if inst then
+					state.selectedInstance = inst
+				end
+				if conflict then
+					state.selected = conflict
+				end
+			end,
 		})
-		Element("UIListLayout", {
-			id = "layout",
-			FillDirection = Enum.FillDirection.Horizontal,
-			VerticalAlignment = Enum.VerticalAlignment.Center,
-		})
-
-		Element("TextButton", {
-			id = "caret",
-			Text = if not row.hasChildren then "" elseif row.isExpanded then "▾" else "▸",
-			Size = UDim2.new(0, 16, 1, 0),
-			BackgroundTransparency = 1,
-			TextColor3 = theme.textMuted,
-			TextSize = 10,
-			Font = theme.font,
-			events = {
-				Activated = function()
-					if inst and row.hasChildren then
-						expanded[inst] = not row.isExpanded
-					end
-				end,
-			},
-		})
-
-		local iconWidth = 0
-		if row.className then
-			iconWidth = 16
-			local icon = classIcon(row.className)
-			Element("ImageLabel", {
-				id = "icon",
-				Image = icon.Image,
-				ImageRectOffset = icon.ImageRectOffset,
-				ImageRectSize = icon.ImageRectSize,
-				ImageTransparency = if row.phantom then 0.5 else 0,
-				Size = UDim2.new(0, 16, 0, 16),
-				BackgroundTransparency = 1,
-			})
-		end
-
-		Element("TextButton", {
-			id = "name",
-			RichText = true,
-			Text = ` {row.label}`,
-			Size = UDim2.new(1, -16 - iconWidth, 1, 0),
-			BackgroundTransparency = 1,
-			TextColor3 = row.color,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-			TextSize = theme.textSize,
-			Font = theme.font,
-			events = {
-				Activated = function()
-					local conflict = row.conflict
-					if row.stageSide and conflict then
-						state.stage(conflict, if row.stageSide == "base" then nil else row.stageSide)
-						state.selectedInstance = conflict.target
-						state.selected = conflict
-						return
-					end
-					if inst then
-						state.selectedInstance = inst
-					end
-					if conflict then
-						state.selected = conflict
-					end
-				end,
-			},
-		})
-	end)
+	end
 end
 
 local function Explorer()
@@ -473,10 +426,7 @@ local function Explorer()
 			id = "tree",
 			tags = { "auto-size-y", "flex-col", "p-sm", "corner-sm", "surface", "vs-border" },
 		}, function()
-			local rows = if state.viewTab == "result" then resultRows() else sideRows(state.viewTab)
-			for index, row in rows do
-				ExplorerRow(index, row)
-			end
+			renderRows(if state.viewTab == "result" then resultRows() else sideRows(state.viewTab))
 		end)
 	end)
 end
