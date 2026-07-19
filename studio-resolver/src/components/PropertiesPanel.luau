@@ -1,9 +1,10 @@
 --[[
 	Plain properties pane for the selected instance: prop names in #9cdcfe,
-	typed value renderers, attributes and tags included. No diff presentation
-	yet — the conflict layers come back iteratively. One piece of conflict
-	knowledge stays, silently: on the BASE tab a contested property shows the
-	boot snapshot, since the live instance may be previewing a staged side.
+	typed value renderers, with attributes and tags in their own headed
+	sections below the properties. No diff presentation yet — the conflict
+	layers come back iteratively. One piece of conflict knowledge stays,
+	silently: on the BASE tab a contested property shows the boot snapshot,
+	since the live instance may be previewing a staged side.
 
 	Studio offers no runtime property enumeration, so the listing is a curated
 	per-class set (pcall-guarded) rather than exhaustive — attributes and tags
@@ -42,6 +43,35 @@ local CLASS_PROPS: { { class: string, props: { string } } } = {
 	{ class = "Sound", props = { "SoundId", "Volume", "PlaybackSpeed" } },
 	{ class = "ValueBase", props = { "Value" } },
 }
+
+-- Sub-header band: same treatment as the panel title, one notch shorter.
+local function sectionHeader(id: string, text: string)
+	Element("TextLabel", {
+		id = id,
+		Text = text,
+		Size = UDim2.new(1, 0, 0, 20),
+		BackgroundColor3 = theme.surfaceHigh,
+		TextColor3 = theme.textMuted,
+		TextSize = theme.headerSize,
+		Font = theme.font,
+	})
+end
+
+-- Tags are bare strings, not name/value pairs — a plain label row.
+local function tagRow(id: string, tag: string, stripe: boolean)
+	Element("TextLabel", {
+		id = id,
+		Text = tag,
+		Size = UDim2.new(1, 0, 0, 14),
+		BackgroundColor3 = theme.bg,
+		BackgroundTransparency = if stripe then 0.5 else 1,
+		TextColor3 = theme.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextSize = theme.textSizeSmall,
+		Font = theme.font,
+	})
+end
 
 local function PropertiesPanel()
 	Element("ScrollingFrame", {
@@ -82,13 +112,13 @@ local function PropertiesPanel()
 		end
 
 		Element("Frame", {
-			id = "content",
+			id = "props",
 			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
 		}, function()
 			local rowIndex = 0
-			local function row(id: string, name: string, value: any, nameHex: string?, propertyName: string?)
+			local function row(id: string, name: string, value: any, propertyName: string?)
 				rowIndex += 1
-				PropertyRow(id, name, value, nameHex, propertyName, rowIndex % 2 == 0)
+				PropertyRow(id, name, value, nil, propertyName, rowIndex % 2 == 0)
 			end
 
 			local contestedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
@@ -110,22 +140,53 @@ local function PropertiesPanel()
 								if contestedProperty == property then
 									value = (conflict :: Conflict).baseValue
 								end
-								row(property, property, value, nil, property)
+								row(property, property, value, property)
 							end
 						end
 					end
 				end
 			end
-
-			for attribute, value in inst:GetAttributes() do
-				row(`attr_{attribute}`, `@{format.escapeRich(attribute)}`, value)
-			end
-
-			local tags = inst:GetTags()
-			if #tags > 0 then
-				row("tags", "Tags", table.concat(tags, ", "))
-			end
 		end)
+
+		-- Attribute rows sort by name so the per-frame render is order-stable.
+		local attributes = inst:GetAttributes()
+		local attributeNames: { string } = {}
+		for attribute in attributes do
+			table.insert(attributeNames, attribute)
+		end
+		if #attributeNames > 0 then
+			table.sort(attributeNames)
+			sectionHeader("attributesHeader", "ATTRIBUTES")
+			Element("Frame", {
+				id = "attributes",
+				tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
+			}, function()
+				for index, attribute in attributeNames do
+					PropertyRow(
+						`attr_{attribute}`,
+						format.escapeRich(attribute),
+						attributes[attribute],
+						nil,
+						nil,
+						index % 2 == 0
+					)
+				end
+			end)
+		end
+
+		local tags = inst:GetTags()
+		if #tags > 0 then
+			table.sort(tags)
+			sectionHeader("tagsHeader", "TAGS")
+			Element("Frame", {
+				id = "tagList",
+				tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
+			}, function()
+				for index, tag in tags do
+					tagRow(`tag_{tag}`, tag, index % 2 == 0)
+				end
+			end)
+		end
 	end)
 end
 
