@@ -1,8 +1,9 @@
 --[[
-	Properties pane for the selected instance, viewer-style: prop names in
-	#9cdcfe, values in mono, attributes and tags included. When the selected
-	instance is a conflict target the comparison card docks at the top, and a
-	conflicted property's name carries the conflict's status color.
+	Plain properties pane for the selected instance: prop names in #9cdcfe,
+	typed value renderers, attributes and tags included. No diff presentation
+	yet — the conflict layers come back iteratively. One piece of conflict
+	knowledge stays, silently: on the BASE tab a contested property shows the
+	boot snapshot, since the live instance may be previewing a staged side.
 
 	Studio offers no runtime property enumeration, so the listing is a curated
 	per-class set (pcall-guarded) rather than exhaustive — attributes and tags
@@ -15,7 +16,6 @@ local format = require("../format")
 local state = require("../state")
 local theme = require("../theme")
 
-local ComparisonCard = require("./ComparisonCard")
 local PropertyRow = require("./properties/PropertyRow")
 
 type Conflict = state.Conflict
@@ -69,15 +69,15 @@ local function PropertiesPanel()
 			return
 		end
 
-		-- The card follows the target AND its side clones, so browsing a
-		-- version under the OURS/THEIRS tabs keeps the staging controls up.
+		-- BASE tab fidelity: the live target may be previewing a staged side;
+		-- its contested property shows the boot snapshot instead.
 		local conflict: Conflict? = nil
-		for _, candidate in state.conflicts do
-			local ours = candidate.ours
-			local theirs = candidate.theirs
-			if candidate.target == inst or (ours and ours.clone == inst) or (theirs and theirs.clone == inst) then
-				conflict = candidate
-				break
+		if state.viewTab == "base" then
+			for _, candidate in state.conflicts do
+				if candidate.target == inst then
+					conflict = candidate
+					break
+				end
 			end
 		end
 
@@ -85,23 +85,11 @@ local function PropertiesPanel()
 			id = "content",
 			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
 		}, function()
-			if conflict then
-				ComparisonCard(conflict :: Conflict)
-			end
+			local contestedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
 
-			local conflictedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
-			local conflictHex = if conflict then theme.toHex(state.statusColor(conflict)) else nil
-
-			-- BASE tab + conflicted target: the live instance may be previewing
-			-- a staged side, but base is what this tab claims — show the boot
-			-- snapshot for the contested property.
-			local baseOverride = state.viewTab == "base" and conflict ~= nil and (conflict :: Conflict).target == inst
-
-			local nameValue = if baseOverride and conflictedProperty == "Name"
-				then (conflict :: Conflict).baseValue
-				else inst.Name
+			local nameValue = if contestedProperty == "Name" then (conflict :: Conflict).baseValue else inst.Name
 			PropertyRow("ClassName", "ClassName", inst.ClassName)
-			PropertyRow("Name", "Name", nameValue, if conflictedProperty == "Name" then conflictHex else nil)
+			PropertyRow("Name", "Name", nameValue)
 
 			local seen: { [string]: boolean } = { Name = true, ClassName = true }
 			for _, group in CLASS_PROPS do
@@ -113,16 +101,10 @@ local function PropertiesPanel()
 								return (inst :: any)[property]
 							end)
 							if ok then
-								if baseOverride and conflictedProperty == property then
+								if contestedProperty == property then
 									value = (conflict :: Conflict).baseValue
 								end
-								PropertyRow(
-									property,
-									property,
-									value,
-									if conflictedProperty == property then conflictHex else nil,
-									property
-								)
+								PropertyRow(property, property, value, nil, property)
 							end
 						end
 					end
