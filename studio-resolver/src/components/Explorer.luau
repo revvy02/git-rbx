@@ -6,13 +6,16 @@
 	#094771 selection, and MoveTarget phantoms at candidate parents (clicking
 	one stages that side, "base" = unpick).
 
-	The side tabs are conflict-scoped: each conflict renders as a caption row
-	followed by that side's version of the contested content — the stamped
-	Ours/Theirs clones, or the target itself for BASE (whose conflicted
-	property value the properties pane overrides from the boot snapshot). A
-	side that deletes the target renders a placeholder instead of a subtree.
+	The side tabs are conflict-scoped trees of that side's WORLD: ancestor
+	chains with the side's version of each contested subtree grafted at its
+	position in that side — so a moved instance simply sits under that side's
+	destination parent, base sits under the base parent, and a side that
+	deletes the target shows a placeholder where it would have been. Content
+	comes from the stamped Ours/Theirs clones (the target itself for BASE,
+	whose contested property value the properties pane overrides from the
+	boot snapshot).
 
-	Conflict ancestor chains start expanded in RESULT and side subtrees start
+	Conflict ancestor chains start expanded in RESULT and side trees start
 	fully expanded; collapses stick either way.
 ]]
 
@@ -208,71 +211,98 @@ local function resultRows(): { Row }
 	return rows
 end
 
--- BASE / OURS / THEIRS: conflict-scoped sections — caption + that side's
--- version of the contested content. Subtrees default to expanded.
+-- BASE / OURS / THEIRS: a conflict-scoped tree of that side's world —
+-- ancestor chains (default-expanded skeleton) with the side's version of
+-- each contested subtree grafted at its position IN THAT SIDE, so location
+-- is conveyed structurally: a move simply sits under that side's destination.
 local function sideRows(tab: string): { Row }
+	type SideNode = { inst: Instance, children: { SideNode }, grafts: { { conflict: Conflict, content: Instance? } } }
+	local nodes: { [Instance]: SideNode } = {}
+	local roots: { SideNode } = {}
+
+	local function nodeFor(inst: Instance): SideNode
+		local existing = nodes[inst]
+		if existing then
+			return existing
+		end
+		local node: SideNode = { inst = inst, children = {}, grafts = {} }
+		nodes[inst] = node
+		local parent = inst.Parent
+		if parent and parent ~= game and parent ~= workspace then
+			table.insert(nodeFor(parent).children, node)
+		else
+			table.insert(roots, node)
+		end
+		return node
+	end
+
+	for _, conflict in state.conflicts do
+		local content: Instance?
+		local sideParent: Instance?
+		if tab == "base" then
+			content = conflict.target
+			sideParent = if conflict.kind == "MoveTarget" then conflict.baseParent else conflict.target.Parent
+		else
+			local info = (if tab == "ours" then conflict.ours else conflict.theirs) :: SideInfo
+			content = info.clone
+			sideParent = if conflict.kind == "MoveTarget"
+				then (info.destination or conflict.baseParent)
+				else conflict.target.Parent
+		end
+		if sideParent then
+			table.insert(nodeFor(sideParent).grafts, { conflict = conflict, content = content })
+		end
+	end
+
 	local rows: { Row } = {}
 
-	local function visit(inst: Instance, depth: number, conflict: Conflict?)
+	local function visitContent(inst: Instance, depth: number, conflict: Conflict?)
 		local children = visibleChildren(inst)
 		local isExpanded = expanded[inst] ~= false
 		table.insert(rows, instanceRow(inst, depth, conflict, #children > 0, isExpanded))
 		if isExpanded then
 			for _, child in children do
-				visit(child, depth + 1, nil)
+				visitContent(child, depth + 1, nil)
 			end
 		end
 	end
 
-	for _, conflict in state.conflicts do
-		local caption = format.escapeRich(conflict.path)
-		local content: Instance? = nil
-		if tab == "base" then
-			content = conflict.target
-			if conflict.kind == "MoveTarget" and conflict.baseParent then
-				caption = `{caption}  <font color="{theme.textDimHex}">→ {format.escapeRich(
-					format.relPath(conflict.baseParent)
-				)}</font>`
-			end
-		else
-			local info = (if tab == "ours" then conflict.ours else conflict.theirs) :: SideInfo
-			content = info.clone
-			if conflict.kind == "MoveTarget" and info.destinationPath then
-				caption =
-					`{caption}  <font color="{theme.textDimHex}">→ {format.escapeRich(info.destinationPath)}</font>`
+	local function visitNode(node: SideNode, depth: number)
+		local isExpanded = expanded[node.inst] ~= false
+		local skeleton = instanceRow(node.inst, depth, nil, true, isExpanded)
+		skeleton.color = theme.textMuted
+		table.insert(rows, skeleton)
+		if not isExpanded then
+			return
+		end
+		for _, graft in node.grafts do
+			if graft.content then
+				visitContent(graft.content, depth + 1, graft.conflict)
+			else
+				table.insert(rows, {
+					inst = nil,
+					label = `{format.escapeRich(graft.conflict.target.Name)} (deleted on {tab})`,
+					className = graft.conflict.target.ClassName,
+					phantom = true,
+					caption = false,
+					depth = depth + 1,
+					color = theme.removed,
+					conflict = graft.conflict,
+					hasChildren = false,
+					isExpanded = false,
+				})
 			end
 		end
-
-		table.insert(rows, {
-			inst = content or conflict.target,
-			label = caption,
-			className = nil,
-			phantom = false,
-			caption = true,
-			depth = 0,
-			color = state.statusColor(conflict),
-			conflict = conflict,
-			hasChildren = false,
-			isExpanded = false,
-			tint = state.statusColor(conflict),
-		})
-
-		if content then
-			visit(content, 1, nil)
-		else
-			table.insert(rows, {
-				inst = nil,
-				label = `(deleted on {tab})`,
-				className = nil,
-				phantom = true,
-				caption = false,
-				depth = 1,
-				color = theme.removed,
-				conflict = conflict,
-				hasChildren = false,
-				isExpanded = false,
-			})
+		table.sort(node.children, function(a: SideNode, b: SideNode)
+			return a.inst.Name < b.inst.Name
+		end)
+		for _, child in node.children do
+			visitNode(child, depth + 1)
 		end
+	end
+
+	for _, root in roots do
+		visitNode(root, 0)
 	end
 	return rows
 end
