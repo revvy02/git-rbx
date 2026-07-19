@@ -360,41 +360,12 @@ fn cmd_resolve(
     bail!("specify --list, --take <ours|theirs> (--path/--all), --finalize, or --studio");
 }
 
-/// The Studio resolver script tree, embedded so `resolve --studio` works from
-/// an installed binary with no checkout around. It is written to a temp dir at
-/// launch and rodeo bundles it from there like any on-disk script: `@self` is
-/// relative, `@rodeo`/`@lune` are runtime/adapter-provided, and `@pkg` maps to
-/// the embedded lune_packages via the emitted .luaurc.
-///
-/// The argparse entries read from studio-resolver/lune_packages, which pesde
-/// manages — if the build can't find them, run `pesde install` there first.
-const RESOLVER_FILES: &[(&str, &str)] = &[
-    (".luaurc", r#"{ "aliases": { "pkg": "./lune_packages" } }"#),
-    ("init.luau", include_str!("../studio-resolver/src/init.luau")),
-    ("miu/init.luau", include_str!("../studio-resolver/src/miu/init.luau")),
-    ("miu/Context.luau", include_str!("../studio-resolver/src/miu/Context.luau")),
-    ("miu/Instance.luau", include_str!("../studio-resolver/src/miu/Instance.luau")),
-    ("miu/Portal.luau", include_str!("../studio-resolver/src/miu/Portal.luau")),
-    ("miu/retained_scope.luau", include_str!("../studio-resolver/src/miu/retained_scope.luau")),
-    ("miu/scope.luau", include_str!("../studio-resolver/src/miu/scope.luau")),
-    ("miu/unmounting.luau", include_str!("../studio-resolver/src/miu/unmounting.luau")),
-    ("viewport/init.luau", include_str!("../studio-resolver/src/viewport/init.luau")),
-    ("viewport/getBoundingBox.luau", include_str!("../studio-resolver/src/viewport/getBoundingBox.luau")),
-    ("viewport/getIdealCameraDistance.luau", include_str!("../studio-resolver/src/viewport/getIdealCameraDistance.luau")),
-    ("viewport/getIdealCameraCFrame.luau", include_str!("../studio-resolver/src/viewport/getIdealCameraCFrame.luau")),
-    ("viewport/presets.luau", include_str!("../studio-resolver/src/viewport/presets.luau")),
-    ("wind/init.luau", include_str!("../studio-resolver/src/wind/init.luau")),
-    ("wind/px.luau", include_str!("../studio-resolver/src/wind/px.luau")),
-    ("wind/StyleRule.luau", include_str!("../studio-resolver/src/wind/StyleRule.luau")),
-    ("wind/StyleSheet.luau", include_str!("../studio-resolver/src/wind/StyleSheet.luau")),
-    ("wind/StyleLink.luau", include_str!("../studio-resolver/src/wind/StyleLink.luau")),
-    ("wind/WindRules.luau", include_str!("../studio-resolver/src/wind/WindRules.luau")),
-    ("lune_packages/argparse.luau", include_str!("../studio-resolver/lune_packages/argparse.luau")),
-    (
-        "lune_packages/.pesde/caveful_games+argparse/0.1.2/argparse/src/lib.luau",
-        include_str!("../studio-resolver/lune_packages/.pesde/caveful_games+argparse/0.1.2/argparse/src/lib.luau"),
-    ),
-];
+/// Entry point of the Studio resolver, resolved against this crate's checkout
+/// at build time. `resolve --studio` therefore needs the checkout present at
+/// its build location — fine while the tool is iterated and run from source;
+/// a self-contained binary (pre-bundled script embedded at build) is the
+/// eventual shape once the resolver stabilizes.
+const RESOLVER_ENTRY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolver/src/init.luau");
 
 /// Launch the visual resolver in Roblox Studio via rodeo. The session stages
 /// decisions in-Studio and calls back into this binary (`resolve --take`,
@@ -415,11 +386,12 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
     let abs_file = std::fs::canonicalize(file)?;
     let is_place = matches!(extension(file)?.as_str(), "rbxl" | "rbxlx");
 
-    let script_dir = std::env::temp_dir().join(format!("rbx-diff-resolver-{}", std::process::id()));
-    for (rel, source) in RESOLVER_FILES {
-        let path = script_dir.join(rel);
-        std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::write(&path, source)?;
+    if !Path::new(RESOLVER_ENTRY).exists() {
+        bail!(
+            "resolver source not found at {RESOLVER_ENTRY} — `resolve --studio` \
+             currently runs from the rbx-diff checkout it was built in; rebuild \
+             on this machine or resolve from the CLI (rbx-diff resolve {file} --list)"
+        );
     }
 
     let mut cmd = std::process::Command::new("rodeo");
@@ -428,7 +400,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         cmd.arg(&abs_file);
     }
     cmd.arg("--focus")
-        .arg(script_dir.join("init.luau"))
+        .arg(RESOLVER_ENTRY)
         .arg("--")
         .arg(&abs_file)
         .arg("--rbx-diff")
@@ -446,7 +418,6 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         ),
         _ => anyhow::Error::from(e).context("launching rodeo"),
     })?;
-    let _ = std::fs::remove_dir_all(&script_dir);
 
     // rodeo's exit code only says how the SESSION ended (completed, killed,
     // Studio closed mid-way); what the merge is at now is in the file.
