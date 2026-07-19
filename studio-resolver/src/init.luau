@@ -23,10 +23,11 @@
 	only rbx-diff writes it, only at Complete. Abandoning the session leaves the
 	conflicted file exactly as `rbx-diff merge` wrote it.
 
-	Layout: state.luau (shared model + staging), format.luau (value/path text),
-	transport.luau (Complete → CLI), preview.luau (3D: select-renders preview,
-	highlights, camera), components/ (miu panels: Explorer + ComparisonCard on
-	the left, Panel with ConflictRows on the right).
+	Layout: the ecs/ world is the source of truth — conflict entities +
+	session singletons (ecs/cts.luau), mirror/preview/conflicts systems.
+	config.luau (launch config), format.luau (value/path text), transport.luau
+	(Complete → CLI), components/ (miu panels: Explorer + PropertiesPanel in
+	the sidebar widget, Panel with ConflictRows in the conflicts widget).
 
 	Args: <merged-file> [--rbx-diff <path-to-binary>] [--auto <side>]
 ]]
@@ -45,14 +46,16 @@ local StyleLink = packages.wind.StyleLink
 local StyleSheet = packages.wind.StyleSheet
 local WindRules = packages.wind.WindRules
 
+local config = require("@self/config")
 local preview = require("@self/ecs/systems/preview")
-local state = require("@self/state")
 local theme = require("@self/theme")
 local transport = require("@self/transport")
 
+local cts = require("@self/ecs/cts")
 local ecsConflicts = require("@self/ecs/systems/conflicts")
 local mirror = require("@self/ecs/systems/mirror")
 local scheduler = require("@self/ecs/scheduler")
+local world = require("@self/ecs/world")
 
 local Explorer = require("@self/components/Explorer")
 local Panel = require("@self/components/Panel")
@@ -70,9 +73,8 @@ local args = parser:parse(process.args)
 local mergedFile = args.file
 
 -- ============================================================================
--- Conflict model: read once from the DOM into the shared state. Resolution
--- state is kept locally and mirrored onto the live entries so other in-Studio
--- tools see it too.
+-- Conflict model: read once from the DOM into conflict entities — from here
+-- on the world is the source of truth for merge + session state.
 -- ============================================================================
 
 local container = game:FindFirstChild(CONTAINER_NAME, true)
@@ -100,9 +102,9 @@ if not container then
 	return "no-conflicts"
 end
 
-local conflicts: { state.Conflict } = {}
+local records: { ecsConflicts.ConflictRecord } = {}
 for _, entry in container:GetChildren() do
-	table.insert(conflicts, {
+	table.insert(records, {
 		name = entry.Name,
 		kind = entry:GetAttribute("Kind") :: string,
 		path = entry:GetAttribute("Path") :: string,
@@ -112,20 +114,25 @@ for _, entry in container:GetChildren() do
 		entry = entry,
 	})
 end
-table.sort(conflicts, function(a, b)
+table.sort(records, function(a, b)
 	return a.name < b.name
 end)
 
-state.conflicts = conflicts
-state.selected = conflicts[1]
-state.selectedInstance = if conflicts[1] then conflicts[1].target else nil
-state.mergedFile = mergedFile
-state.rbxDiffBin = args.rbxDiffBin
+config.mergedFile = mergedFile
+config.rbxDiffBin = args.rbxDiffBin
 
+ecsConflicts.boot(records)
 preview.boot(container :: Instance)
-ecsConflicts.boot()
 
-print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
+-- Session singletons: a component set on its own entity id.
+world:set(cts.ViewTab, cts.ViewTab, "result")
+local firstConflict = ecsConflicts.all()[1]
+if firstConflict then
+	world:set(cts.SelectedConflict, cts.SelectedConflict, firstConflict)
+	world:set(cts.SelectedInstance, cts.SelectedInstance, world:get(firstConflict, cts.Target))
+end
+
+print(`rbx-diff resolver: {#records} conflict(s) in {mergedFile}`)
 
 -- ============================================================================
 -- Sidebar host: a real plugin dock widget so the explorer/props don't
@@ -213,14 +220,14 @@ scheduler:addSystem({
 -- Debug drive-through: stage everything to one side and Complete, so the
 -- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
 if args.autoSide then
-	for _, conflict in conflicts do
-		conflict.resolved = args.autoSide
+	for _, entity in ecsConflicts.all() do
+		world:set(entity, cts.Resolution, args.autoSide)
 	end
 	transport.complete()
 end
 
-while not state.finished do
+while not world:has(cts.Finished, cts.Finished) do
 	task.wait(0.25)
 end
 
-return `finalized {#conflicts} conflict(s) — {mergedFile} is clean`
+return `finalized {#records} conflict(s) — {mergedFile} is clean`

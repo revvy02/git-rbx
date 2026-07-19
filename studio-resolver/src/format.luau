@@ -1,12 +1,13 @@
 --[[
 	Value/path presentation shared by the panel rows, comparison card, and
-	explorer. Everything returns RichText-safe strings.
+	explorer — pure functions over component data, no world access.
+	Everything returns RichText-safe strings.
 ]]
 
-local state = require("@self/state")
+local cts = require("@self/ecs/cts")
 
-type Conflict = state.Conflict
-type SideInfo = state.SideInfo
+type SideInfo = cts.SideInfo
+type Base = cts.Base
 
 local format = {}
 
@@ -55,6 +56,28 @@ function format.formatValue(v: any): string
 	return t
 end
 
+-- Encode a captured value as the plain JSON the CLI coerces by property type.
+-- Returns nil for types custom resolution doesn't support.
+function format.encodeValue(v: any): any
+	local t = typeof(v)
+	if t == "number" or t == "string" or t == "boolean" then
+		return v
+	elseif t == "Color3" then
+		return { v.R, v.G, v.B }
+	elseif t == "Vector3" then
+		return { v.X, v.Y, v.Z }
+	elseif t == "Vector2" then
+		return { v.X, v.Y }
+	elseif t == "CFrame" then
+		return { v:GetComponents() }
+	elseif t == "UDim" then
+		return { v.Scale, v.Offset }
+	elseif t == "UDim2" then
+		return { v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset }
+	end
+	return nil
+end
+
 local previewPrefix = "Workspace.RbxDiffModelPreview."
 
 function format.relPath(inst: Instance): string
@@ -65,29 +88,28 @@ end
 
 -- What choosing this side means, one glance: the property value it sets, the
 -- destination it moves to, or whether it keeps (edited) / deletes the target.
-function format.sideSummary(conflict: Conflict, side: string): string?
-	local info = (if side == "ours" then conflict.ours else conflict.theirs) :: SideInfo?
+function format.sideSummary(kind: string, property: string?, info: SideInfo?): string?
 	if not info then
 		return nil
 	end
-	if conflict.kind == "Property" then
+	if kind == "Property" then
 		local clone = info.clone
-		return clone and format.formatValue((clone :: any)[conflict.property :: string])
-	elseif conflict.kind == "MoveTarget" then
+		return clone and format.formatValue((clone :: any)[property :: string])
+	elseif kind == "MoveTarget" then
 		local path = info.destinationPath
 		return path and `→ {format.escapeRich(path)}`
-	elseif conflict.kind == "DeleteVsEdit" then
+	elseif kind == "DeleteVsEdit" then
 		return if info.clone then "keep (edited)" else "delete"
 	end
 	return nil
 end
 
 -- Base-side description for the comparison card (what unpicking keeps).
-function format.baseSummary(conflict: Conflict): string
-	if conflict.kind == "Property" then
-		return format.formatValue(conflict.baseValue)
-	elseif conflict.kind == "MoveTarget" then
-		local parent = conflict.baseParent
+function format.baseSummary(kind: string, base: Base): string
+	if kind == "Property" then
+		return format.formatValue(base.value)
+	elseif kind == "MoveTarget" then
+		local parent = base.parent
 		return if parent then `→ {format.escapeRich(format.relPath(parent))}` else "→ ?"
 	end
 	return "keep base"

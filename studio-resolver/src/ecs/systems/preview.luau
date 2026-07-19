@@ -5,15 +5,26 @@
 	swaps the stamped clone itself in and out of the scene. Unpicking restores
 	boot snapshots; none of this touches the disk file — the CLI at Complete
 	is still the only writer.
+
+	Everything reads/writes the world: staged Resolution vs Rendered drives
+	the frame diff, side/base data live as components.
 ]]
 
-local state = require("../../state")
+local packages = require("../../packages")
+
+local theme = require("../../theme")
+
+local conflicts = require("./conflicts")
+local cts = require("../cts")
+local world = require("../world")
 
 local getBoundingBox = require("../../viewport/getBoundingBox")
 local getIdealCameraCFrame = require("../../viewport/getIdealCameraCFrame")
 
-type Conflict = state.Conflict
-type SideInfo = state.SideInfo
+local jecs = packages.jecs
+
+type SideInfo = cts.SideInfo
+type Base = cts.Base
 
 local preview = {}
 
@@ -45,8 +56,8 @@ local function sideInfo(entry: Instance, sideName: string): SideInfo
 	return info
 end
 
--- Boot pass: stash the container out of the scene, then per conflict collect
--- side clones + the base snapshots that unpicking restores.
+-- Boot pass: stash the container out of the scene, then per conflict entity
+-- set side clones + the base snapshot that unpicking restores.
 function preview.boot(container: Instance)
 	-- The stamped container rides inside model files, so a model preview
 	-- imports it into workspace — where every clone renders on top of its
@@ -56,23 +67,27 @@ function preview.boot(container: Instance)
 		container.Parent = game:GetService("ServerStorage")
 	end
 
-	for _, conflict in state.conflicts do
-		conflict.ours = sideInfo(conflict.entry, "Ours")
-		conflict.theirs = sideInfo(conflict.entry, "Theirs")
-		conflict.rendered = "__init"
+	for _, entity in conflicts.all() do
+		local entry = world:get(entity, cts.Entry) :: Instance
+		world:set(entity, cts.Ours, sideInfo(entry, "Ours"))
+		world:set(entity, cts.Theirs, sideInfo(entry, "Theirs"))
+		world:set(entity, cts.Rendered, "__init")
 
-		local target = conflict.target
-		if conflict.kind == "Property" then
-			conflict.baseValue = state.liveValue(conflict)
-		elseif conflict.kind == "MoveTarget" then
-			conflict.baseParent = target.Parent
-		elseif conflict.kind == "DeleteVsEdit" then
+		local target = world:get(entity, cts.Target) :: Instance
+		local kind = world:get(entity, cts.Kind)
+		local base: Base = {}
+		if kind == "Property" then
+			base.value = conflicts.liveValue(entity)
+		elseif kind == "MoveTarget" then
+			base.parent = target.Parent
+		elseif kind == "DeleteVsEdit" then
 			local parts: { [BasePart]: number } = {}
 			eachPart(target, function(part)
 				parts[part] = part.Transparency
 			end)
-			conflict.targetParts = parts
+			base.parts = parts
 		end
+		world:set(entity, cts.Base, base)
 	end
 end
 
@@ -81,9 +96,10 @@ end
 -- that lands inside or behind geometry depending on target size. Focus is the
 -- edit camera's orbit pivot: it must be written together with the CFrame, or
 -- Studio keeps steering around the stale pivot and the view drifts off target.
-function preview.focusOn(conflict: Conflict)
+function preview.focusOn(entity: any)
 	local camera = workspace.CurrentCamera
-	local cframe, size = getBoundingBox(conflict.target :: PVInstance)
+	local target = world:get(entity, cts.Target) :: Instance
+	local cframe, size = getBoundingBox(target :: PVInstance)
 	camera.CFrame = getIdealCameraCFrame(cframe, size, {
 		fov = camera.FieldOfView,
 		aspectRatio = camera.ViewportSize.X / camera.ViewportSize.Y,
@@ -92,99 +108,106 @@ function preview.focusOn(conflict: Conflict)
 end
 
 -- Render the staged selection; nil (unpicked) restores the base snapshot.
-local function applyPreview(conflict: Conflict)
-	local staged = conflict.resolved
+local function applyPreview(entity: any)
+	local staged = world:get(entity, cts.Resolution) :: string?
+	local kind = world:get(entity, cts.Kind)
+	local target = world:get(entity, cts.Target) :: Instance
+	local ours = world:get(entity, cts.Ours) :: SideInfo
+	local theirs = world:get(entity, cts.Theirs) :: SideInfo
+	local base = world:get(entity, cts.Base) :: Base
 
-	if conflict.kind == "Property" then
+	if kind == "Property" then
 		if staged ~= "custom" then
-			local sideClone = if staged == "ours"
-				then (conflict.ours :: SideInfo).clone
-				elseif staged == "theirs" then (conflict.theirs :: SideInfo).clone
-				else nil
-			local property = conflict.property :: string
+			local sideClone = if staged == "ours" then ours.clone elseif staged == "theirs" then theirs.clone else nil
+			local property = world:get(entity, cts.Property) :: string
 			if sideClone then
-				(conflict.target :: any)[property] = (sideClone :: any)[property]
+				(target :: any)[property] = (sideClone :: any)[property]
 			elseif staged == nil then
-				(conflict.target :: any)[property] = conflict.baseValue
+				(target :: any)[property] = base.value
 			end
 		end
-	elseif conflict.kind == "MoveTarget" then
+	elseif kind == "MoveTarget" then
 		local destination = if staged == "ours"
-			then (conflict.ours :: SideInfo).destination
-			elseif staged == "theirs" then (conflict.theirs :: SideInfo).destination
+			then ours.destination
+			elseif staged == "theirs" then theirs.destination
 			else nil
 		-- A side with no live destination (moved into the other branch's added
 		-- content) previews as base rather than sticking at a stale parent.
-		destination = destination or conflict.baseParent
+		destination = destination or base.parent
 		if destination then
-			conflict.target.Parent = destination
+			target.Parent = destination
 		end
-	elseif conflict.kind == "DeleteVsEdit" then
+	elseif kind == "DeleteVsEdit" then
 		-- One side deletes, the other edits. Staging either side hides the
 		-- base target; staging the edit side additionally swaps its stamped
 		-- clone into the target's spot (it carries its own true coordinates).
-		local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
-		local editInfo = (if editSide == "ours" then conflict.ours else conflict.theirs) :: SideInfo
-		for part, original in conflict.targetParts :: { [BasePart]: number } do
+		local editSide = if ours.clone then "ours" else "theirs"
+		local editInfo = if editSide == "ours" then ours else theirs
+		for part, original in base.parts :: { [BasePart]: number } do
 			part.Transparency = if staged == nil then original else 1
 		end
 		local clone = editInfo.clone
 		if clone then
-			clone.Parent = if staged == editSide then conflict.target.Parent else editInfo.folder
+			clone.Parent = if staged == editSide then target.Parent else editInfo.folder
 		end
 	end
 end
 
 function preview.renderPreviews()
-	if state.finished then
+	if world:has(cts.Finished, cts.Finished) then
 		return
 	end
-	for _, conflict in state.conflicts do
-		local staged = conflict.resolved or "unresolved"
-		if conflict.rendered ~= staged then
-			conflict.rendered = staged
-			applyPreview(conflict)
+	for _, entity in conflicts.all() do
+		local staged = (world:get(entity, cts.Resolution) :: string?) or "unresolved"
+		if world:get(entity, cts.Rendered) ~= staged then
+			world:set(entity, cts.Rendered, staged)
+			applyPreview(entity)
 		end
 	end
 end
 
-local liveHighlights: { [string]: Highlight } = {}
+local liveHighlights: { [any]: Highlight } = {}
 
 function preview.updateHighlights()
-	for _, conflict in state.conflicts do
-		local target = conflict.target
+	local finished = world:has(cts.Finished, cts.Finished)
+	for _, entity in conflicts.all() do
+		local target = world:get(entity, cts.Target) :: Instance
 		local spatial = target:IsDescendantOf(workspace) and target:IsA("PVInstance")
-		if not spatial or state.finished then
-			local existing = liveHighlights[conflict.name]
+		if not spatial or finished then
+			local existing = liveHighlights[entity]
 			if existing then
 				existing:Destroy()
-				liveHighlights[conflict.name] = nil
+				liveHighlights[entity] = nil
 			end
 			continue
 		end
 
-		local highlight = liveHighlights[conflict.name]
+		local highlight = liveHighlights[entity]
 		if not highlight then
 			highlight = Instance.new("Highlight")
-			highlight.Name = `RbxDiffHighlight_{conflict.name}`
+			highlight.Name = `RbxDiffHighlight_{world:get(entity, jecs.Name)}`
 			highlight.Parent = target
-			liveHighlights[conflict.name] = highlight
+			liveHighlights[entity] = highlight
 		end
+
+		local resolution = world:get(entity, cts.Resolution) :: string?
 
 		-- Adorn whatever the preview is actually rendering: normally the
 		-- target, but a staged edit side of a delete-vs-edit renders its
 		-- swapped-in clone instead.
 		local adornee: Instance = target
-		if conflict.kind == "DeleteVsEdit" then
-			local editSide = if (conflict.ours :: SideInfo).clone then "ours" else "theirs"
-			local info = (if editSide == "ours" then conflict.ours else conflict.theirs) :: SideInfo
-			if conflict.resolved == editSide and info.clone then
+		if world:get(entity, cts.Kind) == "DeleteVsEdit" then
+			local ours = world:get(entity, cts.Ours) :: SideInfo
+			local theirs = world:get(entity, cts.Theirs) :: SideInfo
+			local editSide = if ours.clone then "ours" else "theirs"
+			local info = if editSide == "ours" then ours else theirs
+			if resolution == editSide and info.clone then
 				adornee = info.clone :: Instance
 			end
 		end
 		highlight.Adornee = adornee
 
-		local color = state.statusColor(conflict)
+		local color = theme.statusColor(resolution)
 		highlight.OutlineColor = color
 		highlight.FillColor = color
 		highlight.FillTransparency = 1 -- outline only

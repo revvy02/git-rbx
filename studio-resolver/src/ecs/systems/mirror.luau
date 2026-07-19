@@ -7,8 +7,6 @@
 
 local packages = require("../../packages")
 
-local state = require("../../state")
-
 local cts = require("../cts")
 local world = require("../world")
 
@@ -46,8 +44,8 @@ local function treeRoots(): { Instance }
 	end
 	local roots: { Instance } = { workspace }
 	local seen: { [Instance]: boolean } = { [workspace :: Instance] = true }
-	for _, conflict in state.conflicts do
-		local top: Instance = conflict.target
+	for _, target in world:query(cts.Target):iter() do
+		local top: Instance = target :: Instance
 		while top.Parent and top.Parent ~= game do
 			top = top.Parent :: Instance
 		end

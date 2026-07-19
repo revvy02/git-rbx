@@ -50,6 +50,18 @@ function theme.toHex(color: Color3): string
 	return string.format("#%02X%02X%02X", color.R * 255, color.G * 255, color.B * 255)
 end
 
+-- Staged-resolution status color (nil = unpicked/unresolved).
+function theme.statusColor(resolution: string?): Color3
+	if resolution == "ours" then
+		return theme.ours
+	elseif resolution == "theirs" then
+		return theme.theirs
+	elseif resolution == "custom" then
+		return theme.custom
+	end
+	return theme.unresolved
+end
+
 -- Typography: monospace everywhere, like the viewer's Consolas
 theme.font = Enum.Font.RobotoMono
 theme.fontBold = Enum.Font.RobotoMono

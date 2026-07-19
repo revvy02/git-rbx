@@ -1,34 +1,44 @@
-local Element = require("../packages").miu.Instance
+local packages = require("../packages")
+local Element = packages.miu.Instance
 
 local format = require("../format")
 local preview = require("../ecs/systems/preview")
-local state = require("../state")
 local theme = require("../theme")
+
+local conflicts = require("../ecs/systems/conflicts")
+local cts = require("../ecs/cts")
+local world = require("../ecs/world")
 
 local Button = require("./Button")
 local Label = require("./Label")
 
-type Conflict = state.Conflict
+local jecs = packages.jecs
 
-local function ConflictRow(conflict: Conflict)
+local function ConflictRow(entity: any)
+	local name = world:get(entity, jecs.Name) :: string
+	local kind = world:get(entity, cts.Kind) :: string
+	local path = world:get(entity, cts.Path) :: string
+	local property = world:get(entity, cts.Property) :: string?
+	local resolution = world:get(entity, cts.Resolution) :: string?
+	local target = world:get(entity, cts.Target) :: Instance
+	local selected = world:get(cts.SelectedConflict, cts.SelectedConflict) == entity
+
 	Element("TextButton", {
-		id = conflict.name,
+		id = name,
 		Text = "",
 		AutoButtonColor = false,
 		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-sm", "vs-border" },
-		BackgroundColor3 = if state.selected == conflict
-			then theme.surface:Lerp(theme.selection, 0.35)
-			else theme.surface,
+		BackgroundColor3 = if selected then theme.surface:Lerp(theme.selection, 0.35) else theme.surface,
 		events = {
 			Activated = function()
-				state.selected = conflict
-				state.selectedInstance = conflict.target
+				world:set(cts.SelectedConflict, cts.SelectedConflict, entity)
+				world:set(cts.SelectedInstance, cts.SelectedInstance, target)
 			end,
 		},
 	}, function()
-		Label("path", conflict.path, state.statusColor(conflict))
+		Label("path", path, theme.statusColor(resolution))
 
-		local detail = conflict.kind .. (if conflict.property then ` ({conflict.property})` else "")
+		local detail = kind .. (if property then ` ({property})` else "")
 		Element("TextLabel", {
 			id = "detail",
 			Text = detail,
@@ -40,8 +50,8 @@ local function ConflictRow(conflict: Conflict)
 			TextWrapped = true,
 		})
 
-		local oursSummary = format.sideSummary(conflict, "ours")
-		local theirsSummary = format.sideSummary(conflict, "theirs")
+		local oursSummary = format.sideSummary(kind, property, world:get(entity, cts.Ours))
+		local theirsSummary = format.sideSummary(kind, property, world:get(entity, cts.Theirs))
 		if oursSummary or theirsSummary then
 			Element("TextLabel", {
 				id = "values",
@@ -61,20 +71,20 @@ local function ConflictRow(conflict: Conflict)
 			Size = UDim2.new(1, 0, 0, 22),
 			tags = { "bg-none", "flex-row", "gap-sm" },
 		}, function()
-			Button("ours", "Ours", conflict.resolved == "ours", state.OURS_COLOR, function()
-				state.choose(conflict, "ours")
+			Button("ours", "Ours", resolution == "ours", theme.ours, function()
+				conflicts.choose(entity, "ours")
 			end)
-			Button("theirs", "Theirs", conflict.resolved == "theirs", state.THEIRS_COLOR, function()
-				state.choose(conflict, "theirs")
+			Button("theirs", "Theirs", resolution == "theirs", theme.theirs, function()
+				conflicts.choose(entity, "theirs")
 			end)
-			if state.canCustom(conflict) then
-				Button("custom", "Custom", conflict.resolved == "custom", state.CUSTOM_COLOR, function()
-					state.choose(conflict, "custom")
+			if conflicts.canCustom(entity) then
+				Button("custom", "Custom", resolution == "custom", theme.custom, function()
+					conflicts.choose(entity, "custom")
 				end)
 			end
-			if conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
+			if target:IsA("PVInstance") and target:IsDescendantOf(workspace) then
 				Button("view", "View", false, theme.neutralButton, function()
-					preview.focusOn(conflict)
+					preview.focusOn(entity)
 				end)
 			end
 		end)

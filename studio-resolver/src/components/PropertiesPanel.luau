@@ -14,12 +14,13 @@
 local Element = require("../packages").miu.Instance
 
 local format = require("../format")
-local state = require("../state")
 local theme = require("../theme")
 
-local PropertyRow = require("./properties/PropertyRow")
+local conflicts = require("../ecs/systems/conflicts")
+local cts = require("../ecs/cts")
+local world = require("../ecs/world")
 
-type Conflict = state.Conflict
+local PropertyRow = require("./properties/PropertyRow")
 
 local CLASS_PROPS: { { class: string, props: { string } } } = {
 	{
@@ -82,7 +83,7 @@ local function PropertiesPanel()
 		ScrollingDirection = Enum.ScrollingDirection.Y,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, function()
-		local inst = state.selectedInstance
+		local inst = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
 
 		Element("TextLabel", {
 			id = "title",
@@ -95,17 +96,22 @@ local function PropertiesPanel()
 			TextTruncate = Enum.TextTruncate.AtEnd,
 		})
 
-		if state.finished or not inst or not inst.Parent then
+		if world:has(cts.Finished, cts.Finished) or not inst or not inst.Parent then
 			return
 		end
 
 		-- BASE tab fidelity: the live target may be previewing a staged side;
 		-- its contested property shows the boot snapshot instead.
-		local conflict: Conflict? = nil
-		if state.viewTab == "base" then
-			for _, candidate in state.conflicts do
-				if candidate.target == inst then
-					conflict = candidate
+		local contestedProperty: string? = nil
+		local contestedBaseValue: any = nil
+		if world:get(cts.ViewTab, cts.ViewTab) == "base" then
+			for _, entity in conflicts.all() do
+				if world:get(entity, cts.Target) == inst then
+					if world:get(entity, cts.Kind) == "Property" then
+						contestedProperty = world:get(entity, cts.Property) :: string?
+						local base = world:get(entity, cts.Base) :: cts.Base?
+						contestedBaseValue = if base then base.value else nil
+					end
 					break
 				end
 			end
@@ -121,9 +127,7 @@ local function PropertiesPanel()
 				PropertyRow(id, name, value, nil, propertyName, rowIndex % 2 == 0)
 			end
 
-			local contestedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
-
-			local nameValue = if contestedProperty == "Name" then (conflict :: Conflict).baseValue else inst.Name
+			local nameValue = if contestedProperty == "Name" then contestedBaseValue else inst.Name
 			row("ClassName", "ClassName", inst.ClassName)
 			row("Name", "Name", nameValue)
 
@@ -138,7 +142,7 @@ local function PropertiesPanel()
 							end)
 							if ok then
 								if contestedProperty == property then
-									value = (conflict :: Conflict).baseValue
+									value = contestedBaseValue
 								end
 								row(property, property, value, property)
 							end

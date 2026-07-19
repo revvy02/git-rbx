@@ -1,25 +1,32 @@
 local Element = require("../packages").miu.Instance
 
 local format = require("../format")
-local state = require("../state")
 local theme = require("../theme")
+
+local conflicts = require("../ecs/systems/conflicts")
+local cts = require("../ecs/cts")
+local world = require("../ecs/world")
 
 local Label = require("./Label")
 local OptionRow = require("./OptionRow")
 
-type Conflict = state.Conflict
-
--- base | ours | theirs for a conflict; clicking a row stages it (base =
+-- base | ours | theirs for a conflict entity; clicking a row stages it (base =
 -- unpick). When custom is staged, shows the live value Complete will capture.
-local function ComparisonCard(conflict: Conflict)
+local function ComparisonCard(entity: any)
+	local kind = world:get(entity, cts.Kind) :: string
+	local path = world:get(entity, cts.Path) :: string
+	local property = world:get(entity, cts.Property) :: string?
+	local resolution = world:get(entity, cts.Resolution) :: string?
+	local base = world:get(entity, cts.Base) :: cts.Base
+
 	Element("Frame", {
 		id = "comparison",
 		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-sm", "surface", "vs-border" },
 	}, function()
-		Label("path", conflict.path, state.statusColor(conflict))
+		Label("path", path, theme.statusColor(resolution))
 		Element("TextLabel", {
 			id = "kind",
-			Text = conflict.kind .. (if conflict.property then ` ({conflict.property})` else ""),
+			Text = kind .. (if property then ` ({property})` else ""),
 			tags = { "text-base", "auto-size-y" },
 			TextColor3 = theme.textMuted,
 			TextXAlignment = Enum.TextXAlignment.Left,
@@ -27,31 +34,31 @@ local function ComparisonCard(conflict: Conflict)
 			Font = theme.font,
 		})
 
-		OptionRow("base", "base", format.baseSummary(conflict), theme.textMuted, conflict.resolved == nil, function()
-			state.stage(conflict, nil)
+		OptionRow("base", "base", format.baseSummary(kind, base), theme.textMuted, resolution == nil, function()
+			conflicts.stage(entity, nil)
 		end)
 		OptionRow(
 			"ours",
 			"ours",
-			format.sideSummary(conflict, "ours"),
-			state.OURS_COLOR,
-			conflict.resolved == "ours",
+			format.sideSummary(kind, property, world:get(entity, cts.Ours)),
+			theme.ours,
+			resolution == "ours",
 			function()
-				state.stage(conflict, "ours")
+				conflicts.stage(entity, "ours")
 			end
 		)
 		OptionRow(
 			"theirs",
 			"theirs",
-			format.sideSummary(conflict, "theirs"),
-			state.THEIRS_COLOR,
-			conflict.resolved == "theirs",
+			format.sideSummary(kind, property, world:get(entity, cts.Theirs)),
+			theme.theirs,
+			resolution == "theirs",
 			function()
-				state.stage(conflict, "theirs")
+				conflicts.stage(entity, "theirs")
 			end
 		)
-		if conflict.resolved == "custom" then
-			Label("custom", `custom — live: {format.formatValue(state.liveValue(conflict))}`, state.CUSTOM_COLOR)
+		if resolution == "custom" then
+			Label("custom", `custom — live: {format.formatValue(conflicts.liveValue(entity))}`, theme.custom)
 		end
 	end)
 end

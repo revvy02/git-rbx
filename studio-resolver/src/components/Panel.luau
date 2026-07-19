@@ -1,8 +1,11 @@
 local Element = require("../packages").miu.Instance
 
-local state = require("../state")
 local theme = require("../theme")
 local transport = require("../transport")
+
+local conflicts = require("../ecs/systems/conflicts")
+local cts = require("../ecs/cts")
+local world = require("../ecs/world")
 
 local ConflictRow = require("./ConflictRow")
 
@@ -11,12 +14,17 @@ local ConflictRow = require("./ConflictRow")
 -- backgrounds, and AutomaticCanvasSize extends past the viewport when content
 -- overflows.
 local function Panel()
+	local all = conflicts.all()
 	local unresolved = 0
-	for _, conflict in state.conflicts do
-		if not conflict.resolved then
+	for _, entity in all do
+		if not world:has(entity, cts.Resolution) then
 			unresolved += 1
 		end
 	end
+
+	local finished = world:has(cts.Finished, cts.Finished)
+	local completing = world:has(cts.Completing, cts.Completing)
+	local completeError = world:get(cts.CompleteError, cts.CompleteError) :: string?
 
 	Element("ScrollingFrame", {
 		id = "panel",
@@ -27,17 +35,17 @@ local function Panel()
 	}, function()
 		Element("TextLabel", {
 			id = "title",
-			Text = if state.finished
+			Text = if finished
 				then "MERGE COMPLETE — FILE WRITTEN"
-				else `CONFLICTS — {#state.conflicts - unresolved}/{#state.conflicts} DECIDED`,
+				else `CONFLICTS — {#all - unresolved}/{#all} DECIDED`,
 			Size = UDim2.new(1, 0, 0, 24),
 			BackgroundColor3 = theme.surfaceHigh,
-			TextColor3 = if state.finished then theme.added else theme.textMuted,
+			TextColor3 = if finished then theme.added else theme.textMuted,
 			TextSize = theme.headerSize,
 			Font = theme.font,
 		})
 
-		if state.finished then
+		if finished then
 			return
 		end
 
@@ -45,16 +53,16 @@ local function Panel()
 			id = "content",
 			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
 		}, function()
-			for _, conflict in state.conflicts do
-				ConflictRow(conflict)
+			for _, entity in all do
+				ConflictRow(entity)
 			end
 
-			local canComplete = unresolved == 0 and not state.completing
+			local canComplete = unresolved == 0 and not completing
 			Element("TextButton", {
 				id = "complete",
-				Text = if state.completing
+				Text = if completing
 					then "Completing…"
-					elseif state.completeError then "Complete failed — retry"
+					elseif completeError then "Complete failed — retry"
 					elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 					else "Complete",
 				Size = UDim2.new(1, 0, 0, 28),

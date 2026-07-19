@@ -19,15 +19,15 @@ local Element = require("../packages").miu.Instance
 local TreeRow = require("./TreeRow")
 
 local format = require("../format")
-local state = require("../state")
 local theme = require("../theme")
 
+local conflicts = require("../ecs/systems/conflicts")
 local cts = require("../ecs/cts")
 local mirror = require("../ecs/systems/mirror")
 local world = require("../ecs/world")
 
-type Conflict = state.Conflict
-type SideInfo = state.SideInfo
+type SideInfo = cts.SideInfo
+type Base = cts.Base
 
 type Row = {
 	inst: Instance,
@@ -47,8 +47,8 @@ local function seedExpansion()
 		return
 	end
 	seeded = true
-	for _, conflict in state.conflicts do
-		local node = conflict.target.Parent
+	for _, target in world:query(cts.Target):iter() do
+		local node = (target :: Instance).Parent
 		while node and node ~= game do
 			expanded[node] = true
 			node = node.Parent
@@ -60,7 +60,7 @@ end
 -- (e.g. clicked from the conflict list) — but only then, so a manual
 -- collapse afterwards sticks.
 local function revealSelected()
-	local inst = state.selectedInstance
+	local inst = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
 	if inst == nil or inst == lastRevealed then
 		return
 	end
@@ -147,18 +147,21 @@ local function sideRows(tab: string): { Row }
 		return node
 	end
 
-	for _, conflict in state.conflicts do
+	for _, entity in conflicts.all() do
+		local kind = world:get(entity, cts.Kind)
+		local target = world:get(entity, cts.Target) :: Instance
+		local base = world:get(entity, cts.Base) :: Base
 		local content: Instance?
 		local sideParent: Instance?
 		if tab == "base" then
-			content = conflict.target
-			sideParent = if conflict.kind == "MoveTarget" then conflict.baseParent else conflict.target.Parent
+			content = target
+			sideParent = if kind == "MoveTarget" then base.parent else target.Parent
 		else
-			local info = (if tab == "ours" then conflict.ours else conflict.theirs) :: SideInfo
+			local info = (
+				if tab == "ours" then world:get(entity, cts.Ours) else world:get(entity, cts.Theirs)
+			) :: SideInfo
 			content = info.clone
-			sideParent = if conflict.kind == "MoveTarget"
-				then (info.destination or conflict.baseParent)
-				else conflict.target.Parent
+			sideParent = if kind == "MoveTarget" then (info.destination or base.parent) else target.Parent
 		end
 		if content and sideParent then
 			table.insert(nodeFor(sideParent).grafts, content)
@@ -205,9 +208,9 @@ local TABS = { "base", "ours", "theirs", "result" }
 
 local function tabColor(tab: string): Color3
 	if tab == "ours" then
-		return state.OURS_COLOR
+		return theme.ours
 	elseif tab == "theirs" then
-		return state.THEIRS_COLOR
+		return theme.theirs
 	elseif tab == "base" then
 		return theme.textMuted
 	end
@@ -215,6 +218,7 @@ local function tabColor(tab: string): Color3
 end
 
 local function TabBar()
+	local viewTab = world:get(cts.ViewTab, cts.ViewTab)
 	Element("Frame", {
 		id = "tabs",
 		Size = UDim2.new(1, 0, 0, 26),
@@ -228,7 +232,7 @@ local function TabBar()
 			PaddingBottom = UDim.new(0, 3),
 		})
 		for _, tab in TABS do
-			local isActive = state.viewTab == tab
+			local isActive = viewTab == tab
 			Element("TextButton", {
 				id = tab,
 				Text = tab:upper(),
@@ -240,7 +244,7 @@ local function TabBar()
 				Font = theme.font,
 				events = {
 					Activated = function()
-						state.viewTab = tab
+						world:set(cts.ViewTab, cts.ViewTab, tab)
 					end,
 				},
 			})
@@ -251,7 +255,7 @@ end
 -- Ancestors of the selection light up as on-path.
 local function ancestorSet(): { [Instance]: boolean }
 	local set: { [Instance]: boolean } = {}
-	local node = state.selectedInstance
+	local node = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
 	node = node and node.Parent
 	while node and node ~= game do
 		set[node] = true
@@ -262,6 +266,7 @@ end
 
 local function renderRows(rows: { Row })
 	local onPath = ancestorSet()
+	local selectedInstance = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
 	for index, row in rows do
 		local inst = row.inst
 		TreeRow({
@@ -272,7 +277,7 @@ local function renderRows(rows: { Row })
 			className = row.className,
 			hasChildren = row.hasChildren,
 			expanded = row.isExpanded,
-			selected = inst == state.selectedInstance,
+			selected = inst == selectedInstance,
 			onPath = onPath[inst] == true,
 			stripe = index % 2 == 0,
 			onToggle = if row.hasChildren
@@ -281,7 +286,7 @@ local function renderRows(rows: { Row })
 				end
 				else nil,
 			onActivated = function()
-				state.selectedInstance = inst
+				world:set(cts.SelectedInstance, cts.SelectedInstance, inst)
 			end,
 		})
 	end
@@ -305,13 +310,14 @@ local function Explorer()
 			Font = theme.font,
 		})
 
-		if state.finished then
+		if world:has(cts.Finished, cts.Finished) then
 			return
 		end
 
 		TabBar()
 
-		renderRows(if state.viewTab == "result" then resultRows() else sideRows(state.viewTab))
+		local viewTab = world:get(cts.ViewTab, cts.ViewTab) :: string
+		renderRows(if viewTab == "result" then resultRows() else sideRows(viewTab))
 	end)
 end
 

@@ -1,69 +1,79 @@
 --[[
 	Decision transport: the canonical CLI, host-side. Complete batches every
 	staged decision through `rbx-diff resolve` and finalizes; the disk file is
-	only ever written here.
+	only ever written here. Progress/outcome land in the world as the
+	Completing/Finished tags and the CompleteError singleton.
 ]]
 
 local HttpService = game:GetService("HttpService")
 
 local process = require("@rodeo/process")
 
-local state = require("@self/state")
+local config = require("@self/config")
+local format = require("@self/format")
+
+local conflicts = require("@self/ecs/systems/conflicts")
+local cts = require("@self/ecs/cts")
+local world = require("@self/ecs/world")
 
 local transport = {}
 
 -- Commit every staged decision through the canonical CLI, then finalize.
 function transport.complete()
-	if state.completing or state.finished then
+	if world:has(cts.Completing, cts.Completing) or world:has(cts.Finished, cts.Finished) then
 		return
 	end
-	state.completing = true
-	state.completeError = nil
+	world:add(cts.Completing, cts.Completing)
+	world:remove(cts.CompleteError, cts.CompleteError)
 	task.spawn(function()
-		for _, conflict in state.conflicts do
+		for _, entity in conflicts.all() do
+			local entryName = (world:get(entity, cts.Entry) :: Instance).Name
+			local resolution = world:get(entity, cts.Resolution) :: string?
 			local args
-			if conflict.resolved == "custom" then
+			if resolution == "custom" then
 				-- Capture the live value NOW — the final state of the user's
 				-- in-Studio edit is the resolution
-				local encoded = state.encodeValue(state.liveValue(conflict))
+				local encoded = format.encodeValue(conflicts.liveValue(entity))
 				args = {
-					state.rbxDiffBin,
+					config.rbxDiffBin,
 					"resolve",
-					state.mergedFile,
+					config.mergedFile,
 					"--take",
 					"custom",
 					"--entry",
-					conflict.name,
+					entryName,
 					"--value",
 					HttpService:JSONEncode(encoded),
 				}
 			else
 				args = {
-					state.rbxDiffBin,
+					config.rbxDiffBin,
 					"resolve",
-					state.mergedFile,
+					config.mergedFile,
 					"--take",
-					conflict.resolved :: string,
+					resolution :: string,
 					"--entry",
-					conflict.name,
+					entryName,
 				}
 			end
 			local ok, result = pcall(process.run, args)
 			if not ok or not result.ok then
-				state.completeError = `--take {conflict.name} failed: {if ok then result.err else result}`
-				warn(state.completeError)
-				state.completing = false
+				local message = `--take {entryName} failed: {if ok then result.err else result}`
+				world:set(cts.CompleteError, cts.CompleteError, message)
+				warn(message)
+				world:remove(cts.Completing, cts.Completing)
 				return
 			end
 		end
-		local ok, result = pcall(process.run, { state.rbxDiffBin, "resolve", state.mergedFile, "--finalize" })
+		local ok, result = pcall(process.run, { config.rbxDiffBin, "resolve", config.mergedFile, "--finalize" })
 		if ok and result.ok then
-			state.finished = true
+			world:add(cts.Finished, cts.Finished)
 		else
-			state.completeError = `finalize failed: {if ok then result.err else result}`
-			warn(state.completeError)
+			local message = `finalize failed: {if ok then result.err else result}`
+			world:set(cts.CompleteError, cts.CompleteError, message)
+			warn(message)
 		end
-		state.completing = false
+		world:remove(cts.Completing, cts.Completing)
 	end)
 end
 
