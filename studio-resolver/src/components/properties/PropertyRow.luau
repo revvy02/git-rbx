@@ -5,13 +5,22 @@ local theme = require("../../theme")
 local PropertyValue = require("./PropertyValue")
 
 -- One property: name column (prop-blue, conflicted names carry the conflict's
--- status hex) + the typed value renderer.
-local function PropertyRow(id: string, name: string, value: any, nameHex: string?, propertyName: string?)
+-- status hex) + the typed value renderer. stripe = zebra shading.
+local function PropertyRow(
+	id: string,
+	name: string,
+	value: any,
+	nameHex: string?,
+	propertyName: string?,
+	stripe: boolean?
+)
 	Element("Frame", {
 		id = id,
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		tags = { "bg-none", "flex-row", "gap-sm" },
+		tags = { "flex-row", "gap-sm" },
+		BackgroundColor3 = theme.bg,
+		BackgroundTransparency = if stripe then 0.5 else 1,
 	}, function()
 		Element("TextLabel", {
 			id = "name",

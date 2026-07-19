@@ -27,6 +27,7 @@ export type TreeRowProps = {
 	onPath: boolean?, -- ancestor of the selection
 	color: Color3?, -- label color (conflict status / side)
 	tint: Color3?, -- rest background tint (conflict state)
+	stripe: boolean?, -- zebra shading for alternating rows
 	onActivated: (() -> ())?,
 	onToggle: (() -> ())?,
 }
@@ -43,6 +44,9 @@ local function TreeRow(props: TreeRowProps)
 	elseif props.tint then
 		background = props.tint :: Color3
 		backgroundTransparency = 0.85
+	elseif props.stripe then
+		background = theme.bg
+		backgroundTransparency = 0.5
 	end
 
 	Element("Frame", {

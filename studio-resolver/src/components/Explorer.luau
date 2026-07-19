@@ -288,6 +288,7 @@ local function renderRows(rows: { Row })
 			expanded = row.isExpanded,
 			selected = inst == state.selectedInstance,
 			onPath = onPath[inst] == true,
+			stripe = index % 2 == 0,
 			onToggle = if row.hasChildren
 				then function()
 					expanded[inst] = not row.isExpanded

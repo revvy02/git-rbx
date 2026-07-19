@@ -85,11 +85,17 @@ local function PropertiesPanel()
 			id = "content",
 			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
 		}, function()
+			local rowIndex = 0
+			local function row(id: string, name: string, value: any, nameHex: string?, propertyName: string?)
+				rowIndex += 1
+				PropertyRow(id, name, value, nameHex, propertyName, rowIndex % 2 == 0)
+			end
+
 			local contestedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
 
 			local nameValue = if contestedProperty == "Name" then (conflict :: Conflict).baseValue else inst.Name
-			PropertyRow("ClassName", "ClassName", inst.ClassName)
-			PropertyRow("Name", "Name", nameValue)
+			row("ClassName", "ClassName", inst.ClassName)
+			row("Name", "Name", nameValue)
 
 			local seen: { [string]: boolean } = { Name = true, ClassName = true }
 			for _, group in CLASS_PROPS do
@@ -104,7 +110,7 @@ local function PropertiesPanel()
 								if contestedProperty == property then
 									value = (conflict :: Conflict).baseValue
 								end
-								PropertyRow(property, property, value, nil, property)
+								row(property, property, value, nil, property)
 							end
 						end
 					end
@@ -112,12 +118,12 @@ local function PropertiesPanel()
 			end
 
 			for attribute, value in inst:GetAttributes() do
-				PropertyRow(`attr_{attribute}`, `@{format.escapeRich(attribute)}`, value)
+				row(`attr_{attribute}`, `@{format.escapeRich(attribute)}`, value)
 			end
 
 			local tags = inst:GetTags()
 			if #tags > 0 then
-				PropertyRow("tags", "Tags", table.concat(tags, ", "))
+				row("tags", "Tags", table.concat(tags, ", "))
 			end
 		end)
 	end)
