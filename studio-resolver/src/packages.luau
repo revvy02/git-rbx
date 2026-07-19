@@ -41,6 +41,7 @@ local function load(name: string): any
 end
 
 return {
+	jecs = load("jecs"),
 	miu = load("miu"),
 	wind = load("miu_wind"),
 }

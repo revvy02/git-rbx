@@ -21,3 +21,4 @@ miu_ui_labs = { wally = "revvy02/miu-ui-labs", version = "^0.2.1" }
 miu_virtual_list = { wally = "revvy02/miu-virtual-list", version = "^0.2.1" }
 miu_wind = { wally = "revvy02/miu-wind", version = "^0.1.0" }
 miu_px = { wally = "revvy02/miu-px", version = "^0.1.0" }
+jecs = { wally = "ukendio/jecs", version = "^0.10.4" }

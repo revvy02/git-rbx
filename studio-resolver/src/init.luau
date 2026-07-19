@@ -51,6 +51,7 @@ local preview = require("@self/preview")
 local state = require("@self/state")
 local theme = require("@self/theme")
 local transport = require("@self/transport")
+local world = require("@self/world")
 
 local Explorer = require("@self/components/Explorer")
 local Panel = require("@self/components/Panel")
@@ -121,6 +122,7 @@ state.mergedFile = mergedFile
 state.rbxDiffBin = args.rbxDiffBin
 
 preview.boot(container :: Instance)
+world.boot()
 
 print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
 

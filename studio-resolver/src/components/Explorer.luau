@@ -21,6 +21,7 @@ local TreeRow = require("./TreeRow")
 local format = require("../format")
 local state = require("../state")
 local theme = require("../theme")
+local world = require("../world")
 
 type Conflict = state.Conflict
 type SideInfo = state.SideInfo
@@ -115,14 +116,21 @@ local function instanceRow(inst: Instance, depth: number, hasChildren: boolean, 
 	}
 end
 
--- RESULT: the live preview DOM.
+-- RESULT: the live preview DOM, read through the jecs mirror — syncTree
+-- frame-diffs instances into entities with ChildOf pairs, and the walk here
+-- is pure entity traversal. The diff layers will hang their components off
+-- these entities.
 local function resultRows(): { Row }
 	seedExpansion()
 	revealSelected()
 
+	local roots = treeRoots()
+	world.syncTree(roots)
+
 	local rows: { Row } = {}
-	local function visit(inst: Instance, depth: number)
-		local children = visibleChildren(inst)
+	local function visit(entity: any, depth: number)
+		local inst = world.world:get(entity, world.Ref) :: Instance
+		local children = world.childrenOf(entity)
 		local isExpanded = expanded[inst] == true
 		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
 		if isExpanded then
@@ -131,8 +139,8 @@ local function resultRows(): { Row }
 			end
 		end
 	end
-	for _, root in treeRoots() do
-		visit(root, 0)
+	for _, root in roots do
+		visit(world.entityFor(root), 0)
 	end
 	return rows
 end
