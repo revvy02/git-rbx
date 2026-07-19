@@ -1,5 +1,7 @@
 local Element = require("../miu/Instance")
 
+local theme = require("../theme")
+
 -- One row of the comparison card: side name + formatted value, tinted when
 -- staged, click to stage.
 local function OptionRow(id: string, name: string, value: string?, color: Color3, staged: boolean, onClick: () -> ())
@@ -9,8 +11,8 @@ local function OptionRow(id: string, name: string, value: string?, color: Color3
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		tags = { "corner-sm" },
-		BackgroundColor3 = if staged then color else Color3.fromRGB(52, 52, 58),
-		BackgroundTransparency = if staged then 0.6 else 0,
+		BackgroundColor3 = if staged then theme.selection else theme.neutralButton,
+		BackgroundTransparency = if staged then 0 else 0.5,
 		AutoButtonColor = true,
 		events = { Activated = onClick },
 	}, function()
@@ -30,22 +32,22 @@ local function OptionRow(id: string, name: string, value: string?, color: Color3
 		Element("TextLabel", {
 			id = "name",
 			Text = name,
-			Size = UDim2.new(0, 44, 0, 16),
+			Size = UDim2.new(0, 48, 0, 16),
 			BackgroundTransparency = 1,
 			TextColor3 = color,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.GothamMedium,
+			TextSize = theme.textSizeSmall,
+			Font = theme.font,
 		})
 		Element("TextLabel", {
 			id = "value",
 			RichText = true,
 			Text = value or "?",
 			tags = { "text-base", "auto-size-y" },
-			TextColor3 = Color3.fromRGB(225, 225, 230),
+			TextColor3 = theme.text,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.RobotoMono,
+			TextSize = theme.textSizeSmall,
+			Font = theme.font,
 			TextWrapped = true,
 		})
 	end)

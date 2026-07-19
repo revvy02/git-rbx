@@ -9,6 +9,7 @@
 local Element = require("../miu/Instance")
 
 local state = require("../state")
+local theme = require("../theme")
 
 local ComparisonCard = require("./ComparisonCard")
 
@@ -77,14 +78,14 @@ local function flattenTree(): { ExplorerRow }
 		table.insert(rows, {
 			label = if conflict then `● {node.inst.Name}` else node.inst.Name,
 			depth = depth,
-			color = if conflict then state.statusColor(conflict) else Color3.fromRGB(150, 150, 158),
+			color = if conflict then state.statusColor(conflict) else theme.textMuted,
 			conflict = conflict,
 		})
 		for _, phantom in node.phantoms do
 			local sideColor = if phantom.side == "ours"
 				then state.OURS_COLOR
 				elseif phantom.side == "theirs" then state.THEIRS_COLOR
-				else Color3.fromRGB(120, 120, 128)
+				else theme.textDim
 			table.insert(rows, {
 				label = `◌ {phantom.conflict.target.Name} ({phantom.side})`,
 				depth = depth + 1,
@@ -117,13 +118,12 @@ local function Explorer()
 	}, function()
 		Element("TextLabel", {
 			id = "title",
-			Text = "rbx-diff: merge explorer",
-			Size = UDim2.new(1, 0, 0, 26),
-			tags = { "corner-md" },
-			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
-			TextColor3 = Color3.fromRGB(230, 230, 230),
-			TextSize = 14,
-			Font = Enum.Font.GothamMedium,
+			Text = "MERGE EXPLORER",
+			Size = UDim2.new(1, 0, 0, 24),
+			tags = { "corner-sm", "surface", "vs-border" },
+			TextColor3 = theme.textMuted,
+			TextSize = theme.headerSize,
+			Font = theme.font,
 		})
 
 		if state.finished then
@@ -132,8 +132,7 @@ local function Explorer()
 
 		Element("Frame", {
 			id = "tree",
-			tags = { "auto-size-y", "flex-col", "p-md", "corner-md" },
-			BackgroundColor3 = Color3.fromRGB(40, 40, 46),
+			tags = { "auto-size-y", "flex-col", "p-sm", "corner-sm", "surface", "vs-border" },
 		}, function()
 			for index, row in flattenTree() do
 				local isSelected = row.conflict ~= nil and row.conflict == state.selected and row.stageSide == nil
@@ -141,9 +140,8 @@ local function Explorer()
 					id = `row{index}`,
 					Text = "",
 					LayoutOrder = index,
-					Size = UDim2.new(1, 0, 0, 18),
-					tags = { "corner-sm" },
-					BackgroundColor3 = Color3.fromRGB(55, 55, 62),
+					Size = UDim2.new(1, 0, 0, 22),
+					BackgroundColor3 = theme.selection,
 					BackgroundTransparency = if isSelected then 0 else 1,
 					AutoButtonColor = row.conflict ~= nil,
 					events = {
@@ -171,8 +169,8 @@ local function Explorer()
 						TextColor3 = row.color,
 						TextXAlignment = Enum.TextXAlignment.Left,
 						TextTruncate = Enum.TextTruncate.AtEnd,
-						TextSize = 13,
-						Font = Enum.Font.Gotham,
+						TextSize = theme.textSize,
+						Font = theme.font,
 					})
 				end)
 			end

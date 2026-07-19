@@ -30,12 +30,14 @@ export type Conflict = {
 	rendered: string?, -- staged state the 3D layer currently reflects
 }
 
+local theme = require("@self/theme")
+
 local state = {}
 
-state.UNRESOLVED_COLOR = Color3.fromRGB(255, 170, 0)
-state.OURS_COLOR = Color3.fromRGB(70, 160, 255)
-state.THEIRS_COLOR = Color3.fromRGB(170, 90, 255)
-state.CUSTOM_COLOR = Color3.fromRGB(80, 200, 160)
+state.UNRESOLVED_COLOR = theme.unresolved
+state.OURS_COLOR = theme.ours
+state.THEIRS_COLOR = theme.theirs
+state.CUSTOM_COLOR = theme.custom
 
 state.conflicts = {} :: { Conflict }
 state.selected = nil :: Conflict?

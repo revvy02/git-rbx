@@ -1,6 +1,7 @@
 local Element = require("../miu/Instance")
 
 local state = require("../state")
+local theme = require("../theme")
 local transport = require("../transport")
 
 local ConflictRow = require("./ConflictRow")
@@ -28,14 +29,13 @@ local function Panel()
 		Element("TextLabel", {
 			id = "title",
 			Text = if state.finished
-				then "Merge complete — file written"
-				else `rbx-diff: {#state.conflicts - unresolved}/{#state.conflicts} decided`,
-			Size = UDim2.new(1, 0, 0, 26),
-			tags = { "corner-md" },
-			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
-			TextColor3 = if state.finished then Color3.fromRGB(120, 220, 140) else Color3.fromRGB(230, 230, 230),
-			TextSize = 14,
-			Font = Enum.Font.GothamMedium,
+				then "MERGE COMPLETE — FILE WRITTEN"
+				else `CONFLICTS — {#state.conflicts - unresolved}/{#state.conflicts} DECIDED`,
+			Size = UDim2.new(1, 0, 0, 24),
+			tags = { "corner-sm", "surface", "vs-border" },
+			TextColor3 = if state.finished then theme.added else theme.textMuted,
+			TextSize = theme.headerSize,
+			Font = theme.font,
 		})
 
 		if state.finished then
@@ -54,12 +54,12 @@ local function Panel()
 				elseif state.completeError then "Complete failed — retry"
 				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 				else "Complete",
-			Size = UDim2.new(1, 0, 0, 30),
-			tags = { "corner-md" },
-			BackgroundColor3 = if canComplete then Color3.fromRGB(60, 160, 90) else Color3.fromRGB(55, 55, 60),
-			TextColor3 = Color3.fromRGB(240, 240, 240),
-			TextSize = 14,
-			Font = Enum.Font.GothamMedium,
+			Size = UDim2.new(1, 0, 0, 28),
+			tags = { "corner-sm" },
+			BackgroundColor3 = if canComplete then theme.accent else theme.disabled,
+			TextColor3 = if canComplete then theme.textBright else theme.textMuted,
+			TextSize = theme.textSize,
+			Font = theme.font,
 			events = {
 				Activated = function()
 					if canComplete then

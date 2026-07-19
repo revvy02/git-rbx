@@ -50,6 +50,7 @@ local WindRules = require("@self/wind/WindRules")
 
 local preview = require("@self/preview")
 local state = require("@self/state")
+local theme = require("@self/theme")
 local transport = require("@self/transport")
 
 local Explorer = require("@self/components/Explorer")
@@ -137,10 +138,11 @@ RunService.Heartbeat:Connect(function()
 			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		}, function()
 			-- One sheet for the whole overlay: the wind utility classes
-			-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) that
-			-- the components reference through `tags`.
+			-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) plus
+			-- the resolver's VS Code-dark classes from theme.rules().
 			StyleLink(StyleSheet(function()
 				WindRules()
+				theme.rules()
 			end))
 			Explorer()
 			Panel()

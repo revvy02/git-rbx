@@ -3,6 +3,7 @@ local Element = require("../miu/Instance")
 local format = require("../format")
 local preview = require("../preview")
 local state = require("../state")
+local theme = require("../theme")
 
 local Button = require("./Button")
 local Label = require("./Label")
@@ -14,10 +15,10 @@ local function ConflictRow(conflict: Conflict)
 		id = conflict.name,
 		Text = "",
 		AutoButtonColor = false,
-		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
+		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-sm", "vs-border" },
 		BackgroundColor3 = if state.selected == conflict
-			then Color3.fromRGB(48, 48, 56)
-			else Color3.fromRGB(40, 40, 46),
+			then theme.surface:Lerp(theme.selection, 0.35)
+			else theme.surface,
 		events = {
 			Activated = function()
 				state.selected = conflict
@@ -31,10 +32,10 @@ local function ConflictRow(conflict: Conflict)
 			id = "detail",
 			Text = detail,
 			tags = { "text-base", "auto-size-y" },
-			TextColor3 = Color3.fromRGB(160, 160, 170),
+			TextColor3 = theme.textMuted,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.Gotham,
+			TextSize = theme.textSizeSmall,
+			Font = theme.font,
 			TextWrapped = true,
 		})
 
@@ -44,12 +45,12 @@ local function ConflictRow(conflict: Conflict)
 			Element("TextLabel", {
 				id = "values",
 				RichText = true,
-				Text = `<font color="#46A0FF">{oursSummary or "?"}</font>  ·  <font color="#AA5AFF">{theirsSummary or "?"}</font>`,
+				Text = `<font color="{theme.oursHex}">{oursSummary or "?"}</font>  ·  <font color="{theme.theirsHex}">{theirsSummary or "?"}</font>`,
 				tags = { "text-base", "auto-size-y" },
-				TextColor3 = Color3.fromRGB(200, 200, 205),
+				TextColor3 = theme.text,
 				TextXAlignment = Enum.TextXAlignment.Left,
-				TextSize = 12,
-				Font = Enum.Font.RobotoMono,
+				TextSize = theme.textSizeSmall,
+				Font = theme.font,
 				TextWrapped = true,
 			})
 		end
@@ -71,7 +72,7 @@ local function ConflictRow(conflict: Conflict)
 				end)
 			end
 			if conflict.target:IsA("PVInstance") and conflict.target:IsDescendantOf(workspace) then
-				Button("view", "View", false, Color3.fromRGB(80, 80, 90), function()
+				Button("view", "View", false, theme.neutralButton, function()
 					preview.focusOn(conflict)
 				end)
 			end

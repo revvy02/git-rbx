@@ -2,6 +2,7 @@ local Element = require("../miu/Instance")
 
 local format = require("../format")
 local state = require("../state")
+local theme = require("../theme")
 
 local Label = require("./Label")
 local OptionRow = require("./OptionRow")
@@ -17,33 +18,25 @@ local function ComparisonCard()
 
 	Element("Frame", {
 		id = "comparison",
-		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
-		BackgroundColor3 = Color3.fromRGB(28, 28, 32),
+		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-sm", "surface", "vs-border" },
 	}, function()
 		Label("path", conflict.path, state.statusColor(conflict))
 		Element("TextLabel", {
 			id = "kind",
 			Text = conflict.kind .. (if conflict.property then ` ({conflict.property})` else ""),
 			tags = { "text-base", "auto-size-y" },
-			TextColor3 = Color3.fromRGB(160, 160, 170),
+			TextColor3 = theme.textMuted,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = 12,
-			Font = Enum.Font.Gotham,
+			TextSize = theme.textSizeSmall,
+			Font = theme.font,
 		})
 
-		OptionRow(
-			"base",
-			"Base",
-			format.baseSummary(conflict),
-			Color3.fromRGB(170, 170, 178),
-			conflict.resolved == nil,
-			function()
-				state.stage(conflict, nil)
-			end
-		)
+		OptionRow("base", "base", format.baseSummary(conflict), theme.textMuted, conflict.resolved == nil, function()
+			state.stage(conflict, nil)
+		end)
 		OptionRow(
 			"ours",
-			"Ours",
+			"ours",
 			format.sideSummary(conflict, "ours"),
 			state.OURS_COLOR,
 			conflict.resolved == "ours",
@@ -53,7 +46,7 @@ local function ComparisonCard()
 		)
 		OptionRow(
 			"theirs",
-			"Theirs",
+			"theirs",
 			format.sideSummary(conflict, "theirs"),
 			state.THEIRS_COLOR,
 			conflict.resolved == "theirs",
