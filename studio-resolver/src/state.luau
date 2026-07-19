@@ -42,6 +42,7 @@ state.CUSTOM_COLOR = theme.custom
 state.conflicts = {} :: { Conflict }
 state.selected = nil :: Conflict?
 state.selectedInstance = nil :: Instance?
+state.viewTab = "result" :: "base" | "ours" | "theirs" | "result"
 state.finished = false
 state.completing = false
 state.completeError = nil :: string?

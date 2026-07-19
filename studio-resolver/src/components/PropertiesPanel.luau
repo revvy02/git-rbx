@@ -69,9 +69,13 @@ local function PropertiesPanel()
 			return
 		end
 
+		-- The card follows the target AND its side clones, so browsing a
+		-- version under the OURS/THEIRS tabs keeps the staging controls up.
 		local conflict: Conflict? = nil
 		for _, candidate in state.conflicts do
-			if candidate.target == inst then
+			local ours = candidate.ours
+			local theirs = candidate.theirs
+			if candidate.target == inst or (ours and ours.clone == inst) or (theirs and theirs.clone == inst) then
 				conflict = candidate
 				break
 			end
@@ -87,8 +91,16 @@ local function PropertiesPanel()
 			local conflictedProperty = if conflict and conflict.kind == "Property" then conflict.property else nil
 			local conflictHex = if conflict then theme.toHex(state.statusColor(conflict)) else nil
 
+			-- BASE tab + conflicted target: the live instance may be previewing
+			-- a staged side, but base is what this tab claims — show the boot
+			-- snapshot for the contested property.
+			local baseOverride = state.viewTab == "base" and conflict ~= nil and conflict.target == inst
+
+			local nameValue = if baseOverride and conflictedProperty == "Name"
+				then (conflict :: Conflict).baseValue
+				else inst.Name
 			PropertyRow("ClassName", "ClassName", inst.ClassName)
-			PropertyRow("Name", "Name", inst.Name, if conflictedProperty == "Name" then conflictHex else nil)
+			PropertyRow("Name", "Name", nameValue, if conflictedProperty == "Name" then conflictHex else nil)
 
 			local seen: { [string]: boolean } = { Name = true, ClassName = true }
 			for _, group in CLASS_PROPS do
@@ -100,6 +112,9 @@ local function PropertiesPanel()
 								return (inst :: any)[property]
 							end)
 							if ok then
+								if baseOverride and conflictedProperty == property then
+									value = (conflict :: Conflict).baseValue
+								end
 								PropertyRow(
 									property,
 									property,

@@ -1,14 +1,19 @@
 --[[
-	Full explorer over the preview DOM, in the old rbx-diff-viewer's style:
-	expandable 22px rows with carets, dim class names, conflict rows tinted
-	and badged by state, #094771 selection. Because staging actually
-	reparents/renames targets, the tree follows the staged state live.
-	MoveTarget conflicts additionally show phantom entries at each candidate
-	parent they are NOT currently under — clicking a phantom stages that side
-	("base" = unpick).
+	Explorer over the merge, with a view-tab bar: BASE | OURS | THEIRS | RESULT.
 
-	Conflict ancestor chains start expanded; everything else starts collapsed,
-	so conflict-scale stays readable on real maps without virtualization.
+	RESULT is the full preview DOM — expandable 22px rows with carets, class
+	icons, dim class suffixes, conflict rows tinted and badged by status,
+	#094771 selection, and MoveTarget phantoms at candidate parents (clicking
+	one stages that side, "base" = unpick).
+
+	The side tabs are conflict-scoped: each conflict renders as a caption row
+	followed by that side's version of the contested content — the stamped
+	Ours/Theirs clones, or the target itself for BASE (whose conflicted
+	property value the properties pane overrides from the boot snapshot). A
+	side that deletes the target renders a placeholder instead of a subtree.
+
+	Conflict ancestor chains start expanded in RESULT and side subtrees start
+	fully expanded; collapses stick either way.
 ]]
 
 local Element = require("../miu/Instance")
@@ -24,8 +29,9 @@ type SideInfo = state.SideInfo
 type Row = {
 	inst: Instance?,
 	label: string,
-	className: string, -- drives the class icon (phantoms use their target's)
+	className: string?, -- drives the class icon (phantoms use their target's)
 	phantom: boolean,
+	caption: boolean, -- side tabs: the conflict header above a subtree
 	depth: number,
 	color: Color3,
 	conflict: Conflict?, -- clicking selects this conflict
@@ -113,7 +119,32 @@ local function visibleChildren(inst: Instance): { Instance }
 	return out
 end
 
-local function flattenTree(): { Row }
+local function instanceRow(
+	inst: Instance,
+	depth: number,
+	conflict: Conflict?,
+	hasExtra: boolean,
+	isExpanded: boolean
+): Row
+	local name = format.escapeRich(inst.Name)
+	return {
+		inst = inst,
+		label = `{name}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
+		className = inst.ClassName,
+		phantom = false,
+		caption = false,
+		depth = depth,
+		color = if conflict then state.statusColor(conflict) else theme.text,
+		conflict = conflict,
+		hasChildren = hasExtra,
+		isExpanded = isExpanded,
+		tint = if conflict then state.statusColor(conflict) else nil,
+	}
+end
+
+-- RESULT: the live preview DOM. Staging reparents/renames targets, so the
+-- tree follows the staged state for free.
+local function resultRows(): { Row }
 	seedExpansion()
 	revealSelected()
 
@@ -145,19 +176,7 @@ local function flattenTree(): { Row }
 		local children = visibleChildren(inst)
 		local conflict = byTarget[inst]
 		local isExpanded = expanded[inst] == true
-		local name = format.escapeRich(inst.Name)
-		table.insert(rows, {
-			inst = inst,
-			label = `{name}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
-			className = inst.ClassName,
-			phantom = false,
-			depth = depth,
-			color = if conflict then state.statusColor(conflict) else theme.text,
-			conflict = conflict,
-			hasChildren = #children > 0 or phantoms[inst] ~= nil,
-			isExpanded = isExpanded,
-			tint = if conflict then state.statusColor(conflict) else nil,
-		})
+		table.insert(rows, instanceRow(inst, depth, conflict, #children > 0 or phantoms[inst] ~= nil, isExpanded))
 		if isExpanded then
 			for _, phantom in phantoms[inst] or {} do
 				local sideColor = if phantom.side == "ours"
@@ -169,6 +188,7 @@ local function flattenTree(): { Row }
 					label = `{format.escapeRich(phantom.conflict.target.Name)} ({phantom.side})`,
 					className = phantom.conflict.target.ClassName,
 					phantom = true,
+					caption = false,
 					depth = depth + 1,
 					color = sideColor,
 					conflict = phantom.conflict,
@@ -188,14 +208,126 @@ local function flattenTree(): { Row }
 	return rows
 end
 
+-- BASE / OURS / THEIRS: conflict-scoped sections — caption + that side's
+-- version of the contested content. Subtrees default to expanded.
+local function sideRows(tab: string): { Row }
+	local rows: { Row } = {}
+
+	local function visit(inst: Instance, depth: number, conflict: Conflict?)
+		local children = visibleChildren(inst)
+		local isExpanded = expanded[inst] ~= false
+		table.insert(rows, instanceRow(inst, depth, conflict, #children > 0, isExpanded))
+		if isExpanded then
+			for _, child in children do
+				visit(child, depth + 1, nil)
+			end
+		end
+	end
+
+	for _, conflict in state.conflicts do
+		local caption = format.escapeRich(conflict.path)
+		local content: Instance? = nil
+		if tab == "base" then
+			content = conflict.target
+			if conflict.kind == "MoveTarget" and conflict.baseParent then
+				caption = `{caption}  <font color="{theme.textDimHex}">→ {format.escapeRich(
+					format.relPath(conflict.baseParent)
+				)}</font>`
+			end
+		else
+			local info = (if tab == "ours" then conflict.ours else conflict.theirs) :: SideInfo
+			content = info.clone
+			if conflict.kind == "MoveTarget" and info.destinationPath then
+				caption =
+					`{caption}  <font color="{theme.textDimHex}">→ {format.escapeRich(info.destinationPath)}</font>`
+			end
+		end
+
+		table.insert(rows, {
+			inst = content or conflict.target,
+			label = caption,
+			className = nil,
+			phantom = false,
+			caption = true,
+			depth = 0,
+			color = state.statusColor(conflict),
+			conflict = conflict,
+			hasChildren = false,
+			isExpanded = false,
+			tint = state.statusColor(conflict),
+		})
+
+		if content then
+			visit(content, 1, nil)
+		else
+			table.insert(rows, {
+				inst = nil,
+				label = `(deleted on {tab})`,
+				className = nil,
+				phantom = true,
+				caption = false,
+				depth = 1,
+				color = theme.removed,
+				conflict = conflict,
+				hasChildren = false,
+				isExpanded = false,
+			})
+		end
+	end
+	return rows
+end
+
+local TABS = { "base", "ours", "theirs", "result" }
+
+local function tabColor(tab: string): Color3
+	if tab == "ours" then
+		return state.OURS_COLOR
+	elseif tab == "theirs" then
+		return state.THEIRS_COLOR
+	elseif tab == "base" then
+		return theme.textMuted
+	end
+	return theme.text
+end
+
+local function TabBar()
+	Element("Frame", {
+		id = "tabs",
+		Size = UDim2.new(1, 0, 0, 20),
+		tags = { "bg-none", "flex-row", "gap-xs" },
+	}, function()
+		for _, tab in TABS do
+			local isActive = state.viewTab == tab
+			Element("TextButton", {
+				id = tab,
+				Text = tab:upper(),
+				Size = UDim2.new(0.25, -3, 1, 0),
+				tags = { "corner-sm", "vs-border" },
+				BackgroundColor3 = if isActive then theme.selection else theme.surface,
+				TextColor3 = if isActive then theme.textBright else tabColor(tab),
+				TextSize = 10,
+				Font = theme.font,
+				events = {
+					Activated = function()
+						state.viewTab = tab
+					end,
+				},
+			})
+		end
+	end)
+end
+
 local function ExplorerRow(index: number, row: Row)
 	local inst = row.inst
-	local isSelected = inst ~= nil and inst == state.selectedInstance
+	local isSelected = not row.caption and inst ~= nil and inst == state.selectedInstance
 
 	local background = theme.selection
 	local backgroundTransparency = 1
 	if isSelected then
 		backgroundTransparency = 0
+	elseif row.caption then
+		background = theme.surfaceHigh
+		backgroundTransparency = 0.3
 	elseif row.tint then
 		background = row.tint
 		backgroundTransparency = 0.85
@@ -235,22 +367,26 @@ local function ExplorerRow(index: number, row: Row)
 			},
 		})
 
-		local icon = classIcon(row.className)
-		Element("ImageLabel", {
-			id = "icon",
-			Image = icon.Image,
-			ImageRectOffset = icon.ImageRectOffset,
-			ImageRectSize = icon.ImageRectSize,
-			ImageTransparency = if row.phantom then 0.5 else 0,
-			Size = UDim2.new(0, 16, 0, 16),
-			BackgroundTransparency = 1,
-		})
+		local iconWidth = 0
+		if row.className then
+			iconWidth = 16
+			local icon = classIcon(row.className)
+			Element("ImageLabel", {
+				id = "icon",
+				Image = icon.Image,
+				ImageRectOffset = icon.ImageRectOffset,
+				ImageRectSize = icon.ImageRectSize,
+				ImageTransparency = if row.phantom then 0.5 else 0,
+				Size = UDim2.new(0, 16, 0, 16),
+				BackgroundTransparency = 1,
+			})
+		end
 
 		Element("TextButton", {
 			id = "name",
 			RichText = true,
 			Text = ` {row.label}`,
-			Size = UDim2.new(1, -32, 1, 0),
+			Size = UDim2.new(1, -16 - iconWidth, 1, 0),
 			BackgroundTransparency = 1,
 			TextColor3 = row.color,
 			TextXAlignment = Enum.TextXAlignment.Left,
@@ -301,11 +437,14 @@ local function Explorer()
 			return
 		end
 
+		TabBar()
+
 		Element("Frame", {
 			id = "tree",
 			tags = { "auto-size-y", "flex-col", "p-sm", "corner-sm", "surface", "vs-border" },
 		}, function()
-			for index, row in flattenTree() do
+			local rows = if state.viewTab == "result" then resultRows() else sideRows(state.viewTab)
+			for index, row in rows do
 				ExplorerRow(index, row)
 			end
 		end)
