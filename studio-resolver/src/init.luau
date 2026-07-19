@@ -192,13 +192,21 @@ local finished = false
 local completing = false
 local completeError: string? = nil
 
--- Staged decision: session-local only, freely revisable. Clicking the chosen
--- side again unpicks it. Nothing is written anywhere until Complete.
-local function choose(conflict: Conflict, side: string)
+-- The conflict the explorer + comparison panels are focused on.
+local selected: Conflict? = conflicts[1]
+
+-- Staged decisions are session-local only and freely revisable; nothing is
+-- written anywhere until Complete. stage() sets an explicit state (nil =
+-- unpicked/base); choose() is the toggle the side buttons use.
+local function stage(conflict: Conflict, side: string?)
 	if completing or finished then
 		return
 	end
-	conflict.resolved = if conflict.resolved == side then nil else side
+	conflict.resolved = side
+end
+
+local function choose(conflict: Conflict, side: string)
+	stage(conflict, if conflict.resolved == side then nil else side)
 end
 
 -- Commit every staged decision through the canonical CLI, then finalize.
@@ -533,11 +541,313 @@ local function sideSummary(conflict: Conflict, side: string): string?
 	return nil
 end
 
-local function ConflictRow(conflict: Conflict)
+-- ============================================================================
+-- Merge explorer: a conflict-scoped tree (targets + their ancestor chains,
+-- badged by state), not a DOM clone. A MoveTarget appears at its CURRENT
+-- previewed position solid, with phantom entries at the other candidate
+-- parents — clicking a phantom stages that side. Below it, the comparison
+-- card shows base | ours | theirs for the selected conflict; clicking a row
+-- stages it (base = unpick).
+-- ============================================================================
+
+local previewPrefix = "Workspace.RbxDiffModelPreview."
+
+local function relPath(inst: Instance): string
+	local full = inst:GetFullName()
+	local trimmed = full:gsub("^" .. previewPrefix:gsub("%.", "%%."), "")
+	return trimmed
+end
+
+type ExplorerRow = {
+	label: string,
+	depth: number,
+	color: Color3,
+	conflict: Conflict?, -- clicking selects this conflict
+	stageSide: string?, -- phantom rows: clicking stages this side ("base" = unpick)
+}
+
+type TreeNode = {
+	inst: Instance,
+	children: { TreeNode },
+	conflicts: { Conflict },
+	phantoms: { { conflict: Conflict, side: string } },
+}
+
+-- Conflict-scoped tree over the LIVE preview DOM: because staging actually
+-- reparents/renames targets, the solid tree follows the staged state for free.
+local function flattenTree(): { ExplorerRow }
+	local nodes: { [Instance]: TreeNode } = {}
+	local roots: { TreeNode } = {}
+
+	local function nodeFor(inst: Instance): TreeNode
+		local existing = nodes[inst]
+		if existing then
+			return existing
+		end
+		local node: TreeNode = { inst = inst, children = {}, conflicts = {}, phantoms = {} }
+		nodes[inst] = node
+		local parent = inst.Parent
+		if parent and parent ~= game and parent ~= workspace then
+			table.insert(nodeFor(parent).children, node)
+		else
+			table.insert(roots, node)
+		end
+		return node
+	end
+
+	for _, conflict in conflicts do
+		local node = nodeFor(conflict.target)
+		table.insert(node.conflicts, conflict)
+		if conflict.kind == "MoveTarget" then
+			-- Phantoms at every candidate parent the target is NOT currently
+			-- under (including base when staged away from it).
+			local candidates: { [string]: Instance? } = {
+				ours = (conflict.ours :: SideInfo).destination,
+				theirs = (conflict.theirs :: SideInfo).destination,
+				base = conflict.baseParent,
+			}
+			for side, parent in candidates :: { [string]: Instance } do
+				if parent ~= conflict.target.Parent then
+					table.insert(nodeFor(parent).phantoms, { conflict = conflict, side = side })
+				end
+			end
+		end
+	end
+
+	local rows: { ExplorerRow } = {}
+	local function visit(node: TreeNode, depth: number)
+		local conflict = node.conflicts[1]
+		table.insert(rows, {
+			label = if conflict then `● {node.inst.Name}` else node.inst.Name,
+			depth = depth,
+			color = if conflict then statusColor(conflict) else Color3.fromRGB(150, 150, 158),
+			conflict = conflict,
+		})
+		for _, phantom in node.phantoms do
+			local sideColor = if phantom.side == "ours"
+				then OURS_COLOR
+				elseif phantom.side == "theirs" then THEIRS_COLOR
+				else Color3.fromRGB(120, 120, 128)
+			table.insert(rows, {
+				label = `◌ {phantom.conflict.target.Name} ({phantom.side})`,
+				depth = depth + 1,
+				color = sideColor,
+				conflict = phantom.conflict,
+				stageSide = phantom.side,
+			})
+		end
+		table.sort(node.children, function(a: TreeNode, b: TreeNode)
+			return a.inst.Name < b.inst.Name
+		end)
+		for _, child in node.children do
+			visit(child, depth + 1)
+		end
+	end
+	for _, root in roots do
+		visit(root, 0)
+	end
+	return rows
+end
+
+-- Base-side description for the comparison card (what unpicking keeps).
+local function baseSummary(conflict: Conflict): string
+	if conflict.kind == "Property" then
+		return formatValue(conflict.baseValue)
+	elseif conflict.kind == "MoveTarget" then
+		local parent = conflict.baseParent
+		return if parent then `→ {escapeRich(relPath(parent))}` else "→ ?"
+	end
+	return "keep base"
+end
+
+local function OptionRow(id: string, name: string, value: string?, color: Color3, staged: boolean, onClick: () -> ())
+	Element("TextButton", {
+		id = id,
+		Text = "",
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		tags = { "corner-sm" },
+		BackgroundColor3 = if staged then color else Color3.fromRGB(52, 52, 58),
+		BackgroundTransparency = if staged then 0.6 else 0,
+		AutoButtonColor = true,
+		events = { Activated = onClick },
+	}, function()
+		Element("UIPadding", {
+			id = "pad",
+			PaddingLeft = UDim.new(0, 6),
+			PaddingRight = UDim.new(0, 6),
+			PaddingTop = UDim.new(0, 3),
+			PaddingBottom = UDim.new(0, 3),
+		})
+		Element("UIListLayout", {
+			id = "layout",
+			FillDirection = Enum.FillDirection.Horizontal,
+			Padding = UDim.new(0, 8),
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+		})
+		Element("TextLabel", {
+			id = "name",
+			Text = name,
+			Size = UDim2.new(0, 44, 0, 16),
+			BackgroundTransparency = 1,
+			TextColor3 = color,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextSize = 12,
+			Font = Enum.Font.GothamMedium,
+		})
+		Element("TextLabel", {
+			id = "value",
+			RichText = true,
+			Text = value or "?",
+			tags = { "text-base", "auto-size-y" },
+			TextColor3 = Color3.fromRGB(225, 225, 230),
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextSize = 12,
+			Font = Enum.Font.RobotoMono,
+			TextWrapped = true,
+		})
+	end)
+end
+
+local function ComparisonCard()
+	local conflict = selected
+	if not conflict then
+		return
+	end
+
 	Element("Frame", {
-		id = conflict.name,
+		id = "comparison",
 		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
-		BackgroundColor3 = Color3.fromRGB(40, 40, 46),
+		BackgroundColor3 = Color3.fromRGB(28, 28, 32),
+	}, function()
+		Label("path", conflict.path, statusColor(conflict))
+		Element("TextLabel", {
+			id = "kind",
+			Text = conflict.kind .. (if conflict.property then ` ({conflict.property})` else ""),
+			tags = { "text-base", "auto-size-y" },
+			TextColor3 = Color3.fromRGB(160, 160, 170),
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextSize = 12,
+			Font = Enum.Font.Gotham,
+		})
+
+		OptionRow(
+			"base",
+			"Base",
+			baseSummary(conflict),
+			Color3.fromRGB(170, 170, 178),
+			conflict.resolved == nil,
+			function()
+				stage(conflict, nil)
+			end
+		)
+		OptionRow("ours", "Ours", sideSummary(conflict, "ours"), OURS_COLOR, conflict.resolved == "ours", function()
+			stage(conflict, "ours")
+		end)
+		OptionRow(
+			"theirs",
+			"Theirs",
+			sideSummary(conflict, "theirs"),
+			THEIRS_COLOR,
+			conflict.resolved == "theirs",
+			function()
+				stage(conflict, "theirs")
+			end
+		)
+		if conflict.resolved == "custom" then
+			Label("custom", `custom — live: {formatValue(liveValue(conflict))}`, CUSTOM_COLOR)
+		end
+	end)
+end
+
+local function Explorer()
+	Element("ScrollingFrame", {
+		id = "explorer",
+		Position = UDim2.new(0, 16, 0, 16),
+		Size = UDim2.new(0, 300, 1, -32),
+		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	}, function()
+		Element("TextLabel", {
+			id = "title",
+			Text = "rbx-diff: merge explorer",
+			Size = UDim2.new(1, 0, 0, 26),
+			tags = { "corner-md" },
+			BackgroundColor3 = Color3.fromRGB(28, 28, 32),
+			TextColor3 = Color3.fromRGB(230, 230, 230),
+			TextSize = 14,
+			Font = Enum.Font.GothamMedium,
+		})
+
+		if finished then
+			return
+		end
+
+		Element("Frame", {
+			id = "tree",
+			tags = { "auto-size-y", "flex-col", "p-md", "corner-md" },
+			BackgroundColor3 = Color3.fromRGB(40, 40, 46),
+		}, function()
+			for index, row in flattenTree() do
+				local isSelected = row.conflict ~= nil and row.conflict == selected and row.stageSide == nil
+				Element("TextButton", {
+					id = `row{index}`,
+					Text = "",
+					LayoutOrder = index,
+					Size = UDim2.new(1, 0, 0, 18),
+					tags = { "corner-sm" },
+					BackgroundColor3 = Color3.fromRGB(55, 55, 62),
+					BackgroundTransparency = if isSelected then 0 else 1,
+					AutoButtonColor = row.conflict ~= nil,
+					events = {
+						Activated = function()
+							local conflict = row.conflict
+							if not conflict then
+								return
+							end
+							if row.stageSide then
+								stage(conflict, if row.stageSide == "base" then nil else row.stageSide)
+							end
+							selected = conflict
+						end,
+					},
+				}, function()
+					Element("UIPadding", {
+						id = "pad",
+						PaddingLeft = UDim.new(0, 4 + row.depth * 12),
+					})
+					Element("TextLabel", {
+						id = "label",
+						Text = row.label,
+						Size = UDim2.new(1, 0, 1, 0),
+						BackgroundTransparency = 1,
+						TextColor3 = row.color,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						TextTruncate = Enum.TextTruncate.AtEnd,
+						TextSize = 13,
+						Font = Enum.Font.Gotham,
+					})
+				end)
+			end
+		end)
+
+		ComparisonCard()
+	end)
+end
+
+local function ConflictRow(conflict: Conflict)
+	Element("TextButton", {
+		id = conflict.name,
+		Text = "",
+		AutoButtonColor = false,
+		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-md" },
+		BackgroundColor3 = if selected == conflict then Color3.fromRGB(48, 48, 56) else Color3.fromRGB(40, 40, 46),
+		events = {
+			Activated = function()
+				selected = conflict
+			end,
+		},
 	}, function()
 		Label("path", conflict.path, statusColor(conflict))
 
@@ -676,6 +986,7 @@ RunService.Heartbeat:Connect(function()
 			StyleLink(StyleSheet(function()
 				WindRules()
 			end))
+			Explorer()
 			Panel()
 		end)
 	end)
