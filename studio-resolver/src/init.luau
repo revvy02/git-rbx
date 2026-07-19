@@ -125,8 +125,65 @@ preview.boot(container :: Instance)
 print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
 
 -- ============================================================================
+-- Sidebar host: a real plugin dock widget when we can get one, so the
+-- explorer/props don't overlap the viewport. rodeo runs us at plugin
+-- identity but hands us no `plugin` global — the rodeo plugin itself is
+-- reachable as a Plugin instance under PluginDebugService, and calling
+-- CreateDockWidgetPluginGui on it works from this identity. Falls back to
+-- the CoreGui overlay when it doesn't.
+-- ============================================================================
+
+local sidebarWidget: Instance? = nil
+do
+	local ok, result = pcall(function()
+		local pluginDebugService = game:GetService("PluginDebugService")
+		local rodeoPlugin: Instance? = nil
+		for _, child in pluginDebugService:GetChildren() do
+			if child:IsA("Plugin") and child.Name:match("rodeo") then
+				rodeoPlugin = child
+				break
+			end
+		end
+		assert(rodeoPlugin, "no rodeo plugin under PluginDebugService")
+		local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Left, true, true, 300, 600, 240, 300)
+		local widget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync("RbxDiffMergeExplorer", info)
+		widget.Title = "rbx-diff"
+		return widget
+	end)
+	if ok then
+		sidebarWidget = result
+		print("rbx-diff resolver: sidebar docked in a plugin widget")
+	else
+		warn(`rbx-diff resolver: plugin widget unavailable ({result}); sidebar renders in CoreGui`)
+	end
+end
+
+-- ============================================================================
 -- Frame loop; the run stays alive until finalized
 -- ============================================================================
+
+local function Sidebar()
+	-- Explorer top half, properties bottom half; fills the widget, or renders
+	-- as a flush 300px rail in the overlay fallback.
+	Element("Frame", {
+		id = "sidebar",
+		Size = if sidebarWidget then UDim2.new(1, 0, 1, 0) else UDim2.new(0, 300, 1, 0),
+		tags = { "surface", "vs-border" },
+	}, function()
+		Explorer()
+		PropertiesPanel()
+	end)
+end
+
+local function ResolverSheet()
+	-- Each render surface needs its own sheet link: the wind utility classes
+	-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) plus the
+	-- resolver's VS Code-dark classes from theme.rules().
+	StyleLink(StyleSheet(function()
+		WindRules()
+		theme.rules()
+	end))
+end
 
 RunService.Heartbeat:Connect(function()
 	preview.renderPreviews()
@@ -139,25 +196,19 @@ RunService.Heartbeat:Connect(function()
 			DisplayOrder = 200,
 			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		}, function()
-			-- One sheet for the whole overlay: the wind utility classes
-			-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) plus
-			-- the resolver's VS Code-dark classes from theme.rules().
-			StyleLink(StyleSheet(function()
-				WindRules()
-				theme.rules()
-			end))
-			-- One flush sidebar: explorer top half, properties bottom half.
-			Element("Frame", {
-				id = "sidebar",
-				Size = UDim2.new(0, 300, 1, 0),
-				tags = { "surface", "vs-border" },
-			}, function()
-				Explorer()
-				PropertiesPanel()
-			end)
+			ResolverSheet()
+			if not sidebarWidget then
+				Sidebar()
+			end
 			Panel()
 		end)
 	end)
+	if sidebarWidget then
+		Portal(sidebarWidget, "rbx-diff-sidebar", function()
+			ResolverSheet()
+			Sidebar()
+		end)
+	end
 end)
 
 -- Debug drive-through: stage everything to one side and Complete, so the
