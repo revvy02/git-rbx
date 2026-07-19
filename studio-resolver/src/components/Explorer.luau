@@ -250,7 +250,7 @@ local function TabBar()
 				tags = { "corner-sm", "vs-border" },
 				BackgroundColor3 = if isActive then theme.selection else theme.surface,
 				TextColor3 = if isActive then theme.textBright else tabColor(tab),
-				TextSize = 10,
+				TextSize = 11,
 				Font = theme.font,
 				events = {
 					Activated = function()

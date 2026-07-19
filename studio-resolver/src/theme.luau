@@ -53,9 +53,9 @@ end
 -- Typography: monospace everywhere, like the viewer's Consolas
 theme.font = Enum.Font.RobotoMono
 theme.fontBold = Enum.Font.RobotoMono
-theme.textSize = 13
-theme.textSizeSmall = 11
-theme.headerSize = 11
+theme.textSize = 14
+theme.textSizeSmall = 12
+theme.headerSize = 12
 
 -- Resolver style classes layered on top of WindRules.
 function theme.rules()
