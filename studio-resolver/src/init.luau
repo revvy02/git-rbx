@@ -125,49 +125,34 @@ preview.boot(container :: Instance)
 print(`rbx-diff resolver: {#conflicts} conflict(s) in {mergedFile}`)
 
 -- ============================================================================
--- Sidebar host: a real plugin dock widget when we can get one, so the
--- explorer/props don't overlap the viewport. rodeo runs us at plugin
--- identity but hands us no `plugin` global — the rodeo plugin itself is
--- reachable as a Plugin instance under PluginDebugService, and calling
--- CreateDockWidgetPluginGui on it works from this identity. Falls back to
--- the CoreGui overlay when it doesn't.
+-- Sidebar host: a real plugin dock widget so the explorer/props don't
+-- overlap the viewport. rodeo runs us at plugin identity but hands us no
+-- `plugin` global — the rodeo plugin itself is a Plugin instance under
+-- PluginDebugService, and CreateDockWidgetPluginGuiAsync works from here.
 -- ============================================================================
 
-local sidebarWidget: Instance? = nil
-do
-	local ok, result = pcall(function()
-		local pluginDebugService = game:GetService("PluginDebugService")
-		local rodeoPlugin: Instance? = nil
-		for _, child in pluginDebugService:GetChildren() do
-			if child:IsA("Plugin") and child.Name:match("rodeo") then
-				rodeoPlugin = child
-				break
-			end
-		end
-		assert(rodeoPlugin, "no rodeo plugin under PluginDebugService")
-		local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Left, true, true, 300, 600, 240, 300)
-		local widget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync("RbxDiffMergeExplorer", info)
-		widget.Title = "rbx-diff"
-		return widget
-	end)
-	if ok then
-		sidebarWidget = result
-		print("rbx-diff resolver: sidebar docked in a plugin widget")
-	else
-		warn(`rbx-diff resolver: plugin widget unavailable ({result}); sidebar renders in CoreGui`)
+local rodeoPlugin: Plugin?
+for _, child in game:GetService("PluginDebugService"):GetChildren() do
+	if child:IsA("Plugin") and child.Name:match("rodeo") then
+		rodeoPlugin = child
+		break
 	end
 end
+local sidebarWidget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync(
+	"RbxDiffMergeExplorer",
+	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Left, true, true, 300, 600, 240, 300)
+)
+sidebarWidget.Title = "rbx-diff"
 
 -- ============================================================================
 -- Frame loop; the run stays alive until finalized
 -- ============================================================================
 
 local function Sidebar()
-	-- Explorer top half, properties bottom half; fills the widget, or renders
-	-- as a flush 300px rail in the overlay fallback.
+	-- Explorer top half, properties bottom half.
 	Element("Frame", {
 		id = "sidebar",
-		Size = if sidebarWidget then UDim2.new(1, 0, 1, 0) else UDim2.new(0, 300, 1, 0),
+		Size = UDim2.new(1, 0, 1, 0),
 		tags = { "surface", "vs-border" },
 	}, function()
 		Explorer()
@@ -197,18 +182,13 @@ RunService.Heartbeat:Connect(function()
 			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		}, function()
 			ResolverSheet()
-			if not sidebarWidget then
-				Sidebar()
-			end
 			Panel()
 		end)
 	end)
-	if sidebarWidget then
-		Portal(sidebarWidget, "rbx-diff-sidebar", function()
-			ResolverSheet()
-			Sidebar()
-		end)
-	end
+	Portal(sidebarWidget, "rbx-diff-sidebar", function()
+		ResolverSheet()
+		Sidebar()
+	end)
 end)
 
 -- Debug drive-through: stage everything to one side and Complete, so the
