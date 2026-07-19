@@ -31,7 +31,6 @@
 	Args: <merged-file> [--rbx-diff <path-to-binary>] [--auto <side>]
 ]]
 
-local CoreGui = game:GetService("CoreGui")
 local RunService = game:GetService("RunService")
 
 local process = require("@rodeo/process")
@@ -138,11 +137,18 @@ for _, child in game:GetService("PluginDebugService"):GetChildren() do
 		break
 	end
 end
-local sidebarWidget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync(
-	"RbxDiffMergeExplorer",
-	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Left, true, true, 300, 600, 240, 300)
-)
-sidebarWidget.Title = "rbx-diff"
+
+local function createWidget(id: string, title: string, dockState: Enum.InitialDockState): DockWidgetPluginGui
+	local widget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync(
+		id,
+		DockWidgetPluginGuiInfo.new(dockState, true, true, 300, 600, 240, 300)
+	)
+	widget.Title = title
+	return widget
+end
+
+local sidebarWidget = createWidget("RbxDiffMergeExplorer", "rbx-diff", Enum.InitialDockState.Left)
+local conflictsWidget = createWidget("RbxDiffMergeConflicts", "rbx-diff — conflicts", Enum.InitialDockState.Right)
 
 -- ============================================================================
 -- Frame loop; the run stays alive until finalized
@@ -173,21 +179,19 @@ end
 RunService.Heartbeat:Connect(function()
 	preview.renderPreviews()
 	preview.updateHighlights()
-	Portal(CoreGui, "rbx-diff-resolver", function()
-		Element("ScreenGui", {
-			id = "gui",
-			Name = "RbxDiffResolver",
-			ResetOnSpawn = false,
-			DisplayOrder = 200,
-			ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		}, function()
-			ResolverSheet()
-			Panel()
-		end)
-	end)
 	Portal(sidebarWidget, "rbx-diff-sidebar", function()
 		ResolverSheet()
 		Sidebar()
+	end)
+	Portal(conflictsWidget, "rbx-diff-conflicts", function()
+		ResolverSheet()
+		Element("Frame", {
+			id = "conflicts",
+			Size = UDim2.new(1, 0, 1, 0),
+			tags = { "surface", "vs-border" },
+		}, function()
+			Panel()
+		end)
 	end)
 end)
 

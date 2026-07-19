@@ -20,9 +20,8 @@ local function Panel()
 
 	Element("ScrollingFrame", {
 		id = "panel",
-		Position = UDim2.new(1, -356, 0, 16),
-		Size = UDim2.new(0, 340, 1, -32),
-		tags = { "bg-none", "flex-col", "gap-sm", "pr-md" },
+		Size = UDim2.new(1, 0, 1, 0),
+		tags = { "bg-none", "flex-col" },
 		ScrollingDirection = Enum.ScrollingDirection.Y,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, function()
@@ -32,7 +31,7 @@ local function Panel()
 				then "MERGE COMPLETE — FILE WRITTEN"
 				else `CONFLICTS — {#state.conflicts - unresolved}/{#state.conflicts} DECIDED`,
 			Size = UDim2.new(1, 0, 0, 24),
-			tags = { "corner-sm", "surface", "vs-border" },
+			BackgroundColor3 = theme.surfaceHigh,
 			TextColor3 = if state.finished then theme.added else theme.textMuted,
 			TextSize = theme.headerSize,
 			Font = theme.font,
@@ -42,32 +41,37 @@ local function Panel()
 			return
 		end
 
-		for _, conflict in state.conflicts do
-			ConflictRow(conflict)
-		end
+		Element("Frame", {
+			id = "content",
+			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
+		}, function()
+			for _, conflict in state.conflicts do
+				ConflictRow(conflict)
+			end
 
-		local canComplete = unresolved == 0 and not state.completing
-		Element("TextButton", {
-			id = "complete",
-			Text = if state.completing
-				then "Completing…"
-				elseif state.completeError then "Complete failed — retry"
-				elseif unresolved > 0 then `Complete ({unresolved} undecided)`
-				else "Complete",
-			Size = UDim2.new(1, 0, 0, 28),
-			tags = { "corner-sm" },
-			BackgroundColor3 = if canComplete then theme.accent else theme.disabled,
-			TextColor3 = if canComplete then theme.textBright else theme.textMuted,
-			TextSize = theme.textSize,
-			Font = theme.font,
-			events = {
-				Activated = function()
-					if canComplete then
-						transport.complete()
-					end
-				end,
-			},
-		})
+			local canComplete = unresolved == 0 and not state.completing
+			Element("TextButton", {
+				id = "complete",
+				Text = if state.completing
+					then "Completing…"
+					elseif state.completeError then "Complete failed — retry"
+					elseif unresolved > 0 then `Complete ({unresolved} undecided)`
+					else "Complete",
+				Size = UDim2.new(1, 0, 0, 28),
+				tags = { "corner-sm" },
+				BackgroundColor3 = if canComplete then theme.accent else theme.disabled,
+				TextColor3 = if canComplete then theme.textBright else theme.textMuted,
+				TextSize = theme.textSize,
+				Font = theme.font,
+				events = {
+					Activated = function()
+						if canComplete then
+							transport.complete()
+						end
+					end,
+				},
+			})
+		end)
 	end)
 end
 
