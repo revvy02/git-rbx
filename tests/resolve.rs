@@ -126,17 +126,35 @@ fn finalize_refuses_unresolved() {
 #[test]
 fn delete_vs_edit_finalize_both_ways() {
     let build = || {
-        let mut base = base_dom();
-        // ours deletes folder A; theirs edits P inside it
+        let mut base = WeakDom::new(
+            folder("root")
+                .with_child(
+                    folder("A")
+                        .with_child(part_with("P", 0.0))
+                        .with_child(part_with("Q", 0.0)),
+                )
+                .with_child(folder("B")),
+        );
+        // Ours deletes A while theirs independently edits two descendants.
+        // This is one subtree-level choice, not one choice per edit operation.
         let ours = WeakDom::new(folder("root").with_child(folder("B")));
         let theirs = WeakDom::new(
             folder("root")
-                .with_child(folder("A").with_child(part_with("P", 0.5)))
+                .with_child(
+                    folder("A")
+                        .with_child(part_with("P", 0.5))
+                        .with_child(part_with("Q", 0.75)),
+                )
                 .with_child(folder("B")),
         );
         let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
-        assert!(result.conflicts.iter().any(|c| c.path == "root.A"), "{:?}", result.conflicts);
+        assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
+        assert_eq!(result.conflicts[0].path, "root.A");
+        assert_eq!(result.conflicts[0].ours.len(), 1);
+        assert_eq!(result.conflicts[0].theirs.len(), 2);
         stamp_conflicts(&mut base, &ours, &theirs, &result);
+        let container = find_container(&base).unwrap();
+        assert_eq!(list_entries(&base, container).len(), 1);
         base
     };
 
@@ -160,7 +178,11 @@ fn delete_vs_edit_finalize_both_ways() {
     finalize(&mut dom).unwrap();
     let expected = WeakDom::new(
         folder("root")
-            .with_child(folder("A").with_child(part_with("P", 0.5)))
+            .with_child(
+                folder("A")
+                    .with_child(part_with("P", 0.5))
+                    .with_child(part_with("Q", 0.75)),
+            )
             .with_child(folder("B")),
     );
     let residual = diff_doms(&dom, &expected);

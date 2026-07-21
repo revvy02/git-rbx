@@ -12,6 +12,7 @@
 
 local packages = require("../../packages")
 
+local conflicts = require("./library/conflicts")
 local types = require("../types")
 
 local getBoundingBox = require("../../library/viewport/getBoundingBox")
@@ -20,7 +21,9 @@ local getIdealCameraCFrame = require("../../library/viewport/getIdealCameraCFram
 return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	local function focusOn(conflictEntity: any)
 		local camera = workspace.CurrentCamera
-		local target = world:get(conflictEntity, cts.Target) :: Instance
+		-- Frame what the preview is actually rendering — the staged clone
+		-- when a delete-vs-edit keep side is staged, the target otherwise.
+		local target = conflicts.renderedInstance(conflictEntity)
 		local cframe, size = getBoundingBox(target :: PVInstance)
 		camera.CFrame = getIdealCameraCFrame(cframe, size, {
 			fov = camera.FieldOfView,

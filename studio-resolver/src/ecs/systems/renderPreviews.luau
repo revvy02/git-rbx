@@ -43,6 +43,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 					info.clone = child
 				end
 			end
+			info.deleted = folder:GetAttribute("Deleted") :: boolean?
 			info.destinationPath = folder:GetAttribute("DestinationPath") :: string?
 		end
 		return info
@@ -128,17 +129,22 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				target.Parent = destination
 			end
 		elseif kind == "DeleteVsEdit" then
-			-- One side deletes, the other edits. Staging either side hides the
-			-- base target; staging the edit side additionally swaps its stamped
-			-- clone into the target's spot (it carries its own true coordinates).
-			local editSide = if ours.clone then "ours" else "theirs"
-			local editInfo = if editSide == "ours" then ours else theirs
+			-- One side deletes (stamped Deleted attribute); the other keeps —
+			-- an edited clone, or a move out of the deleted subtree (no clone).
+			-- Staging the delete side hides the base target; staging a keep
+			-- side with an edited clone swaps the clone into the target's spot
+			-- (it carries its own true coordinates). A clone-less keep side
+			-- just keeps the target visible.
+			local deleteSide = if ours.deleted then "ours" elseif theirs.deleted then "theirs" else nil
+			local keepSide = if deleteSide == "ours" then "theirs" else "ours"
+			local keepInfo = if keepSide == "ours" then ours else theirs
+			local clone = keepInfo.clone
+			local hideTarget = staged == deleteSide or (clone ~= nil and staged == keepSide)
 			for part, original in base.parts :: { [BasePart]: number } do
-				part.Transparency = if staged == nil then original else 1
+				part.Transparency = if hideTarget then 1 else original
 			end
-			local clone = editInfo.clone
 			if clone then
-				clone.Parent = if staged == editSide then target.Parent else editInfo.folder
+				clone.Parent = if staged == keepSide then target.Parent else keepInfo.folder
 			end
 		end
 	end

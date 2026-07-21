@@ -183,6 +183,34 @@ fn delete_vs_edit_conflicts() {
 }
 
 #[test]
+fn multiple_edits_under_one_deleted_subtree_are_one_conflict() {
+    let mut base = WeakDom::new(
+        folder("root").with_child(
+            folder("A")
+                .with_child(part("P"))
+                .with_child(part("Q")),
+        ),
+    );
+    let ours = WeakDom::new(folder("root"));
+    let theirs = WeakDom::new(
+        folder("root").with_child(
+            folder("A")
+                .with_child(part_with("P", 0.25))
+                .with_child(part_with("Q", 0.75)),
+        ),
+    );
+
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+
+    assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
+    let conflict = &result.conflicts[0];
+    assert_eq!(conflict.kind, ConflictKind::DeleteVsEdit);
+    assert_eq!(conflict.path, "root.A");
+    assert_eq!(conflict.ours.len(), 1, "one subtree deletion");
+    assert_eq!(conflict.theirs.len(), 2, "both descendant edits retained");
+}
+
+#[test]
 fn move_into_deleted_subtree_conflicts() {
     // ours: remove B; theirs: move P into B
     let mut base = base_dom();

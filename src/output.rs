@@ -1,7 +1,7 @@
 //! Output formatting for diff results.
 
-use colored::Colorize;
 use crate::diff::{DiffEntry, PropertyValue};
+use colored::Colorize;
 
 /// Output format options.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,7 +59,11 @@ fn print_pretty(diffs: &[DiffEntry]) {
         println!("\n{}", "Added:".green().bold());
         for diff in &added {
             if let DiffEntry::Added { path, class, .. } = diff {
-                println!("  {} {}", "+".green(), format!("{} [{}]", path, class).green());
+                println!(
+                    "  {} {}",
+                    "+".green(),
+                    format!("{} [{}]", path, class).green()
+                );
             }
         }
     }
@@ -68,8 +72,16 @@ fn print_pretty(diffs: &[DiffEntry]) {
     if !moved.is_empty() {
         println!("\n{}", "Moved:".cyan().bold());
         for diff in &moved {
-            if let DiffEntry::Moved { old_path, path, class, property_changes, .. } = diff {
-                println!("  {} {} {} {} [{}]",
+            if let DiffEntry::Moved {
+                old_path,
+                path,
+                class,
+                property_changes,
+                ..
+            } = diff
+            {
+                println!(
+                    "  {} {} {} {} [{}]",
                     ">".cyan(),
                     old_path.cyan(),
                     "→".dimmed(),
@@ -85,7 +97,13 @@ fn print_pretty(diffs: &[DiffEntry]) {
     if !modified.is_empty() {
         println!("\n{}", "Modified:".yellow().bold());
         for diff in &modified {
-            if let DiffEntry::Modified { path, class, property_changes, .. } = diff {
+            if let DiffEntry::Modified {
+                path,
+                class,
+                property_changes,
+                ..
+            } = diff
+            {
                 println!("  {} {} [{}]", "~".yellow(), path.yellow(), class);
                 print_property_changes(property_changes);
             }
@@ -101,7 +119,8 @@ fn print_property_changes(property_changes: &[crate::diff::PropertyChange]) {
     for change in property_changes {
         match (&change.old_value, &change.new_value) {
             (Some(old), Some(new)) => {
-                println!("      {}: {} {} {}",
+                println!(
+                    "      {}: {} {} {}",
                     change.name,
                     format_property_value(old).red(),
                     "→".dimmed(),
@@ -109,14 +128,16 @@ fn print_property_changes(property_changes: &[crate::diff::PropertyChange]) {
                 );
             }
             (None, Some(new)) => {
-                println!("      {}: {} {}",
+                println!(
+                    "      {}: {} {}",
                     change.name,
                     "+".green(),
                     format_property_value(new).green()
                 );
             }
             (Some(old), None) => {
-                println!("      {}: {} {}",
+                println!(
+                    "      {}: {} {}",
                     change.name,
                     "-".red(),
                     format_property_value(old).red()
@@ -147,7 +168,10 @@ fn format_property_value(v: &PropertyValue) -> String {
         PropertyValue::Ref { value } => format!("Ref({})", &value[..8.min(value.len())]),
         PropertyValue::Vector2 { x, y } => format!("({}, {})", x, y),
         PropertyValue::Vector3 { x, y, z } => format!("({}, {}, {})", x, y, z),
-        PropertyValue::CFrame { position, orientation } => {
+        PropertyValue::CFrame {
+            position,
+            orientation,
+        } => {
             format!(
                 "CFrame(position=({}, {}, {}), orientation=[({}, {}, {}), ({}, {}, {}), ({}, {}, {})])",
                 position[0],
@@ -168,8 +192,16 @@ fn format_property_value(v: &PropertyValue) -> String {
         PropertyValue::BrickColor { value } => format!("BrickColor({})", value),
         PropertyValue::Enum { value } => format!("Enum({})", value),
         PropertyValue::UDim { scale, offset } => format!("UDim({}, {})", scale, offset),
-        PropertyValue::UDim2 { x_scale, x_offset, y_scale, y_offset } => {
-            format!("UDim2({{{}, {}}}, {{{}, {}}})", x_scale, x_offset, y_scale, y_offset)
+        PropertyValue::UDim2 {
+            x_scale,
+            x_offset,
+            y_scale,
+            y_offset,
+        } => {
+            format!(
+                "UDim2({{{}, {}}}, {{{}, {}}})",
+                x_scale, x_offset, y_scale, y_offset
+            )
         }
         PropertyValue::NumberRange { min, max } => format!("NumberRange({}, {})", min, max),
         PropertyValue::NumberSequence { keypoints } => {
@@ -178,7 +210,12 @@ fn format_property_value(v: &PropertyValue) -> String {
         PropertyValue::ColorSequence { keypoints } => {
             format!("ColorSequence({} keypoints)", keypoints.len())
         }
-        PropertyValue::Rect { min_x, min_y, max_x, max_y } => {
+        PropertyValue::Rect {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        } => {
             format!("Rect({}, {}, {}, {})", min_x, min_y, max_x, max_y)
         }
         PropertyValue::Other { type_name } => format!("<{}>", type_name),
@@ -203,7 +240,8 @@ fn print_summary(diffs: &[DiffEntry]) {
     if added == 0 && removed == 0 && modified == 0 && moved == 0 {
         println!("No differences found.");
     } else {
-        println!("{} added, {} removed, {} modified, {} moved",
+        println!(
+            "{} added, {} removed, {} modified, {} moved",
             added.to_string().green(),
             removed.to_string().red(),
             modified.to_string().yellow(),
@@ -244,14 +282,31 @@ fn print_json(diffs: &[DiffEntry]) {
         moved: usize,
     }
 
-    let added = diffs.iter().filter(|d| matches!(d, DiffEntry::Added { .. })).count();
-    let removed = diffs.iter().filter(|d| matches!(d, DiffEntry::Removed { .. })).count();
-    let modified = diffs.iter().filter(|d| matches!(d, DiffEntry::Modified { .. })).count();
-    let moved = diffs.iter().filter(|d| matches!(d, DiffEntry::Moved { .. })).count();
+    let added = diffs
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::Added { .. }))
+        .count();
+    let removed = diffs
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::Removed { .. }))
+        .count();
+    let modified = diffs
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::Modified { .. }))
+        .count();
+    let moved = diffs
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::Moved { .. }))
+        .count();
 
     let output = Output {
         changes: diffs,
-        summary: Summary { added, removed, modified, moved },
+        summary: Summary {
+            added,
+            removed,
+            modified,
+            moved,
+        },
     };
 
     println!("{}", serde_json::to_string_pretty(&output).unwrap());

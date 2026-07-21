@@ -1,7 +1,7 @@
 //! Instance matching between two DOMs.
 //!
 //! Matching strategy:
-//! 1. Single-candidate name match (unique name = instant match)
+//! 1. Single-candidate (name, class) match (unique pair = instant match)
 //! 2. Multi-candidate name groups with hash tiebreaking:
 //!    - Pass 1: Full property hash (exact match)
 //!    - Pass 2: No-refs hash (matches when only Ref properties changed)
@@ -83,12 +83,19 @@ pub fn match_children(
     }
 
     // ===== Single-candidate matching (no ambiguity) =====
+    //
+    // Names alone are not identities: a Model may be replaced by a Part with
+    // the same name. Pairing those would emit the Part's properties onto the
+    // Model (for example, Color3uint8 into Model.Color) and make an invalid
+    // Roblox file. A direct name match must therefore preserve the class.
     for (new_idx, new_child) in new_children.iter().enumerate() {
         let candidates: Vec<usize> = name_index
             .get(new_child.name.as_str())
             .map(|indices| {
-                indices.iter().copied()
-                    .filter(|&i| !old_matched[i])
+                indices
+                    .iter()
+                    .copied()
+                    .filter(|&i| !old_matched[i] && old_children[i].class == new_child.class)
                     .collect()
             })
             .unwrap_or_default();
@@ -104,28 +111,37 @@ pub fn match_children(
 
     // ===== Multi-candidate matching (multi-pass tiebreaking) =====
     // Group unmatched new children by name for batch processing
-    let mut name_groups: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut name_groups: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
             let has_candidates = name_index
                 .get(new_child.name.as_str())
-                .map(|indices| indices.iter().any(|&i| !old_matched[i]))
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .any(|&i| !old_matched[i] && old_children[i].class == new_child.class)
+                })
                 .unwrap_or(false);
             if has_candidates {
-                name_groups.entry(new_child.name.as_str()).or_default().push(new_idx);
+                name_groups
+                    .entry((new_child.name.as_str(), new_child.class.as_str()))
+                    .or_default()
+                    .push(new_idx);
             }
         }
     }
 
-    for (name, new_indices) in &name_groups {
+    for ((name, class), new_indices) in &name_groups {
         hash_tiebreaks += new_indices.len();
 
-        // Collect unmatched old candidates for this name group
+        // Collect unmatched old candidates for this (name, class) group.
         let old_candidates: Vec<usize> = name_index
             .get(name)
             .map(|indices| {
-                indices.iter().copied()
-                    .filter(|&i| !old_matched[i])
+                indices
+                    .iter()
+                    .copied()
+                    .filter(|&i| !old_matched[i] && old_children[i].class == *class)
                     .collect()
             })
             .unwrap_or_default();
@@ -181,7 +197,8 @@ pub fn match_children(
         }
 
         // Pass 3: Positional fallback — pair remaining by order
-        let mut remaining_old: Vec<usize> = old_candidates.iter()
+        let mut remaining_old: Vec<usize> = old_candidates
+            .iter()
             .copied()
             .filter(|&oi| !old_matched[oi])
             .collect();
@@ -197,7 +214,10 @@ pub fn match_children(
         }
 
         if pass2_count > 0 || pass3_count > 0 {
-            let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+            let parent_name = old_dom
+                .get_by_ref(old_parent)
+                .map(|i| i.name.as_str())
+                .unwrap_or("?");
             debug!(
                 parent = parent_name,
                 name = *name,
@@ -215,14 +235,20 @@ pub fn match_children(
     let mut class_groups_old: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, child) in old_children.iter().enumerate() {
         if !old_matched[i] {
-            class_groups_old.entry(child.class.as_str()).or_default().push(i);
+            class_groups_old
+                .entry(child.class.as_str())
+                .or_default()
+                .push(i);
         }
     }
 
     let mut class_groups_new: HashMap<&str, Vec<usize>> = HashMap::new();
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
-            class_groups_new.entry(new_child.class.as_str()).or_default().push(new_idx);
+            class_groups_new
+                .entry(new_child.class.as_str())
+                .or_default()
+                .push(new_idx);
         }
     }
 
@@ -286,7 +312,8 @@ pub fn match_children(
         }
 
         // Pass 3: Positional fallback
-        let mut remaining_old: Vec<usize> = old_candidates.iter()
+        let mut remaining_old: Vec<usize> = old_candidates
+            .iter()
             .copied()
             .filter(|&oi| !old_matched[oi])
             .collect();
@@ -303,7 +330,10 @@ pub fn match_children(
     }
 
     if class_fallback_count > 0 {
-        let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+        let parent_name = old_dom
+            .get_by_ref(old_parent)
+            .map(|i| i.name.as_str())
+            .unwrap_or("?");
         debug!(
             parent = parent_name,
             class_fallback = class_fallback_count,
@@ -328,7 +358,10 @@ pub fn match_children(
 
     // Log matching stats for non-trivial levels
     if old_count + new_count > 10 {
-        let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+        let parent_name = old_dom
+            .get_by_ref(old_parent)
+            .map(|i| i.name.as_str())
+            .unwrap_or("?");
         info!(
             parent = parent_name,
             old_children = old_count,
@@ -341,7 +374,10 @@ pub fn match_children(
             "match_children"
         );
     } else if hash_tiebreaks > 0 {
-        let parent_name = old_dom.get_by_ref(old_parent).map(|i| i.name.as_str()).unwrap_or("?");
+        let parent_name = old_dom
+            .get_by_ref(old_parent)
+            .map(|i| i.name.as_str())
+            .unwrap_or("?");
         debug!(
             parent = parent_name,
             old_children = old_count,
@@ -351,7 +387,11 @@ pub fn match_children(
         );
     }
 
-    MatchResult { matched, removed, added }
+    MatchResult {
+        matched,
+        removed,
+        added,
+    }
 }
 
 struct ChildInfo {

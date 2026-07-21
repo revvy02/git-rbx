@@ -1,5 +1,6 @@
 //! Precision regressions: pruning hashes are exact, while leaf comparisons
-//! tolerate only representation-scale floating-point noise.
+//! tolerate representation noise according to each property's useful
+//! authoring precision.
 
 use rbx_diff::{diff_doms, merge_doms, DiffConfig, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
@@ -29,6 +30,10 @@ fn cframe_at(x: f32) -> CFrame {
             Vector3::new(0.0, 0.0, 1.0),
         ),
     )
+}
+
+fn cframe_with_orientation(orientation: Matrix3) -> CFrame {
+    CFrame::new(Vector3::new(-168.445, 7.4760227, 189.35971), orientation)
 }
 
 fn assert_one_property_change(diffs: &[DiffEntry], property: &str) {
@@ -78,10 +83,33 @@ fn cframe_noise_and_visible_motion_are_distinguished() {
     let adjacent = f32::from_bits(value.to_bits() + 1);
     let base = dom_with("CFrame", Variant::CFrame(cframe_at(value)));
     let noisy = dom_with("CFrame", Variant::CFrame(cframe_at(adjacent)));
-    let moved = dom_with("CFrame", Variant::CFrame(cframe_at(value + 0.00001)));
+    let sub_tolerance = dom_with("CFrame", Variant::CFrame(cframe_at(value + 0.00005)));
+    let moved = dom_with("CFrame", Variant::CFrame(cframe_at(value + 0.0002)));
 
     assert!(diff_doms(&base, &noisy).is_empty());
+    assert!(diff_doms(&base, &sub_tolerance).is_empty());
     assert_one_property_change(&diff_doms(&base, &moved), "CFrame");
+}
+
+#[test]
+fn studio_cframe_rotation_normalization_is_ignored() {
+    // A real InteriorDoors pair from fresh-build vs Studio-saved fixtures.
+    // Position is identical; Studio normalized the slightly non-orthonormal
+    // rotation matrix without changing the authored placement.
+    let fresh = cframe_with_orientation(Matrix3::new(
+        Vector3::new(1.000009, -0.0000000093191375, 0.0002928916),
+        Vector3::new(-0.000000011180918, 1.0000004, -0.000000000004998568),
+        Vector3::new(-0.0002936968, -0.00000000000208967, 1.0000066),
+    ));
+    let studio_saved = cframe_with_orientation(Matrix3::new(
+        Vector3::new(1.0, 0.000000011180819, 0.00029369417),
+        Vector3::new(-0.000000011180818, 1.0, 0.000000000004826645),
+        Vector3::new(-0.00029369417, -0.0000000000081103865, 1.0),
+    ));
+
+    let old = dom_with("CFrame", Variant::CFrame(fresh));
+    let new = dom_with("CFrame", Variant::CFrame(studio_saved));
+    assert!(diff_doms(&old, &new).is_empty());
 }
 
 #[test]

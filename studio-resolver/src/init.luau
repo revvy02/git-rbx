@@ -98,21 +98,49 @@ type ConflictRecord = {
 	path: string,
 	property: string?,
 	resolved: string?,
+	group: string?,
 	target: Instance,
 	entry: Instance,
 }
 
+type GroupRecord = {
+	name: string,
+	kind: string,
+	path: string,
+	target: Instance?,
+	entry: Instance,
+	deltaOurs: CFrame?,
+	deltaTheirs: CFrame?,
+}
+
 local records: { ConflictRecord } = {}
+local groupRecords: { GroupRecord } = {}
 for _, entry in container:GetChildren() do
-	table.insert(records, {
-		name = entry.Name,
-		kind = entry:GetAttribute("Kind") :: string,
-		path = entry:GetAttribute("Path") :: string,
-		property = entry:GetAttribute("Property") :: string?,
-		resolved = entry:GetAttribute("Resolved") :: string?,
-		target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
-		entry = entry,
-	})
+	local kind = entry:GetAttribute("Kind") :: string?
+	local groupKind = entry:GetAttribute("GroupKind") :: string?
+	if kind then
+		table.insert(records, {
+			name = entry.Name,
+			kind = kind,
+			path = entry:GetAttribute("Path") :: string,
+			property = entry:GetAttribute("Property") :: string?,
+			resolved = entry:GetAttribute("Resolved") :: string?,
+			group = entry:GetAttribute("Group") :: string?,
+			target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
+			entry = entry,
+		})
+	elseif groupKind then
+		local targetValue = entry:FindFirstChild("Target") :: ObjectValue?
+		table.insert(groupRecords, {
+			name = entry.Name,
+			kind = groupKind,
+			path = entry:GetAttribute("Path") :: string,
+			target = if targetValue then targetValue.Value else nil,
+			entry = entry,
+			deltaOurs = entry:GetAttribute("DeltaOurs") :: CFrame?,
+			deltaTheirs = entry:GetAttribute("DeltaTheirs") :: CFrame?,
+		})
+	end
 end
 table.sort(records, function(a, b)
 	return a.name < b.name
@@ -122,6 +150,7 @@ config.mergedFile = mergedFile
 config.rbxDiffBin = args.rbxDiffBin
 
 local conflictEntities: { any } = {}
+local membersByGroup: { [string]: { any } } = {}
 for index, record in records do
 	local entity = world:entity()
 	world:set(entity, jecs.Name, record.name)
@@ -136,10 +165,54 @@ for index, record in records do
 	if record.resolved then
 		world:set(entity, cts.Resolution, record.resolved)
 	end
+	if record.group then
+		world:set(entity, cts.Group, record.group)
+		local members = membersByGroup[record.group] or {}
+		membersByGroup[record.group] = members
+		table.insert(members, entity)
+	end
 	table.insert(conflictEntities, entity)
 end
 world:set(cts.Conflicts, cts.Conflicts, conflictEntities)
 world:set(cts.Container, cts.Container, container)
+
+-- Rigid-group entities: metadata over their member conflicts. The Cards
+-- singleton is the display list — each group appears once, at its first
+-- member's position; grouped members stay out of it.
+local groupEntities: { [string]: any } = {}
+for _, groupRecord in groupRecords do
+	local entity = world:entity()
+	world:set(entity, jecs.Name, groupRecord.name)
+	world:set(entity, cts.Kind, groupRecord.kind)
+	world:set(entity, cts.Path, groupRecord.path)
+	world:set(entity, cts.Entry, groupRecord.entry)
+	world:set(entity, cts.Members, membersByGroup[groupRecord.name] or {})
+	if groupRecord.target then
+		world:set(entity, cts.Target, groupRecord.target)
+	end
+	if groupRecord.deltaOurs then
+		world:set(entity, cts.DeltaOurs, groupRecord.deltaOurs)
+	end
+	if groupRecord.deltaTheirs then
+		world:set(entity, cts.DeltaTheirs, groupRecord.deltaTheirs)
+	end
+	groupEntities[groupRecord.name] = entity
+end
+
+local cards: { any } = {}
+local emitted: { [string]: boolean } = {}
+for index, record in records do
+	local group = record.group
+	if group and groupEntities[group] then
+		if not emitted[group] then
+			emitted[group] = true
+			table.insert(cards, groupEntities[group])
+		end
+	else
+		table.insert(cards, conflictEntities[index])
+	end
+end
+world:set(cts.Cards, cts.Cards, cards)
 
 world:set(cts.ViewTab, cts.ViewTab, "result")
 local firstConflict = conflictEntities[1]

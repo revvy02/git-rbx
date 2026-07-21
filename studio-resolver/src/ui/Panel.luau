@@ -13,7 +13,7 @@ local world = require("../ecs/world")
 local ConflictRow = require("./ConflictRow")
 
 local HEADER_HEIGHT = 24
-local CARD_HEIGHT = 92
+local CARD_HEIGHT = 106
 local CARD_GAP = 4
 local FOOTER_HEIGHT = 36
 
@@ -58,7 +58,7 @@ local function Panel()
 		debug.profilebegin("rbxdiff_panel_cards")
 		VirtualList({
 			id = "cards",
-			data = all,
+			data = conflicts.cards(),
 			dimensions = Dimensions.withSpacing(Dimensions.consistentSize(CARD_HEIGHT), CARD_GAP),
 			direction = "y",
 			Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - FOOTER_HEIGHT),

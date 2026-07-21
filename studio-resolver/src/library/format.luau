@@ -129,9 +129,26 @@ function format.sideSummary(kind: string, property: string?, info: SideInfo?): s
 		local path = info.destinationPath
 		return path and `→ {format.escapeRich(path)}`
 	elseif kind == "DeleteVsEdit" then
-		return if info.clone then "keep (edited)" else "delete"
+		-- The non-deleting side may carry an edited clone, or be a move out
+		-- of the deleted subtree (Destination only, no clone).
+		if info.deleted then
+			return "delete"
+		elseif info.clone then
+			return "keep (edited)"
+		elseif info.destinationPath then
+			return `keep → {format.escapeRich(info.destinationPath)}`
+		end
+		return "keep"
 	end
 	return nil
+end
+
+-- One-glance rigid-group delta: world translation + whether it rotates.
+function format.formatDelta(delta: CFrame): string
+	local p = delta.Position
+	local rx, ry, rz = delta:ToOrientation()
+	local rotated = math.abs(rx) + math.abs(ry) + math.abs(rz) > 1e-3
+	return string.format("Δ(%.1f, %.1f, %.1f)%s", p.X, p.Y, p.Z, if rotated then " + rot" else "")
 end
 
 -- Base-side description for the comparison card (what unpicking keeps).

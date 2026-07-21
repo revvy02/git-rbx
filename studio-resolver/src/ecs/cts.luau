@@ -18,8 +18,9 @@ local jecs = packages.jecs
 -- stamped Ours/Theirs folders.
 export type SideInfo = {
 	folder: Instance?, -- the stamped side folder (a swapped-out clone lives here)
-	clone: Instance?, -- this side's version (nil = this side deletes the target)
-	destination: Instance?, -- MoveTarget: the parent this side moves the target to
+	clone: Instance?, -- this side's edited version (absent for deletes and moves)
+	deleted: boolean?, -- this side removes the subtree (stamped Deleted attribute)
+	destination: Instance?, -- the parent this side moves the target to
 	destinationPath: string?,
 }
 
@@ -56,8 +57,15 @@ local cts = {
 	Rendered = world:component(), -- staged state the 3D preview currently reflects
 	Highlighted = world:component(), -- staged state the 3D highlight currently reflects
 
+	-- Rigid-group entities (one per stamped Group_N): metadata over members.
+	Members = world:component(), -- member conflict entity array
+	Group = world:component(), -- member -> owning group entry name
+	DeltaOurs = world:component(), -- CFrame world delta this side applies
+	DeltaTheirs = world:component(),
+
 	-- Session singletons.
 	Conflicts = world:component(), -- boot-sorted conflict entity array (immutable after boot)
+	Cards = world:component(), -- display list: group entities + ungrouped conflicts
 	Container = world:component(), -- the stamped __RbxDiffMerge container
 	ViewTab = world:component(), -- "base" | "ours" | "theirs" | "result"
 	SelectedConflict = world:component(), -- conflict entity

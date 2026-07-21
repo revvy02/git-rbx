@@ -3,7 +3,7 @@
 
 use rbx_diff::{apply_edit_script, compute_edit_script, diff_doms, DiffConfig, EditOp};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::Variant;
+use rbx_types::{Color3uint8, Variant};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -199,6 +199,32 @@ fn load(path: &str) -> Option<WeakDom> {
     }
     let file = BufReader::new(File::open(path).unwrap());
     Some(rbx_binary::from_reader(file).unwrap())
+}
+
+#[test]
+fn same_name_with_a_different_class_is_a_replacement_not_a_property_edit() {
+    let old = WeakDom::new(folder("root").with_child(
+        InstanceBuilder::new("Model").with_name("Foglights"),
+    ));
+    let new = WeakDom::new(folder("root").with_child(
+        InstanceBuilder::new("MeshPart")
+            .with_name("Foglights")
+            .with_property("Color", Variant::Color3uint8(Color3uint8::new(1, 2, 3))),
+    ));
+
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+    assert!(script.ops.iter().any(|op| matches!(op, EditOp::RemoveSubtree { .. })));
+    assert!(script.ops.iter().any(|op| matches!(op, EditOp::AddSubtree { .. })));
+    assert!(!script
+        .ops
+        .iter()
+        .any(|op| matches!(op, EditOp::SetProperty { name, .. } if name == "Color")));
+
+    let mut merged = old;
+    apply_edit_script(&mut merged, &new, &script);
+    let mut encoded = Vec::new();
+    rbx_binary::to_writer(&mut encoded, &merged, merged.root().children()).unwrap();
+    rbx_binary::from_reader(encoded.as_slice()).unwrap();
 }
 
 fn assert_file_round_trip(old_path: &str, new_path: &str) {

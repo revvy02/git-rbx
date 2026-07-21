@@ -93,6 +93,13 @@ fn merge_scripts(
     // Theirs op indices subsumed or deduped by an ours op
     let mut dropped_theirs: HashSet<usize> = HashSet::new();
 
+    // A subtree deletion is one semantic choice even when the surviving side
+    // changed many descendants. Group those edits by deleted root so the
+    // resolver can present (and apply) the whole branch decision once instead
+    // of emitting one identical DeleteVsEdit row per low-level edit op.
+    let mut ours_edits_vs_theirs_delete: HashMap<Ref, usize> = HashMap::new();
+    let mut theirs_edits_vs_ours_delete: HashMap<Ref, usize> = HashMap::new();
+
     let ours_deep = DeepHashCache::new(ours_dom, &config.ignore_properties);
     let theirs_deep = DeepHashCache::new(theirs_dom, &config.ignore_properties);
 
@@ -115,14 +122,20 @@ fn merge_scripts(
                 break;
             }
             conflicted_ours.insert(i);
-            let their_op = find_remove(&theirs.ops, removed_root, &mut conflicted_theirs);
-            conflicts.push(MergeConflict {
-                kind: ConflictKind::DeleteVsEdit,
-                base_ref: removed_root,
-                path: get_instance_path(base, removed_root),
-                ours: vec![op.clone()],
-                theirs: their_op,
-            });
+            if let Some(&conflict_index) = ours_edits_vs_theirs_delete.get(&removed_root) {
+                conflicts[conflict_index].ours.push(op.clone());
+            } else {
+                let their_op = find_remove(&theirs.ops, removed_root, &mut conflicted_theirs);
+                let conflict_index = conflicts.len();
+                conflicts.push(MergeConflict {
+                    kind: ConflictKind::DeleteVsEdit,
+                    base_ref: removed_root,
+                    path: get_instance_path(base, removed_root),
+                    ours: vec![op.clone()],
+                    theirs: their_op,
+                });
+                ours_edits_vs_theirs_delete.insert(removed_root, conflict_index);
+            }
             break;
         }
     }
@@ -140,14 +153,20 @@ fn merge_scripts(
                 break;
             }
             conflicted_theirs.insert(i);
-            let our_op = find_remove(&ours.ops, removed_root, &mut conflicted_ours);
-            conflicts.push(MergeConflict {
-                kind: ConflictKind::DeleteVsEdit,
-                base_ref: removed_root,
-                path: get_instance_path(base, removed_root),
-                ours: our_op,
-                theirs: vec![op.clone()],
-            });
+            if let Some(&conflict_index) = theirs_edits_vs_ours_delete.get(&removed_root) {
+                conflicts[conflict_index].theirs.push(op.clone());
+            } else {
+                let our_op = find_remove(&ours.ops, removed_root, &mut conflicted_ours);
+                let conflict_index = conflicts.len();
+                conflicts.push(MergeConflict {
+                    kind: ConflictKind::DeleteVsEdit,
+                    base_ref: removed_root,
+                    path: get_instance_path(base, removed_root),
+                    ours: our_op,
+                    theirs: vec![op.clone()],
+                });
+                theirs_edits_vs_ours_delete.insert(removed_root, conflict_index);
+            }
             break;
         }
     }
@@ -163,8 +182,16 @@ fn merge_scripts(
             }
             match (our_op, their_op) {
                 (
-                    EditOp::SetProperty { old_ref: a, name: an, value: av },
-                    EditOp::SetProperty { old_ref: b, name: bn, value: bv },
+                    EditOp::SetProperty {
+                        old_ref: a,
+                        name: an,
+                        value: av,
+                    },
+                    EditOp::SetProperty {
+                        old_ref: b,
+                        name: bn,
+                        value: bv,
+                    },
                 ) if a == b && an == bn => {
                     if values_equal(av, bv, &ours_to_base, &theirs_to_base) {
                         dropped_theirs.insert(j);
@@ -182,8 +209,14 @@ fn merge_scripts(
                     }
                 }
                 (
-                    EditOp::SetName { old_ref: a, name: an },
-                    EditOp::SetName { old_ref: b, name: bn },
+                    EditOp::SetName {
+                        old_ref: a,
+                        name: an,
+                    },
+                    EditOp::SetName {
+                        old_ref: b,
+                        name: bn,
+                    },
                 ) if a == b => {
                     if an == bn {
                         dropped_theirs.insert(j);
@@ -192,7 +225,9 @@ fn merge_scripts(
                         conflicted_ours.insert(i);
                         conflicted_theirs.insert(j);
                         conflicts.push(MergeConflict {
-                            kind: ConflictKind::Property { name: "Name".to_string() },
+                            kind: ConflictKind::Property {
+                                name: "Name".to_string(),
+                            },
                             base_ref: *a,
                             path: get_instance_path(base, *a),
                             ours: vec![our_op.clone()],
@@ -200,16 +235,21 @@ fn merge_scripts(
                         });
                     }
                 }
-                (
-                    EditOp::RemoveSubtree { old_ref: a },
-                    EditOp::RemoveSubtree { old_ref: b },
-                ) if a == b => {
+                (EditOp::RemoveSubtree { old_ref: a }, EditOp::RemoveSubtree { old_ref: b })
+                    if a == b =>
+                {
                     dropped_theirs.insert(j);
                     stats.deduped += 1;
                 }
                 (
-                    EditOp::Move { old_ref: a, new_parent: ap },
-                    EditOp::Move { old_ref: b, new_parent: bp },
+                    EditOp::Move {
+                        old_ref: a,
+                        new_parent: ap,
+                    },
+                    EditOp::Move {
+                        old_ref: b,
+                        new_parent: bp,
+                    },
                 ) if a == b => {
                     if anchors_equal(*ap, *bp, &ours_to_base, &theirs_to_base) {
                         dropped_theirs.insert(j);
@@ -226,14 +266,10 @@ fn merge_scripts(
                         });
                     }
                 }
-                (
-                    EditOp::Move { old_ref: a, .. },
-                    EditOp::RemoveSubtree { old_ref: b },
-                )
-                | (
-                    EditOp::RemoveSubtree { old_ref: b },
-                    EditOp::Move { old_ref: a, .. },
-                ) if a == b => {
+                (EditOp::Move { old_ref: a, .. }, EditOp::RemoveSubtree { old_ref: b })
+                | (EditOp::RemoveSubtree { old_ref: b }, EditOp::Move { old_ref: a, .. })
+                    if a == b =>
+                {
                     conflicted_ours.insert(i);
                     conflicted_theirs.insert(j);
                     conflicts.push(MergeConflict {
@@ -254,18 +290,25 @@ fn merge_scripts(
         if conflicted_ours.contains(&i) {
             continue;
         }
-        let EditOp::AddSubtree { parent: Anchor::Old(our_parent), new_ref: our_new } = our_op else {
+        let EditOp::AddSubtree {
+            parent: Anchor::Old(our_parent),
+            new_ref: our_new,
+        } = our_op
+        else {
             continue;
         };
         for (j, their_op) in theirs.ops.iter().enumerate() {
             if conflicted_theirs.contains(&j) || dropped_theirs.contains(&j) {
                 continue;
             }
-            let EditOp::AddSubtree { parent: Anchor::Old(their_parent), new_ref: their_new } = their_op else {
+            let EditOp::AddSubtree {
+                parent: Anchor::Old(their_parent),
+                new_ref: their_new,
+            } = their_op
+            else {
                 continue;
             };
-            if our_parent == their_parent
-                && ours_deep.get(*our_new) == theirs_deep.get(*their_new)
+            if our_parent == their_parent && ours_deep.get(*our_new) == theirs_deep.get(*their_new)
             {
                 dropped_theirs.insert(j);
                 stats.deduped += 1;
@@ -294,8 +337,20 @@ fn merge_scripts(
     stats.ours_applied = ours_survivors.len();
     stats.theirs_applied = theirs_survivors.len();
 
-    apply_ops(base, ours_dom, &ours_survivors, &ours.matched, &ours.moved_destinations);
-    apply_ops(base, theirs_dom, &theirs_survivors, &theirs.matched, &theirs.moved_destinations);
+    apply_ops(
+        base,
+        ours_dom,
+        &ours_survivors,
+        &ours.matched,
+        &ours.moved_destinations,
+    );
+    apply_ops(
+        base,
+        theirs_dom,
+        &theirs_survivors,
+        &theirs.matched,
+        &theirs.moved_destinations,
+    );
 
     info!(
         ours_applied = stats.ours_applied,
@@ -321,11 +376,17 @@ fn op_base_targets(op: &EditOp) -> Vec<Ref> {
         EditOp::RemoveSubtree { old_ref }
         | EditOp::SetName { old_ref, .. }
         | EditOp::SetProperty { old_ref, .. } => vec![*old_ref],
-        EditOp::Move { old_ref, new_parent } => match new_parent {
+        EditOp::Move {
+            old_ref,
+            new_parent,
+        } => match new_parent {
             Anchor::Old(parent) => vec![*old_ref, *parent],
             Anchor::Added(_) => vec![*old_ref],
         },
-        EditOp::AddSubtree { parent: Anchor::Old(parent), .. } => vec![*parent],
+        EditOp::AddSubtree {
+            parent: Anchor::Old(parent),
+            ..
+        } => vec![*parent],
         EditOp::AddSubtree { .. } => Vec::new(),
     }
 }

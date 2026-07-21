@@ -62,8 +62,13 @@ pub fn detect_moves(
 
         // Pass A: exact deep-hash over roots (pure moves)
         pair_by_exact_hash(
-            &removed, &added, old_deep, new_deep,
-            &can_old, &can_new, &mut on_pair,
+            &removed,
+            &added,
+            old_deep,
+            new_deep,
+            &can_old,
+            &can_new,
+            &mut on_pair,
         );
     }
     let pass_a_count = moves.len();
@@ -79,8 +84,15 @@ pub fn detect_moves(
 
         // Pass B: same (name, class) similarity over roots (move + edit)
         pair_by_similarity(
-            old_dom, new_dom, &removed, &added, old_deep, new_deep,
-            &can_old, &can_new, &mut on_pair,
+            old_dom,
+            new_dom,
+            &removed,
+            &added,
+            old_deep,
+            new_deep,
+            &can_old,
+            &can_new,
+            &mut on_pair,
         );
     }
     let pass_b_count = moves.len() - pass_a_count;
@@ -111,8 +123,13 @@ pub fn detect_moves(
             moves.push((o, n));
         };
         pair_by_exact_hash(
-            &old_pool, &new_pool, old_deep, new_deep,
-            &can_old, &can_new, &mut on_pair,
+            &old_pool,
+            &new_pool,
+            old_deep,
+            new_deep,
+            &can_old,
+            &can_new,
+            &mut on_pair,
         );
     }
     let pass_c_count = moves.len() - pass_a_count - pass_b_count;
@@ -126,8 +143,15 @@ pub fn detect_moves(
             moves.push((o, n));
         };
         pair_by_similarity(
-            old_dom, new_dom, &old_pool, &new_pool, old_deep, new_deep,
-            &can_old, &can_new, &mut on_pair,
+            old_dom,
+            new_dom,
+            &old_pool,
+            &new_pool,
+            old_deep,
+            new_deep,
+            &can_old,
+            &can_new,
+            &mut on_pair,
         );
     }
     let pass_d_count = moves.len() - pass_a_count - pass_b_count - pass_c_count;
@@ -160,7 +184,10 @@ struct Claims {
 impl Claims {
     fn claim(&mut self, dom: &WeakDom, node: Ref) {
         self.nodes.insert(node);
-        let mut current = dom.get_by_ref(node).map(|i| i.parent()).unwrap_or_else(Ref::none);
+        let mut current = dom
+            .get_by_ref(node)
+            .map(|i| i.parent())
+            .unwrap_or_else(Ref::none);
         while let Some(inst) = dom.get_by_ref(current) {
             self.ancestors.insert(current);
             current = inst.parent();
@@ -328,7 +355,6 @@ fn expand_with_descendants(dom: &WeakDom, roots: &[Ref]) -> Vec<Ref> {
     }
     pool
 }
-
 
 /// Similarity score in [0, 1] between a removed and an added instance of the
 /// same name and class. Blends own-property equality with child-content overlap;

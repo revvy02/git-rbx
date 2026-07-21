@@ -10,11 +10,10 @@ local packages = require("../../packages")
 
 local theme = require("../../library/theme")
 
+local conflicts = require("./library/conflicts")
 local types = require("../types")
 
 local jecs = packages.jecs
-
-type SideInfo = types.SideInfo
 
 return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	local conflictList = (world:get(cts.Conflicts, cts.Conflicts) :: { any }?) or {}
@@ -34,19 +33,9 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		end
 
 		-- Adorn whatever the preview is actually rendering: normally the
-		-- target, but a staged edit side of a delete-vs-edit renders its
+		-- target, but a staged keep side of a delete-vs-edit renders its
 		-- swapped-in clone instead.
-		local adornee: Instance = target
-		if world:get(entity, cts.Kind) == "DeleteVsEdit" then
-			local ours = world:get(entity, cts.Ours) :: SideInfo
-			local theirs = world:get(entity, cts.Theirs) :: SideInfo
-			local editSide = if ours.clone then "ours" else "theirs"
-			local info = if editSide == "ours" then ours else theirs
-			if resolution == editSide and info.clone then
-				adornee = info.clone :: Instance
-			end
-		end
-		highlight.Adornee = adornee
+		highlight.Adornee = conflicts.renderedInstance(entity)
 
 		local color = theme.statusColor(resolution)
 		highlight.OutlineColor = color

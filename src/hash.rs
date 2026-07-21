@@ -79,7 +79,10 @@ pub(crate) fn normalize_asset_uri(uri: &str) -> String {
     let lower = s.to_ascii_lowercase();
 
     let digits_at = |start: usize| -> String {
-        s[start..].chars().take_while(|c| c.is_ascii_digit()).collect()
+        s[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect()
     };
 
     if let Some(pos) = lower.find("roblox.com/asset") {
@@ -90,7 +93,10 @@ pub(crate) fn normalize_asset_uri(uri: &str) -> String {
             }
         }
     }
-    if let Some(rest_pos) = lower.strip_prefix("rbxassetid://").map(|_| "rbxassetid://".len()) {
+    if let Some(rest_pos) = lower
+        .strip_prefix("rbxassetid://")
+        .map(|_| "rbxassetid://".len())
+    {
         let digits = digits_at(rest_pos);
         if !digits.is_empty() {
             return format!("rbxassetid://{digits}");
@@ -279,13 +285,19 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
                 hash_variant(dom, hasher, attribute);
             }
         }
-        Variant::Axes(a) => { hasher.update(&[a.bits()]); }
+        Variant::Axes(a) => {
+            hasher.update(&[a.bits()]);
+        }
         Variant::BinaryString(bytes) => {
             let b: &[u8] = bytes.as_ref();
             hasher.update(b);
         }
-        Variant::Bool(b) => { hasher.update(&[*b as u8]); }
-        Variant::BrickColor(color) => { n_hash!(hasher, *color as u16); }
+        Variant::Bool(b) => {
+            hasher.update(&[*b as u8]);
+        }
+        Variant::BrickColor(color) => {
+            n_hash!(hasher, *color as u16);
+        }
         Variant::CFrame(cf) => {
             vector_hash(hasher, cf.position);
             vector_hash(hasher, cf.orientation.x);
@@ -297,7 +309,9 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
             f32_hash(hasher, color.g);
             f32_hash(hasher, color.b);
         }
-        Variant::Color3uint8(color) => { hasher.update(&[color.r, color.g, color.b]); }
+        Variant::Color3uint8(color) => {
+            hasher.update(&[color.r, color.g, color.b]);
+        }
         Variant::ColorSequence(seq) => {
             let mut keypoints: Vec<_> = seq.keypoints.iter().collect();
             keypoints.sort_unstable_by(|a, b| a.time.total_cmp(&b.time));
@@ -311,29 +325,47 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
         Variant::Content(content) => {
             use rbx_types::ContentType;
             match content.value() {
-                ContentType::None => { hasher.update(&[0x00]); }
+                ContentType::None => {
+                    hasher.update(&[0x00]);
+                }
                 ContentType::Uri(uri) => {
                     hasher.update(&[0x01]);
                     hasher.update(normalize_asset_uri(uri).as_bytes());
                 }
                 // Object refs point at DOM instances; skip like Variant::Ref
-                ContentType::Object(_) => { hasher.update(&[0x02]); }
-                _ => { hasher.update(&[0x03]); }
+                ContentType::Object(_) => {
+                    hasher.update(&[0x02]);
+                }
+                _ => {
+                    hasher.update(&[0x03]);
+                }
             }
         }
         Variant::ContentId(id) => {
             hasher.update(normalize_asset_uri(id.as_str()).as_bytes());
         }
-        Variant::Enum(e) => { n_hash!(hasher, e.to_u32()); }
-        Variant::Faces(f) => { hasher.update(&[f.bits()]); }
-        Variant::Float32(n) => { f32_hash(hasher, *n); }
-        Variant::Float64(n) => { f64_hash(hasher, *n); }
+        Variant::Enum(e) => {
+            n_hash!(hasher, e.to_u32());
+        }
+        Variant::Faces(f) => {
+            hasher.update(&[f.bits()]);
+        }
+        Variant::Float32(n) => {
+            f32_hash(hasher, *n);
+        }
+        Variant::Float64(n) => {
+            f64_hash(hasher, *n);
+        }
         Variant::Font(f) => {
             n_hash!(hasher, f.weight as u16, f.style as u8);
             hasher.update(f.family.as_bytes());
         }
-        Variant::Int32(n) => { n_hash!(hasher, n); }
-        Variant::Int64(n) => { n_hash!(hasher, n); }
+        Variant::Int32(n) => {
+            n_hash!(hasher, n);
+        }
+        Variant::Int64(n) => {
+            n_hash!(hasher, n);
+        }
         Variant::NumberRange(nr) => {
             f32_hash(hasher, nr.max);
             f32_hash(hasher, nr.min);
@@ -358,19 +390,19 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
                 hasher.update(&[0x00]);
             }
         }
-        Variant::PhysicalProperties(properties) => {
-            match properties {
-                PhysicalProperties::Default => { hasher.update(&[0x00]); }
-                PhysicalProperties::Custom(custom) => {
-                    hasher.update(&[0x01]);
-                    f32_hash(hasher, custom.density());
-                    f32_hash(hasher, custom.friction());
-                    f32_hash(hasher, custom.elasticity());
-                    f32_hash(hasher, custom.friction_weight());
-                    f32_hash(hasher, custom.elasticity_weight());
-                }
+        Variant::PhysicalProperties(properties) => match properties {
+            PhysicalProperties::Default => {
+                hasher.update(&[0x00]);
             }
-        }
+            PhysicalProperties::Custom(custom) => {
+                hasher.update(&[0x01]);
+                f32_hash(hasher, custom.density());
+                f32_hash(hasher, custom.friction());
+                f32_hash(hasher, custom.elasticity());
+                f32_hash(hasher, custom.friction_weight());
+                f32_hash(hasher, custom.elasticity_weight());
+            }
+        },
         Variant::Ray(ray) => {
             vector_hash(hasher, ray.origin);
             vector_hash(hasher, ray.direction);
@@ -408,13 +440,23 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
         Variant::Region3int16(region) => {
             n_hash!(
                 hasher,
-                region.max.x, region.max.y, region.max.z,
-                region.min.x, region.min.y, region.min.z
+                region.max.x,
+                region.max.y,
+                region.max.z,
+                region.min.x,
+                region.min.y,
+                region.min.z
             );
         }
-        Variant::SecurityCapabilities(caps) => { n_hash!(hasher, caps.bits()); }
-        Variant::SharedString(sstr) => { hasher.update(sstr.hash().as_bytes()); }
-        Variant::String(s) => { hasher.update(s.as_bytes()); }
+        Variant::SecurityCapabilities(caps) => {
+            n_hash!(hasher, caps.bits());
+        }
+        Variant::SharedString(sstr) => {
+            hasher.update(sstr.hash().as_bytes());
+        }
+        Variant::String(s) => {
+            hasher.update(s.as_bytes());
+        }
         Variant::Tags(tags) => {
             let mut sorted: Vec<&str> = tags.iter().collect();
             sorted.sort_unstable();
@@ -436,11 +478,17 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
             f32_hash(hasher, v2.x);
             f32_hash(hasher, v2.y);
         }
-        Variant::Vector2int16(v2) => { n_hash!(hasher, v2.x, v2.y); }
-        Variant::Vector3(v3) => { vector_hash(hasher, *v3); }
-        Variant::Vector3int16(v3) => { n_hash!(hasher, v3.x, v3.y, v3.z); }
+        Variant::Vector2int16(v2) => {
+            n_hash!(hasher, v2.x, v2.y);
+        }
+        Variant::Vector3(v3) => {
+            vector_hash(hasher, *v3);
+        }
+        Variant::Vector3int16(v3) => {
+            n_hash!(hasher, v3.x, v3.y, v3.z);
+        }
         Variant::UniqueId(_) => {} // Skip - non-deterministic
-        _ => {} // Skip unknown variants
+        _ => {}                    // Skip unknown variants
     }
 }
 
@@ -448,10 +496,11 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
 /// Caches per class — builds the set once by walking the class hierarchy.
 /// Properties NOT in this set should be skipped (non-reflected, non-scriptable, non-serializable).
 pub fn get_comparable_properties(class_name: &str) -> &'static HashSet<String> {
-    use std::sync::OnceLock;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
 
-    static CLASS_PROPS: OnceLock<Mutex<HashMap<String, &'static HashSet<String>>>> = OnceLock::new();
+    static CLASS_PROPS: OnceLock<Mutex<HashMap<String, &'static HashSet<String>>>> =
+        OnceLock::new();
 
     let map_mutex = CLASS_PROPS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = map_mutex.lock().unwrap();
@@ -476,7 +525,16 @@ pub fn get_comparable_properties(class_name: &str) -> &'static HashSet<String> {
 /// None-scriptability props (PhysicsData, UnscaledVolume, UniqueId, ...) stay
 /// excluded — extend this list for new cases rather than widening the filter.
 const CONTENT_PROPERTY_EXCEPTIONS: &[(&str, &[&str])] = &[
-    ("PartOperation", &["MeshData", "MeshData2", "ChildData", "ChildData2", "AssetId"]),
+    (
+        "PartOperation",
+        &[
+            "MeshData",
+            "MeshData2",
+            "ChildData",
+            "ChildData2",
+            "AssetId",
+        ],
+    ),
     ("Terrain", &["SmoothGrid", "Decoration"]),
     ("Workspace", &["CollisionGroupData"]),
 ];
@@ -504,7 +562,10 @@ fn build_comparable_properties(class_name: &str) -> HashSet<String> {
         for (prop_name, prop_data) in &class_data.properties {
             // Skip non-scriptable and read-only properties: users can't set them
             // and a merge can't apply them (e.g. UnionOperation.TriangleCount)
-            if matches!(prop_data.scriptability, Scriptability::None | Scriptability::Read) {
+            if matches!(
+                prop_data.scriptability,
+                Scriptability::None | Scriptability::Read
+            ) {
                 continue;
             }
             let dominated = match &prop_data.kind {

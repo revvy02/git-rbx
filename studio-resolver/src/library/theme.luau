@@ -41,10 +41,7 @@ theme.ours = theme.propName -- #9cdcfe
 theme.theirs = Color3.fromRGB(197, 134, 192) -- #c586c0 (VS Code magenta)
 theme.custom = theme.added
 
--- RichText hexes for the side colors
-theme.oursHex = "#9CDCFE"
-theme.theirsHex = "#C586C0"
-theme.propNameHex = "#9CDCFE"
+-- RichText hex for dim metadata.
 theme.textDimHex = "#606060"
 
 function theme.toHex(color: Color3): string

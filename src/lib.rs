@@ -6,17 +6,21 @@ mod edit_script;
 mod hash;
 mod match_instances;
 mod merge;
+mod model_normalize;
 mod move_detect;
 pub mod output;
+mod rigid_groups;
 
+pub use conflict_file::{
+    finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_conflicts,
+    stamp_rigid_groups, ConflictEntry, CONFLICT_TAG, CONTAINER_NAME, ENTRY_TAG,
+};
 pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use edit_script::{apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript};
-pub use conflict_file::{
-    finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_conflicts,
-    ConflictEntry, CONFLICT_TAG, CONTAINER_NAME, ENTRY_TAG,
-};
 pub use merge::{merge_doms, ConflictKind, MergeConflict, MergeResult, MergeStats};
+pub use model_normalize::{normalize_model_dom_to_base, ModelNormalization};
+pub use rigid_groups::{detect_rigid_groups, RigidGroup};
 
 use rbx_dom_weak::WeakDom;
 

@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
+use crate::rigid_groups::RigidGroup;
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
 pub const CONFLICT_TAG: &str = "RbxDiffConflict";
@@ -51,8 +52,11 @@ pub fn stamp_conflicts(
 
     let ours_to_base: HashMap<Ref, Ref> =
         result.ours_matched.iter().map(|(b, o)| (*o, *b)).collect();
-    let theirs_to_base: HashMap<Ref, Ref> =
-        result.theirs_matched.iter().map(|(b, t)| (*t, *b)).collect();
+    let theirs_to_base: HashMap<Ref, Ref> = result
+        .theirs_matched
+        .iter()
+        .map(|(b, t)| (*t, *b))
+        .collect();
 
     let container_parent = find_container_parent(base);
     let container = base.insert(
@@ -64,14 +68,20 @@ pub fn stamp_conflicts(
                 Variant::Attributes(
                     Attributes::new()
                         .with("Version", Variant::Float64(1.0))
-                        .with("ConflictCount", Variant::Float64(result.conflicts.len() as f64)),
+                        .with(
+                            "ConflictCount",
+                            Variant::Float64(result.conflicts.len() as f64),
+                        ),
                 ),
             ),
     );
 
     for (index, conflict) in result.conflicts.iter().enumerate() {
         let mut attrs = Attributes::new()
-            .with("Kind", Variant::String(kind_str(&conflict.kind).to_string()))
+            .with(
+                "Kind",
+                Variant::String(kind_str(&conflict.kind).to_string()),
+            )
             .with("Path", Variant::String(conflict.path.clone()));
         if let ConflictKind::Property { name } = &conflict.kind {
             attrs = attrs.with("Property", Variant::String(name.clone()));
@@ -96,12 +106,24 @@ pub fn stamp_conflicts(
         );
 
         stamp_side(
-            base, entry, "Ours", &conflict.ours, conflict.base_ref,
-            ours_dom, &result.ours_matched, &ours_to_base,
+            base,
+            entry,
+            "Ours",
+            &conflict.ours,
+            conflict.base_ref,
+            ours_dom,
+            &result.ours_matched,
+            &ours_to_base,
         );
         stamp_side(
-            base, entry, "Theirs", &conflict.theirs, conflict.base_ref,
-            theirs_dom, &result.theirs_matched, &theirs_to_base,
+            base,
+            entry,
+            "Theirs",
+            &conflict.theirs,
+            conflict.base_ref,
+            theirs_dom,
+            &result.theirs_matched,
+            &theirs_to_base,
         );
 
         tag_instance(base, conflict.base_ref, CONFLICT_TAG);
@@ -151,7 +173,11 @@ fn stamp_side(
     );
 
     // Move destination for finalize, when it maps to a live base instance
-    if let Some(EditOp::Move { new_parent: Anchor::Old(parent), .. }) = side_ops.first() {
+    if let Some(EditOp::Move {
+        new_parent: Anchor::Old(parent),
+        ..
+    }) = side_ops.first()
+    {
         let parent = *parent;
         base.insert(
             side_folder,
@@ -274,6 +300,8 @@ pub struct ConflictEntry {
     pub path: String,
     pub property: Option<String>,
     pub resolved: Option<String>,
+    /// Rigid-group entry name this conflict belongs to, if grouped.
+    pub group: Option<String>,
 }
 
 pub fn find_container(dom: &WeakDom) -> Option<Ref> {
@@ -303,9 +331,58 @@ pub fn list_entries(dom: &WeakDom, container: Ref) -> Vec<ConflictEntry> {
                 path: get_str("Path")?,
                 property: get_str("Property"),
                 resolved: get_str("Resolved").filter(|s| !s.is_empty()),
+                group: get_str("Group"),
             })
         })
         .collect()
+}
+
+/// Stamp rigid-group metadata: a Group_N folder per group (GroupKind — no
+/// Kind attribute, so list_entries/finalize never see it as a conflict) and
+/// a Group attribute on each member entry. Groups are presentation +
+/// fan-out metadata only; members remain the ground truth.
+pub fn stamp_rigid_groups(base: &mut WeakDom, groups: &[RigidGroup]) {
+    let Some(container) = find_container(base) else {
+        return;
+    };
+    for (index, group) in groups.iter().enumerate() {
+        let group_name = format!("Group_{}", index + 1);
+        let attrs = Attributes::new()
+            .with("GroupKind", Variant::String("RigidMove".to_string()))
+            .with("Path", Variant::String(group.path.clone()))
+            .with("MemberCount", Variant::Float64(group.members.len() as f64))
+            .with("DeltaOurs", Variant::CFrame(group.delta_ours))
+            .with("DeltaTheirs", Variant::CFrame(group.delta_theirs));
+        let entry = base.insert(
+            container,
+            InstanceBuilder::new("Folder")
+                .with_name(group_name.clone())
+                .with_property("Attributes", Variant::Attributes(attrs)),
+        );
+        base.insert(
+            entry,
+            InstanceBuilder::new("ObjectValue")
+                .with_name("Target")
+                .with_property("Value", Variant::Ref(group.lca)),
+        );
+
+        for &member_index in &group.members {
+            let member_name = format!("Conflict_{}", member_index + 1);
+            let Some(member_ref) = child_by_name(base, container, &member_name) else {
+                continue;
+            };
+            let Some(inst) = base.get_by_ref_mut(member_ref) else {
+                continue;
+            };
+            let mut member_attrs = match inst.properties.get(&"Attributes".into()) {
+                Some(Variant::Attributes(a)) => a.clone(),
+                _ => continue,
+            };
+            member_attrs.insert("Group".to_string(), Variant::String(group_name.clone()));
+            inst.properties
+                .insert("Attributes".into(), Variant::Attributes(member_attrs));
+        }
+    }
 }
 
 /// Mark an entry resolved toward "ours" or "theirs".
@@ -321,7 +398,8 @@ pub fn mark_entry(dom: &mut WeakDom, entry_ref: Ref, side: &str) -> Result<()> {
         _ => bail!("conflict entry has no attributes"),
     };
     attrs.insert("Resolved".to_string(), Variant::String(side.to_string()));
-    inst.properties.insert("Attributes".into(), Variant::Attributes(attrs));
+    inst.properties
+        .insert("Attributes".into(), Variant::Attributes(attrs));
     Ok(())
 }
 
@@ -330,7 +408,11 @@ pub fn mark_entry(dom: &mut WeakDom, entry_ref: Ref, side: &str) -> Result<()> {
 /// as the CustomValue attribute — the file stays self-contained — after
 /// being coerced to the conflicted property's real type, using the entry's
 /// Ours/Theirs clones as the type template.
-pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::Value) -> Result<()> {
+pub fn mark_entry_custom(
+    dom: &mut WeakDom,
+    entry_ref: Ref,
+    value: &serde_json::Value,
+) -> Result<()> {
     let entries: Vec<ConflictEntry> = {
         let Some(inst) = dom.get_by_ref(entry_ref) else {
             bail!("conflict entry no longer exists");
@@ -349,10 +431,9 @@ pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::
             entry.kind
         );
     }
-    let prop = entry
-        .property
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("{}: property conflict without Property attr", entry.path))?;
+    let prop = entry.property.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("{}: property conflict without Property attr", entry.path)
+    })?;
 
     // Type template: the same property on the Ours (or Theirs) clone
     let template = ["Ours", "Theirs"]
@@ -369,12 +450,18 @@ pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::
                 inst.properties.get(&prop.into()).cloned()
             }
         })
-        .ok_or_else(|| anyhow::anyhow!("{}: no clone to derive the property type from", entry.path))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("{}: no clone to derive the property type from", entry.path)
+        })?;
 
     let coerced = coerce_json_to_variant(value, &template)
         .map_err(|e| anyhow::anyhow!("{}.{}: {}", entry.path, prop, e))?;
     if !attribute_storable(&coerced) {
-        bail!("{}.{}: this property type does not support custom resolution", entry.path, prop);
+        bail!(
+            "{}.{}: this property type does not support custom resolution",
+            entry.path,
+            prop
+        );
     }
 
     let Some(inst) = dom.get_by_ref_mut(entry_ref) else {
@@ -384,9 +471,13 @@ pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::
         Some(Variant::Attributes(a)) => a.clone(),
         _ => bail!("conflict entry has no attributes"),
     };
-    attrs.insert("Resolved".to_string(), Variant::String("custom".to_string()));
+    attrs.insert(
+        "Resolved".to_string(),
+        Variant::String("custom".to_string()),
+    );
     attrs.insert("CustomValue".to_string(), coerced);
-    inst.properties.insert("Attributes".into(), Variant::Attributes(attrs));
+    inst.properties
+        .insert("Attributes".into(), Variant::Attributes(attrs));
     Ok(())
 }
 
@@ -395,7 +486,8 @@ pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::
 fn coerce_json_to_variant(value: &serde_json::Value, template: &Variant) -> Result<Variant> {
     use serde_json::Value as J;
     let num = |v: &J| -> Result<f64> {
-        v.as_f64().ok_or_else(|| anyhow::anyhow!("expected a number, got {v}"))
+        v.as_f64()
+            .ok_or_else(|| anyhow::anyhow!("expected a number, got {v}"))
     };
     let arr = |v: &J, n: usize| -> Result<Vec<f64>> {
         let items = v
@@ -425,17 +517,29 @@ fn coerce_json_to_variant(value: &serde_json::Value, template: &Variant) -> Resu
         Variant::Int64(_) => Variant::Int64(num(value)? as i64),
         Variant::Color3(_) => {
             let c = arr(value, 3)?;
-            Variant::Color3(rbx_types::Color3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+            Variant::Color3(rbx_types::Color3::new(
+                c[0] as f32,
+                c[1] as f32,
+                c[2] as f32,
+            ))
         }
         // Part.Color serializes as Color3uint8; attributes can only hold
         // Color3, so store that and let finalize's re-coercion narrow it
         Variant::Color3uint8(_) => {
             let c = arr(value, 3)?;
-            Variant::Color3(rbx_types::Color3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+            Variant::Color3(rbx_types::Color3::new(
+                c[0] as f32,
+                c[1] as f32,
+                c[2] as f32,
+            ))
         }
         Variant::Vector3(_) => {
             let v = arr(value, 3)?;
-            Variant::Vector3(rbx_types::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32))
+            Variant::Vector3(rbx_types::Vector3::new(
+                v[0] as f32,
+                v[1] as f32,
+                v[2] as f32,
+            ))
         }
         Variant::Vector2(_) => {
             let v = arr(value, 2)?;
@@ -502,7 +606,11 @@ pub fn finalize(dom: &mut WeakDom) -> Result<usize> {
     let unresolved: Vec<&ConflictEntry> = entries.iter().filter(|e| e.resolved.is_none()).collect();
     if !unresolved.is_empty() {
         let paths: Vec<&str> = unresolved.iter().map(|e| e.path.as_str()).collect();
-        bail!("{} unresolved conflict(s): {}", unresolved.len(), paths.join(", "));
+        bail!(
+            "{} unresolved conflict(s): {}",
+            unresolved.len(),
+            paths.join(", ")
+        );
     }
 
     let count = entries.len();
@@ -527,33 +635,32 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
 
     match entry.kind.as_str() {
         "Property" if side == "custom" => {
-            let prop = entry
-                .property
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("{}: property conflict without Property attr", entry.path))?;
+            let prop = entry.property.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("{}: property conflict without Property attr", entry.path)
+            })?;
             let custom = dom
                 .get_by_ref(entry.entry_ref)
                 .and_then(|inst| match inst.properties.get(&"Attributes".into()) {
                     Some(Variant::Attributes(a)) => a.get("CustomValue").cloned(),
                     _ => None,
                 })
-                .ok_or_else(|| anyhow::anyhow!("{}: resolved custom but no CustomValue stored", entry.path))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{}: resolved custom but no CustomValue stored", entry.path)
+                })?;
             // Attributes round-trip strings as BinaryString and integers as
             // f64; re-coerce against the clone-derived template on the way out
-            let template = ["Ours", "Theirs"]
-                .iter()
-                .find_map(|s| {
-                    let folder = child_by_name(dom, entry.entry_ref, s)?;
-                    let clone_ref = first_non_value_child(dom, folder)?;
-                    let inst = dom.get_by_ref(clone_ref)?;
-                    if prop == "Name" {
-                        Some(Variant::String(inst.name.clone()))
-                    } else if is_sub_property(prop) {
-                        get_sub_property(inst, prop)
-                    } else {
-                        inst.properties.get(&prop.into()).cloned()
-                    }
-                });
+            let template = ["Ours", "Theirs"].iter().find_map(|s| {
+                let folder = child_by_name(dom, entry.entry_ref, s)?;
+                let clone_ref = first_non_value_child(dom, folder)?;
+                let inst = dom.get_by_ref(clone_ref)?;
+                if prop == "Name" {
+                    Some(Variant::String(inst.name.clone()))
+                } else if is_sub_property(prop) {
+                    get_sub_property(inst, prop)
+                } else {
+                    inst.properties.get(&prop.into()).cloned()
+                }
+            });
             let value = match (&custom, &template) {
                 (Variant::BinaryString(b), Some(Variant::String(_))) => Variant::String(
                     String::from_utf8(b.clone().into_vec())
@@ -575,7 +682,11 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             if prop == "Name" {
                 let name = match value {
                     Variant::String(s) => s,
-                    other => bail!("{}: custom Name must be a string, got {:?}", entry.path, other.ty()),
+                    other => bail!(
+                        "{}: custom Name must be a string, got {:?}",
+                        entry.path,
+                        other.ty()
+                    ),
                 };
                 if let Some(inst) = dom.get_by_ref_mut(target) {
                     inst.name = name;
@@ -587,12 +698,12 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             }
         }
         "Property" => {
-            let prop = entry
-                .property
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("{}: property conflict without Property attr", entry.path))?;
-            let clone_ref = first_non_value_child(dom, side_folder)
-                .ok_or_else(|| anyhow::anyhow!("{}: missing {} clone", entry.path, side_folder_name))?;
+            let prop = entry.property.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("{}: property conflict without Property attr", entry.path)
+            })?;
+            let clone_ref = first_non_value_child(dom, side_folder).ok_or_else(|| {
+                anyhow::anyhow!("{}: missing {} clone", entry.path, side_folder_name)
+            })?;
 
             if prop == "Name" {
                 let name = dom.get_by_ref(clone_ref).unwrap().name.clone();

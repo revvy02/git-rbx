@@ -65,35 +65,83 @@ pub struct PropertyChange {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum PropertyValue {
     Nil,
-    Bool { value: bool },
-    Int32 { value: i32 },
-    Int64 { value: i64 },
-    Float32 { value: f32 },
-    Float64 { value: f64 },
-    String { value: String },
-    BinaryString { len: usize },
-    Ref { value: String },
-    Vector2 { x: f32, y: f32 },
-    Vector3 { x: f32, y: f32, z: f32 },
+    Bool {
+        value: bool,
+    },
+    Int32 {
+        value: i32,
+    },
+    Int64 {
+        value: i64,
+    },
+    Float32 {
+        value: f32,
+    },
+    Float64 {
+        value: f64,
+    },
+    String {
+        value: String,
+    },
+    BinaryString {
+        len: usize,
+    },
+    Ref {
+        value: String,
+    },
+    Vector2 {
+        x: f32,
+        y: f32,
+    },
+    Vector3 {
+        x: f32,
+        y: f32,
+        z: f32,
+    },
     CFrame {
         position: [f32; 3],
         orientation: [[f32; 3]; 3],
     },
-    Color3 { r: f32, g: f32, b: f32 },
-    BrickColor { value: u16 },
-    Enum { value: u32 },
-    UDim { scale: f32, offset: i32 },
+    Color3 {
+        r: f32,
+        g: f32,
+        b: f32,
+    },
+    BrickColor {
+        value: u16,
+    },
+    Enum {
+        value: u32,
+    },
+    UDim {
+        scale: f32,
+        offset: i32,
+    },
     UDim2 {
         x_scale: f32,
         x_offset: i32,
         y_scale: f32,
         y_offset: i32,
     },
-    NumberRange { min: f32, max: f32 },
-    NumberSequence { keypoints: Vec<NumberKeypoint> },
-    ColorSequence { keypoints: Vec<ColorKeypoint> },
-    Rect { min_x: f32, min_y: f32, max_x: f32, max_y: f32 },
-    Other { type_name: String },
+    NumberRange {
+        min: f32,
+        max: f32,
+    },
+    NumberSequence {
+        keypoints: Vec<NumberKeypoint>,
+    },
+    ColorSequence {
+        keypoints: Vec<ColorKeypoint>,
+    },
+    Rect {
+        min_x: f32,
+        min_y: f32,
+        max_x: f32,
+        max_y: f32,
+    },
+    Other {
+        type_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,7 +172,9 @@ impl Default for DiffConfig {
         ignore.insert("UniqueId".to_string());
         ignore.insert("HistoryId".to_string());
         ignore.insert("SourceAssetId".to_string());
-        Self { ignore_properties: ignore }
+        Self {
+            ignore_properties: ignore,
+        }
     }
 }
 
@@ -148,10 +198,14 @@ pub fn compute_diff(
     let mut removed_roots = Vec::new();
     let mut added_roots = Vec::new();
     build_ref_mapping(
-        old_dom, new_dom,
-        old_dom.root_ref(), new_dom.root_ref(),
-        old_hashes, new_hashes,
-        &old_deep, &new_deep,
+        old_dom,
+        new_dom,
+        old_dom.root_ref(),
+        new_dom.root_ref(),
+        old_hashes,
+        new_hashes,
+        &old_deep,
+        &new_deep,
         &mut ref_mapping,
         &mut removed_roots,
         &mut added_roots,
@@ -162,9 +216,12 @@ pub fn compute_diff(
     // Must happen before the diff pass so Ref properties pointing at moved
     // instances compare through the mapping instead of reporting false changes.
     let moves = detect_moves(
-        old_dom, new_dom,
-        removed_roots, added_roots,
-        &old_deep, &new_deep,
+        old_dom,
+        new_dom,
+        removed_roots,
+        added_roots,
+        &old_deep,
+        &new_deep,
     );
     let moved_old: HashSet<Ref> = moves.iter().map(|(o, _)| *o).collect();
     let moved_new: HashSet<Ref> = moves.iter().map(|(_, n)| *n).collect();
@@ -173,10 +230,17 @@ pub fn compute_diff(
         // Map matched descendants of edited moves too (pure moves prune via deep hash)
         if old_deep.get(*old_root) != new_deep.get(*new_root) {
             build_ref_mapping(
-                old_dom, new_dom, *old_root, *new_root,
-                old_hashes, new_hashes, &old_deep, &new_deep,
+                old_dom,
+                new_dom,
+                *old_root,
+                *new_root,
+                old_hashes,
+                new_hashes,
+                &old_deep,
+                &new_deep,
                 &mut ref_mapping,
-                &mut Vec::new(), &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
             );
         }
     }
@@ -202,8 +266,14 @@ pub fn compute_diff(
     // Phase 3: Emit moves, then recurse into moved subtrees that also changed
     for (old_root, new_root) in &moves {
         let property_changes = diff_properties(
-            old_dom, new_dom, *old_root, *new_root,
-            config, &ref_mapping, &old_deep, &new_deep,
+            old_dom,
+            new_dom,
+            *old_root,
+            *new_root,
+            config,
+            &ref_mapping,
+            &old_deep,
+            &new_deep,
         );
         if let Some(inst) = new_dom.get_by_ref(*new_root) {
             diffs.push(DiffEntry::Moved {
@@ -217,9 +287,18 @@ pub fn compute_diff(
         }
         if old_deep.get(*old_root) != new_deep.get(*new_root) {
             diff_pass(
-                old_dom, new_dom, *old_root, *new_root,
-                old_hashes, new_hashes, &old_deep, &new_deep,
-                config, &ref_mapping, &moved_old, &moved_new,
+                old_dom,
+                new_dom,
+                *old_root,
+                *new_root,
+                old_hashes,
+                new_hashes,
+                &old_deep,
+                &new_deep,
+                config,
+                &ref_mapping,
+                &moved_old,
+                &moved_new,
                 &mut diffs,
             );
         }
@@ -256,9 +335,17 @@ pub(crate) fn build_ref_mapping(
         // Only recurse into subtrees where deep hashes differ (same pruning as diff_pass)
         if old_deep.get(*old_child) != new_deep.get(*new_child) {
             build_ref_mapping(
-                old_dom, new_dom, *old_child, *new_child,
-                old_hashes, new_hashes, old_deep, new_deep, mapping,
-                removed_roots, added_roots,
+                old_dom,
+                new_dom,
+                *old_child,
+                *new_child,
+                old_hashes,
+                new_hashes,
+                old_deep,
+                new_deep,
+                mapping,
+                removed_roots,
+                added_roots,
             );
         }
     }
@@ -469,8 +556,16 @@ fn expand_container_changes(
                 if in_old != in_new {
                     changes.push(RawPropertyChange {
                         name,
-                        old: if in_old { Some(Variant::String(tag.to_string())) } else { None },
-                        new: if in_new { Some(Variant::String(tag.to_string())) } else { None },
+                        old: if in_old {
+                            Some(Variant::String(tag.to_string()))
+                        } else {
+                            None
+                        },
+                        new: if in_new {
+                            Some(Variant::String(tag.to_string()))
+                        } else {
+                            None
+                        },
                     });
                 }
             }
@@ -526,7 +621,15 @@ pub(crate) fn raw_property_changes(
 
         match old_value {
             Some(old_value) => {
-                if !variants_equal(old_dom, new_dom, old_value, new_value, ref_mapping, old_deep, new_deep) {
+                if !variants_equal(
+                    old_dom,
+                    new_dom,
+                    old_value,
+                    new_value,
+                    ref_mapping,
+                    old_deep,
+                    new_deep,
+                ) {
                     changes.push(RawPropertyChange {
                         name: name.to_string(),
                         old: Some(old_value.clone()),
@@ -606,13 +709,24 @@ fn diff_properties(
     if old_inst.name != new_inst.name {
         changes.push(PropertyChange {
             name: "Name".to_string(),
-            old_value: Some(PropertyValue::String { value: old_inst.name.clone() }),
-            new_value: Some(PropertyValue::String { value: new_inst.name.clone() }),
+            old_value: Some(PropertyValue::String {
+                value: old_inst.name.clone(),
+            }),
+            new_value: Some(PropertyValue::String {
+                value: new_inst.name.clone(),
+            }),
         });
     }
 
     for raw in raw_property_changes(
-        old_dom, new_dom, old_ref, new_ref, config, ref_mapping, old_deep, new_deep,
+        old_dom,
+        new_dom,
+        old_ref,
+        new_ref,
+        config,
+        ref_mapping,
+        old_deep,
+        new_deep,
     ) {
         changes.push(PropertyChange {
             name: raw.name,
@@ -636,7 +750,11 @@ fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
 /// class-based, NOT position-based: rbx_binary gives model files a
 /// DataModel-class root too, and top-level model content (Parts, Models, ...)
 /// must still diff normally.
-pub(crate) fn is_studio_artifact(dom: &WeakDom, parent_ref: Ref, inst: &rbx_dom_weak::Instance) -> bool {
+pub(crate) fn is_studio_artifact(
+    dom: &WeakDom,
+    parent_ref: Ref,
+    inst: &rbx_dom_weak::Instance,
+) -> bool {
     let parent = match dom.get_by_ref(parent_ref) {
         Some(p) => p,
         None => return false,
@@ -677,6 +795,13 @@ fn is_default_value(
 const F32_ABS_TOLERANCE: f32 = 1.0e-7;
 const F64_ABS_TOLERANCE: f64 = 1.0e-12;
 const MAX_FLOAT_ULPS: u32 = 2;
+// Studio re-saves CFrames after normalizing their rotation matrices. The
+// resulting component drift can be several dozen ULPs while representing the
+// same authored placement. Sub-millistud/sub-hundredth-degree placement
+// changes are outside rbx-diff's useful fidelity, so CFrames get a deliberately
+// wider policy without weakening comparison for unrelated float properties.
+const CFRAME_POSITION_ABS_TOLERANCE: f32 = 1.0e-4;
+const CFRAME_ROTATION_ABS_TOLERANCE: f32 = 1.0e-4;
 
 fn ordered_f32_bits(value: f32) -> u32 {
     let bits = value.to_bits();
@@ -696,15 +821,19 @@ fn ordered_f64_bits(value: f64) -> u64 {
     }
 }
 
-fn f32_equal(a: f32, b: f32) -> bool {
+fn f32_equal_with_tolerance(a: f32, b: f32, absolute_tolerance: f32) -> bool {
     if a == b || (a.is_nan() && b.is_nan()) {
         return true;
     }
     if !a.is_finite() || !b.is_finite() {
         return false;
     }
-    (a - b).abs() <= F32_ABS_TOLERANCE
+    (a - b).abs() <= absolute_tolerance
         || ordered_f32_bits(a).abs_diff(ordered_f32_bits(b)) <= MAX_FLOAT_ULPS
+}
+
+fn f32_equal(a: f32, b: f32) -> bool {
+    f32_equal_with_tolerance(a, b, F32_ABS_TOLERANCE)
 }
 
 fn f64_equal(a: f64, b: f64) -> bool {
@@ -726,11 +855,33 @@ fn vector3_equal(a: rbx_types::Vector3, b: rbx_types::Vector3) -> bool {
     f32_equal(a.x, b.x) && f32_equal(a.y, b.y) && f32_equal(a.z, b.z)
 }
 
+fn vector3_equal_with_tolerance(
+    a: rbx_types::Vector3,
+    b: rbx_types::Vector3,
+    absolute_tolerance: f32,
+) -> bool {
+    f32_equal_with_tolerance(a.x, b.x, absolute_tolerance)
+        && f32_equal_with_tolerance(a.y, b.y, absolute_tolerance)
+        && f32_equal_with_tolerance(a.z, b.z, absolute_tolerance)
+}
+
 fn cframe_equal(a: rbx_types::CFrame, b: rbx_types::CFrame) -> bool {
-    vector3_equal(a.position, b.position)
-        && vector3_equal(a.orientation.x, b.orientation.x)
-        && vector3_equal(a.orientation.y, b.orientation.y)
-        && vector3_equal(a.orientation.z, b.orientation.z)
+    vector3_equal_with_tolerance(a.position, b.position, CFRAME_POSITION_ABS_TOLERANCE)
+        && vector3_equal_with_tolerance(
+            a.orientation.x,
+            b.orientation.x,
+            CFRAME_ROTATION_ABS_TOLERANCE,
+        )
+        && vector3_equal_with_tolerance(
+            a.orientation.y,
+            b.orientation.y,
+            CFRAME_ROTATION_ABS_TOLERANCE,
+        )
+        && vector3_equal_with_tolerance(
+            a.orientation.z,
+            b.orientation.z,
+            CFRAME_ROTATION_ABS_TOLERANCE,
+        )
 }
 
 /// Semantic equality for variants without cross-DOM Ref identity. Float-backed
@@ -803,9 +954,7 @@ pub(crate) fn non_ref_variants_equal(a: &Variant, b: &Variant) -> bool {
         (Variant::Region3(x), Variant::Region3(y)) => {
             vector3_equal(x.min, y.min) && vector3_equal(x.max, y.max)
         }
-        (Variant::UDim(x), Variant::UDim(y)) => {
-            f32_equal(x.scale, y.scale) && x.offset == y.offset
-        }
+        (Variant::UDim(x), Variant::UDim(y)) => f32_equal(x.scale, y.scale) && x.offset == y.offset,
         (Variant::UDim2(x), Variant::UDim2(y)) => {
             f32_equal(x.x.scale, y.x.scale)
                 && x.x.offset == y.x.offset
@@ -849,9 +998,15 @@ fn variants_equal(
     new_deep: &DeepHashCache,
 ) -> bool {
     match (a, b) {
-        (Variant::Ref(old_target), Variant::Ref(new_target)) => {
-            refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping, old_deep, new_deep)
-        }
+        (Variant::Ref(old_target), Variant::Ref(new_target)) => refs_equal(
+            old_dom,
+            new_dom,
+            *old_target,
+            *new_target,
+            ref_mapping,
+            old_deep,
+            new_deep,
+        ),
         _ => non_ref_variants_equal(a, b),
     }
 }
@@ -897,9 +1052,15 @@ fn variant_to_property_value(v: &Variant) -> PropertyValue {
         Variant::Float32(n) => PropertyValue::Float32 { value: *n },
         Variant::Float64(n) => PropertyValue::Float64 { value: *n },
         Variant::String(s) => PropertyValue::String { value: s.clone() },
-        Variant::BinaryString(bs) => PropertyValue::BinaryString { len: bs.clone().into_vec().len() },
+        Variant::BinaryString(bs) => PropertyValue::BinaryString {
+            len: bs.clone().into_vec().len(),
+        },
         Variant::Vector2(v) => PropertyValue::Vector2 { x: v.x, y: v.y },
-        Variant::Vector3(v) => PropertyValue::Vector3 { x: v.x, y: v.y, z: v.z },
+        Variant::Vector3(v) => PropertyValue::Vector3 {
+            x: v.x,
+            y: v.y,
+            z: v.z,
+        },
         Variant::CFrame(cf) => PropertyValue::CFrame {
             position: [cf.position.x, cf.position.y, cf.position.z],
             orientation: [
@@ -908,10 +1069,17 @@ fn variant_to_property_value(v: &Variant) -> PropertyValue {
                 [cf.orientation.z.x, cf.orientation.z.y, cf.orientation.z.z],
             ],
         },
-        Variant::Color3(c) => PropertyValue::Color3 { r: c.r, g: c.g, b: c.b },
+        Variant::Color3(c) => PropertyValue::Color3 {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        },
         Variant::BrickColor(bc) => PropertyValue::BrickColor { value: *bc as u16 },
         Variant::Enum(e) => PropertyValue::Enum { value: e.to_u32() },
-        Variant::UDim(u) => PropertyValue::UDim { scale: u.scale, offset: u.offset },
+        Variant::UDim(u) => PropertyValue::UDim {
+            scale: u.scale,
+            offset: u.offset,
+        },
         Variant::UDim2(u) => PropertyValue::UDim2 {
             x_scale: u.x.scale,
             x_offset: u.x.offset,
@@ -922,24 +1090,37 @@ fn variant_to_property_value(v: &Variant) -> PropertyValue {
             if r.is_none() {
                 PropertyValue::Nil
             } else {
-                PropertyValue::Ref { value: format!("{}", r) }
+                PropertyValue::Ref {
+                    value: format!("{}", r),
+                }
             }
         }
-        Variant::NumberRange(nr) => PropertyValue::NumberRange { min: nr.min, max: nr.max },
+        Variant::NumberRange(nr) => PropertyValue::NumberRange {
+            min: nr.min,
+            max: nr.max,
+        },
         Variant::NumberSequence(ns) => PropertyValue::NumberSequence {
-            keypoints: ns.keypoints.iter().map(|kp| NumberKeypoint {
-                time: kp.time,
-                value: kp.value,
-                envelope: kp.envelope,
-            }).collect(),
+            keypoints: ns
+                .keypoints
+                .iter()
+                .map(|kp| NumberKeypoint {
+                    time: kp.time,
+                    value: kp.value,
+                    envelope: kp.envelope,
+                })
+                .collect(),
         },
         Variant::ColorSequence(cs) => PropertyValue::ColorSequence {
-            keypoints: cs.keypoints.iter().map(|kp| ColorKeypoint {
-                time: kp.time,
-                r: kp.color.r,
-                g: kp.color.g,
-                b: kp.color.b,
-            }).collect(),
+            keypoints: cs
+                .keypoints
+                .iter()
+                .map(|kp| ColorKeypoint {
+                    time: kp.time,
+                    r: kp.color.r,
+                    g: kp.color.g,
+                    b: kp.color.b,
+                })
+                .collect(),
         },
         Variant::Rect(r) => PropertyValue::Rect {
             min_x: r.min.x,
@@ -947,6 +1128,8 @@ fn variant_to_property_value(v: &Variant) -> PropertyValue {
             max_x: r.max.x,
             max_y: r.max.y,
         },
-        _ => PropertyValue::Other { type_name: format!("{:?}", v.ty()) },
+        _ => PropertyValue::Other {
+            type_name: format!("{:?}", v.ty()),
+        },
     }
 }

@@ -11,8 +11,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    diff_doms_with_config, finalize, find_container, list_entries, mark_entry, mark_entry_custom,
-    merge_doms, stamp_conflicts, ConflictKind, DiffConfig, CONTAINER_NAME,
+    detect_rigid_groups, diff_doms_with_config, finalize, find_container, list_entries, mark_entry,
+    mark_entry_custom, merge_doms, normalize_model_dom_to_base, stamp_conflicts,
+    stamp_rigid_groups, ConflictKind, DiffConfig, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -42,7 +43,6 @@ enum Command {
         #[arg(long)]
         json: bool,
 
-
         /// Show timing information
         #[arg(long, short = 't')]
         timing: bool,
@@ -63,7 +63,6 @@ enum Command {
         /// Write the merged result here instead of overwriting OURS
         #[arg(short, long)]
         output: Option<String>,
-
     },
     /// Inspect and resolve conflicts stored in a merged file
     Resolve {
@@ -129,17 +128,44 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Diff { old_file, new_file, summary_only, json, timing } => {
-            cmd_diff(&old_file, &new_file, summary_only, json, timing)
-        }
-        Command::Merge { base, ours, theirs, output } => {
-            cmd_merge(&base, &ours, &theirs, output.as_deref())
-        }
-        Command::Resolve { file, list, take, value, path, entry, all, finalize, studio, studio_auto } => {
+        Command::Diff {
+            old_file,
+            new_file,
+            summary_only,
+            json,
+            timing,
+        } => cmd_diff(&old_file, &new_file, summary_only, json, timing),
+        Command::Merge {
+            base,
+            ours,
+            theirs,
+            output,
+        } => cmd_merge(&base, &ours, &theirs, output.as_deref()),
+        Command::Resolve {
+            file,
+            list,
+            take,
+            value,
+            path,
+            entry,
+            all,
+            finalize,
+            studio,
+            studio_auto,
+        } => {
             if studio {
                 cmd_resolve_studio(&file, studio_auto.as_deref())
             } else {
-                cmd_resolve(&file, list, take.as_deref(), value.as_deref(), path.as_deref(), entry.as_deref(), all, finalize)
+                cmd_resolve(
+                    &file,
+                    list,
+                    take.as_deref(),
+                    value.as_deref(),
+                    path.as_deref(),
+                    entry.as_deref(),
+                    all,
+                    finalize,
+                )
             }
         }
         Command::Check { file } => cmd_check(&file),
@@ -165,11 +191,22 @@ fn cmd_diff(
 
     let load_start = Instant::now();
     eprintln!("Loading {}...", new_file);
-    let new_dom = {
+    let mut new_dom = {
         let _span = info_span!("load_new_file", file = %new_file).entered();
         load_file(new_file)?
     };
     let new_load_time = load_start.elapsed();
+
+    if is_model_asset_path(old_file) && is_model_asset_path(new_file) {
+        if let Some(normalization) = normalize_model_dom_to_base(&old_dom, &mut new_dom) {
+            eprintln!(
+                "Normalized model frame from {}/{} matched parts ({})",
+                normalization.supporting_parts,
+                normalization.matched_parts,
+                format_delta(&normalization.side_delta),
+            );
+        }
+    }
 
     let config = DiffConfig::default();
 
@@ -196,7 +233,10 @@ fn cmd_diff(
         eprintln!("Timing:");
         eprintln!("  Load old file: {:?}", old_load_time);
         eprintln!("  Load new file: {:?}", new_load_time);
-        eprintln!("  Diff computation (includes lazy hashing): {:?}", diff_time);
+        eprintln!(
+            "  Diff computation (includes lazy hashing): {:?}",
+            diff_time
+        );
         eprintln!("  Total: {:?}", total_time);
     }
 
@@ -212,9 +252,31 @@ fn cmd_merge(
     eprintln!("Loading base {}...", base_path);
     let mut base = load_file(base_path)?;
     eprintln!("Loading ours {}...", ours_path);
-    let ours = load_file(ours_path)?;
+    let mut ours = load_file(ours_path)?;
     eprintln!("Loading theirs {}...", theirs_path);
-    let theirs = load_file(theirs_path)?;
+    let mut theirs = load_file(theirs_path)?;
+
+    if is_model_asset_path(base_path)
+        && is_model_asset_path(ours_path)
+        && is_model_asset_path(theirs_path)
+    {
+        if let Some(normalization) = normalize_model_dom_to_base(&base, &mut ours) {
+            eprintln!(
+                "Normalized ours model frame from {}/{} matched parts ({})",
+                normalization.supporting_parts,
+                normalization.matched_parts,
+                format_delta(&normalization.side_delta),
+            );
+        }
+        if let Some(normalization) = normalize_model_dom_to_base(&base, &mut theirs) {
+            eprintln!(
+                "Normalized theirs model frame from {}/{} matched parts ({})",
+                normalization.supporting_parts,
+                normalization.matched_parts,
+                format_delta(&normalization.side_delta),
+            );
+        }
+    }
 
     let config = DiffConfig::default();
 
@@ -233,8 +295,11 @@ fn cmd_merge(
     // Conflicted merges carry their conflict state in the file itself:
     // competing versions materialized as instances, targets tagged for
     // discovery. `rbx-diff resolve` (or Studio) consumes it.
+    let mut groups = Vec::new();
     if !result.conflicts.is_empty() {
         stamp_conflicts(&mut base, &ours, &theirs, &result);
+        groups = detect_rigid_groups(&base, &result.conflicts);
+        stamp_rigid_groups(&mut base, &groups);
     }
 
     let out_path = output.unwrap_or(ours_path);
@@ -245,15 +310,39 @@ fn cmd_merge(
         return Ok(());
     }
 
+    let grouped: std::collections::HashSet<usize> = groups
+        .iter()
+        .flat_map(|g| g.members.iter().copied())
+        .collect();
     eprintln!();
     eprintln!("CONFLICTS ({}):", result.conflicts.len());
-    for conflict in &result.conflicts {
+    for (index, group) in groups.iter().enumerate() {
+        eprintln!(
+            "  ! Group_{} {} — rigid move x{} (ours {} vs theirs {})",
+            index + 1,
+            group.path,
+            group.members.len(),
+            format_delta(&group.delta_ours),
+            format_delta(&group.delta_theirs),
+        );
+    }
+    for (index, conflict) in result.conflicts.iter().enumerate() {
+        if grouped.contains(&index) {
+            continue;
+        }
         let kind = match &conflict.kind {
             ConflictKind::Property { name } => format!("property '{}'", name),
             ConflictKind::DeleteVsEdit => "delete vs edit".to_string(),
             ConflictKind::MoveTarget => "conflicting move destinations".to_string(),
         };
         eprintln!("  ! {} — {} (base content kept)", conflict.path, kind);
+    }
+    if !groups.is_empty() {
+        eprintln!(
+            "  ({} spatial conflicts folded into {} rigid groups)",
+            grouped.len(),
+            groups.len()
+        );
     }
 
     eprintln!();
@@ -262,6 +351,30 @@ fn cmd_merge(
 
     // Nonzero exit tells git the merge needs manual resolution
     std::process::exit(1);
+}
+
+/// Compact one-line summary of a rigid delta for merge output.
+fn format_delta(cf: &rbx_types::CFrame) -> String {
+    let o = &cf.orientation;
+    let rotated =
+        (o.x.x - 1.0).abs() > 1e-4 || (o.y.y - 1.0).abs() > 1e-4 || (o.z.z - 1.0).abs() > 1e-4;
+    let p = cf.position;
+    format!(
+        "\u{394}({:.1}, {:.1}, {:.1}){}",
+        p.x,
+        p.y,
+        p.z,
+        if rotated { " + rotation" } else { "" }
+    )
+}
+
+fn is_model_asset_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(extension.to_ascii_lowercase().as_str(), "rbxm" | "rbxmx")
+        })
 }
 
 fn cmd_resolve(
@@ -287,16 +400,24 @@ fn cmd_resolve(
                 .as_deref()
                 .map(|p| format!(" ({p})"))
                 .unwrap_or_default();
-            println!("[{state}] {} {} — {}{}", entry.name, entry.path, entry.kind, detail);
+            let group = entry
+                .group
+                .as_deref()
+                .map(|g| format!(" [{g}]"))
+                .unwrap_or_default();
+            println!(
+                "[{state}] {} {} — {}{}{}",
+                entry.name, entry.path, entry.kind, detail, group
+            );
         }
         return Ok(());
     }
 
     if take == Some("custom") {
-        let entry_name = entry_name
-            .ok_or_else(|| anyhow::anyhow!("--take custom requires --entry <name>"))?;
-        let value = value
-            .ok_or_else(|| anyhow::anyhow!("--take custom requires --value <json>"))?;
+        let entry_name =
+            entry_name.ok_or_else(|| anyhow::anyhow!("--take custom requires --entry <name>"))?;
+        let value =
+            value.ok_or_else(|| anyhow::anyhow!("--take custom requires --value <json>"))?;
         let parsed: serde_json::Value =
             serde_json::from_str(value).with_context(|| format!("parsing --value {value}"))?;
         let entry = list_entries(&dom, container)
@@ -314,7 +435,7 @@ fn cmd_resolve(
         let targets: Vec<_> = entries
             .iter()
             .filter(|e| match (entry_name, path) {
-                (Some(name), _) => e.name == name,
+                (Some(name), _) => e.name == name || e.group.as_deref() == Some(name),
                 (None, Some(p)) => e.path == p,
                 (None, None) => all,
             })
@@ -394,6 +515,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         cmd.arg(&abs_file);
     }
     cmd.arg("--focus")
+        .arg("--no-hud")
         .arg(RESOLVER_ENTRY)
         .arg("--")
         .arg(&abs_file)
@@ -437,9 +559,7 @@ fn cmd_check(file: &str) -> Result<()> {
                 .iter()
                 .filter(|e| e.resolved.is_none())
                 .count();
-            eprintln!(
-                "{file}: contains merge conflict state ({unresolved} unresolved)"
-            );
+            eprintln!("{file}: contains merge conflict state ({unresolved} unresolved)");
             std::process::exit(1);
         }
         None => {

@@ -7,4 +7,8 @@ node = "24"
 "ubi:rojo-rbx/rojo" = "latest"
 stylua = "latest"
 [env]
-_.path = ["./target/release"]
+_.path = ["./bin"]
+
+[tasks.build]
+description = "Build the release binary into bin/"
+run = "cargo build --release && mkdir -p bin && cp target/release/rbx-diff bin/rbx-diff"

@@ -10,8 +10,10 @@
 	and content a side deletes simply isn't there. Content is the stamped
 	Ours/Theirs clones (the target itself for BASE).
 
-	Conflict ancestor chains start expanded in RESULT and side trees start
-	fully expanded; collapses stick either way.
+	Conflict ancestor chains start expanded so each contested root is visible,
+	but subtree contents start collapsed. Search temporarily forces every branch
+	open so hidden descendants remain discoverable, then shows each name/class
+	match with its visual ancestor chain.
 ]]
 
 local packages = require("../packages")
@@ -34,6 +36,7 @@ type Base = cts.Base
 type Row = {
 	inst: Instance,
 	label: string,
+	searchText: string,
 	className: string,
 	depth: number,
 	hasChildren: boolean,
@@ -44,6 +47,8 @@ local expanded: { [Instance]: boolean } = {}
 local expansionGen = 0
 local seeded = false
 local lastRevealed: Instance? = nil
+local searchText = ""
+local searchGen = 0
 
 local function setExpanded(inst: Instance, isExpanded: boolean)
 	expanded[inst] = isExpanded
@@ -100,6 +105,7 @@ local function instanceRow(inst: Instance, depth: number, hasChildren: boolean, 
 	return {
 		inst = inst,
 		label = `{format.escapeRich(inst.Name)}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
+		searchText = string.lower(`{inst.Name} {inst.ClassName}`),
 		className = inst.ClassName,
 		depth = depth,
 		hasChildren = hasChildren,
@@ -111,12 +117,12 @@ end
 -- walk is pure component traversal (Roots singleton + per-node Children
 -- arrays the mirror system maintains). The diff layers will hang their
 -- components off these entities.
-local function resultRows(): { Row }
+local function resultRows(forceExpanded: boolean): { Row }
 	local rows: { Row } = {}
 	local function visit(entity: any, depth: number)
 		local inst = world:get(entity, cts.Ref) :: Instance
 		local children = (world:get(entity, cts.Children) :: { any }?) or {}
-		local isExpanded = expanded[inst] == true
+		local isExpanded = forceExpanded or expanded[inst] == true
 		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
 		if isExpanded then
 			for _, child in children do
@@ -133,7 +139,7 @@ end
 -- BASE / OURS / THEIRS: that side's world — ancestor skeleton with the
 -- side's version of each contested subtree grafted at its position in that
 -- side. Content a side deletes simply is not in its tree.
-local function sideRows(tab: string): { Row }
+local function sideRows(tab: string, forceExpanded: boolean): { Row }
 	type SideNode = { inst: Instance, children: { SideNode }, grafts: { Instance } }
 	local nodes: { [Instance]: SideNode } = {}
 	local roots: { SideNode } = {}
@@ -179,7 +185,7 @@ local function sideRows(tab: string): { Row }
 
 	local function visitContent(inst: Instance, depth: number)
 		local children = visibleChildren(inst)
-		local isExpanded = expanded[inst] ~= false
+		local isExpanded = forceExpanded or expanded[inst] == true
 		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
 		if isExpanded then
 			for _, child in children do
@@ -189,7 +195,7 @@ local function sideRows(tab: string): { Row }
 	end
 
 	local function visitNode(node: SideNode, depth: number)
-		local isExpanded = expanded[node.inst] ~= false
+		local isExpanded = forceExpanded or expanded[node.inst] == true
 		table.insert(rows, instanceRow(node.inst, depth, true, isExpanded))
 		if not isExpanded then
 			return
@@ -273,13 +279,14 @@ end
 local ROW_HEIGHT = 22
 local HEADER_HEIGHT = 24
 local TABS_HEIGHT = 26
+local SEARCH_HEIGHT = 30
 
 local rowsCacheKey: string? = nil
 local rowsCache: { Row } = {}
 
 -- Rows render through VirtualList: only the visible index range builds
--- TreeRows, so a fully-expanded real place stays cheap.
-local function renderRows(rows: { Row })
+-- TreeRows, so even a large search result stays cheap.
+local function renderRows(rows: { Row }, searching: boolean)
 	local onPath = ancestorSet()
 	local selectedInstance = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
 	VirtualList({
@@ -287,7 +294,7 @@ local function renderRows(rows: { Row })
 		data = rows,
 		dimensions = Dimensions.consistentSize(ROW_HEIGHT),
 		direction = "y",
-		Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - TABS_HEIGHT),
+		Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - TABS_HEIGHT - SEARCH_HEIGHT),
 		tags = { "bg-none" },
 	}, function(row: Row, index: number)
 		local inst = row.inst
@@ -301,7 +308,7 @@ local function renderRows(rows: { Row })
 			selected = inst == selectedInstance,
 			onPath = onPath[inst] == true,
 			stripe = index % 2 == 0,
-			onToggle = if row.hasChildren
+			onToggle = if row.hasChildren and not searching
 				then function()
 					setExpanded(inst, not row.isExpanded)
 				end
@@ -310,6 +317,95 @@ local function renderRows(rows: { Row })
 				world:set(cts.SelectedInstance, cts.SelectedInstance, inst)
 			end,
 		})
+	end)
+end
+
+local function normalizedSearch(): string
+	return string.lower((searchText:match("^%s*(.-)%s*$") :: string?) or "")
+end
+
+local function rowMatches(row: Row, query: string): boolean
+	for token in query:gmatch("%S+") do
+		if not row.searchText:find(token, 1, true) then
+			return false
+		end
+	end
+	return true
+end
+
+-- Rows are pre-order, so each match's nearest preceding shallower rows are
+-- precisely its visual ancestors. This also works for side-tree grafts whose
+-- real Instance.Parent points into the stamped conflict container rather than
+-- at the skeleton parent displayed here.
+local function filterRows(rows: { Row }, query: string): { Row }
+	if query == "" then
+		return rows
+	end
+
+	local keep: { [number]: boolean } = {}
+	for index, row in rows do
+		if not rowMatches(row, query) then
+			continue
+		end
+		keep[index] = true
+		local ancestorDepth = row.depth
+		for candidate = index - 1, 1, -1 do
+			local candidateRow = rows[candidate]
+			if candidateRow.depth < ancestorDepth then
+				keep[candidate] = true
+				ancestorDepth = candidateRow.depth
+				if ancestorDepth == 0 then
+					break
+				end
+			end
+		end
+	end
+
+	local filtered: { Row } = {}
+	for index, row in rows do
+		if keep[index] then
+			table.insert(filtered, row)
+		end
+	end
+	return filtered
+end
+
+local function SearchBar()
+	Element("Frame", {
+		id = "search-wrap",
+		Size = UDim2.new(1, 0, 0, SEARCH_HEIGHT),
+		tags = { "bg-none" },
+	}, function()
+		Element("UIPadding", {
+			id = "pad",
+			PaddingLeft = UDim.new(0, 4),
+			PaddingRight = UDim.new(0, 4),
+			PaddingTop = UDim.new(0, 3),
+			PaddingBottom = UDim.new(0, 3),
+		})
+
+		local textBox: TextBox
+		local node = Element("TextBox", {
+			id = "search",
+			Text = searchText,
+			PlaceholderText = "Search name or class…",
+			ClearTextOnFocus = false,
+			Size = UDim2.fromScale(1, 1),
+			tags = { "text", "surface-high", "vs-border", "corner-sm" },
+			TextColor3 = theme.text,
+			PlaceholderColor3 = theme.textMuted,
+			TextSize = theme.textSizeSmall,
+			events = {
+				Changed = function(property: string)
+					if property ~= "Text" or textBox.Text == searchText then
+						return
+					end
+					searchText = textBox.Text
+					searchGen += 1
+				end,
+			},
+		})
+		textBox = node.instance :: TextBox
 	end)
 end
 
@@ -331,6 +427,7 @@ local function ExplorerPanel()
 		end
 
 		TabBar()
+		SearchBar()
 
 		seedExpansion()
 		revealSelected()
@@ -340,14 +437,17 @@ local function ExplorerPanel()
 		-- renderRows applies them per frame over the cached array.
 		local viewTab = world:get(cts.ViewTab, cts.ViewTab) :: string
 		local mirrorGen = (world:get(cts.MirrorGeneration, cts.MirrorGeneration) :: number?) or 0
-		local key = `{viewTab}:{expansionGen}:{mirrorGen}`
+		local query = normalizedSearch()
+		local searching = query ~= ""
+		local key = `{viewTab}:{expansionGen}:{mirrorGen}:{searchGen}`
 		if key ~= rowsCacheKey then
 			rowsCacheKey = key
 			debug.profilebegin("rbxdiff_explorer_rows")
-			rowsCache = if viewTab == "result" then resultRows() else sideRows(viewTab)
+			local rows = if viewTab == "result" then resultRows(searching) else sideRows(viewTab, searching)
+			rowsCache = filterRows(rows, query)
 			debug.profileend()
 		end
-		renderRows(rowsCache)
+		renderRows(rowsCache, searching)
 	end)
 end
 
