@@ -58,6 +58,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	local snapshot: Snapshot? = nil
 	local sideBuilt: { [string]: boolean } = {}
 	local resultGeneration = -1
+	local resultResolutionSignature = ""
 	local generation = 0
 
 	local function captureSnapshot(): Snapshot
@@ -250,9 +251,30 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 
 	local function buildResult(): ExplorerProjection
 		local projection: ExplorerProjection = { roots = {}, index = {} }
+		-- Delete-vs-edit previews cannot actually remove the base target: it is
+		-- retained invisibly so the choice can be toggled without rebuilding the
+		-- imported file. When the delete side is staged, or an edited keep clone
+		-- is swapped in, that hidden target is an implementation detail and must
+		-- not appear as a duplicate in the logical RESULT tree.
+		local hiddenRoots: { [Instance]: boolean } = {}
+		for _, conflict in conflicts do
+			if world:get(conflict, cts.Kind) == "DeleteVsEdit" then
+				local staged = world:get(conflict, cts.Resolution) :: string?
+				if staged then
+					local ours = world:get(conflict, cts.Ours) :: SideInfo
+					local theirs = world:get(conflict, cts.Theirs) :: SideInfo
+					local deleteSide = if ours.deleted then "ours" elseif theirs.deleted then "theirs" else nil
+					local keepSide = if deleteSide == "ours" then "theirs" else "ours"
+					local keepInfo = if keepSide == "ours" then ours else theirs
+					if staged == deleteSide or (staged == keepSide and keepInfo.clone ~= nil) then
+						hiddenRoots[world:get(conflict, cts.Target) :: Instance] = true
+					end
+				end
+			end
+		end
 		local function visit(entity: any, parent: ExplorerNode?): ExplorerNode?
 			local inst = world:get(entity, cts.Ref) :: Instance?
-			if not inst then
+			if not inst or hiddenRoots[inst] then
 				return nil
 			end
 			local node: ExplorerNode = {
@@ -282,6 +304,14 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		return projection
 	end
 
+	local function resolutionSignature(): string
+		local states = table.create(#conflicts)
+		for index, conflict in conflicts do
+			states[index] = (world:get(conflict, cts.Resolution) :: string?) or "unresolved"
+		end
+		return table.concat(states, "|")
+	end
+
 	scheduler:addSystem({
 		name = "explorer_projection",
 		phase = packages.planckRunService.Phases.Heartbeat,
@@ -296,8 +326,10 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 
 			local changed = false
 			snapshot = snapshot or captureSnapshot()
-			if resultGeneration ~= mirrorGeneration then
+			local signature = resolutionSignature()
+			if resultGeneration ~= mirrorGeneration or resultResolutionSignature ~= signature then
 				resultGeneration = mirrorGeneration
+				resultResolutionSignature = signature
 				world:set(cts.ExplorerResultView, cts.ExplorerProjection, buildResult())
 				changed = true
 			end
