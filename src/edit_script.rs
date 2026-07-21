@@ -320,6 +320,10 @@ pub(crate) fn apply_ops(
             }
             EditOp::SetProperty { old_ref, name, value } => {
                 if let Some(inst) = target.get_by_ref_mut(*old_ref) {
+                    // Granular container changes (Attributes.<key> / Tags.<tag>)
+                    if set_sub_property(inst, name, value.as_ref()) {
+                        continue;
+                    }
                     match value {
                         None => {
                             inst.properties.remove(&name.as_str().into());
@@ -424,4 +428,88 @@ fn record_created(
     for (source_child, target_child) in source_children.zip(target_children) {
         record_created(new_dom, source_child, target, target_child, moved_destinations, created);
     }
+}
+
+// ============================================================================
+// Granular container properties (Attributes.<key> / Tags.<tag>)
+// ============================================================================
+
+/// Write a namespaced sub-property (read-modify-write on the container).
+/// Returns false when `name` isn't namespaced, leaving it to the caller.
+/// Removing the last key removes the container property itself, matching the
+/// differ's "empty container == absent" semantics.
+pub(crate) fn set_sub_property(
+    inst: &mut rbx_dom_weak::Instance,
+    name: &str,
+    value: Option<&Variant>,
+) -> bool {
+    if let Some(key) = name.strip_prefix("Attributes.") {
+        let mut attrs = match inst.properties.get(&"Attributes".into()) {
+            Some(Variant::Attributes(a)) => a.clone(),
+            _ => rbx_types::Attributes::new(),
+        };
+        match value {
+            Some(v) => {
+                attrs.insert(key.to_string(), v.clone());
+            }
+            None => {
+                attrs.remove(key);
+            }
+        }
+        if attrs.is_empty() {
+            inst.properties.remove(&"Attributes".into());
+        } else {
+            inst.properties.insert("Attributes".into(), Variant::Attributes(attrs));
+        }
+        return true;
+    }
+
+    if let Some(tag) = name.strip_prefix("Tags.") {
+        let existing: Vec<String> = match inst.properties.get(&"Tags".into()) {
+            Some(Variant::Tags(t)) => t.iter().map(|t| t.to_string()).collect(),
+            _ => Vec::new(),
+        };
+        let mut tags: Vec<String> = existing.into_iter().filter(|t| t != tag).collect();
+        if value.is_some() {
+            tags.push(tag.to_string());
+        }
+        if tags.is_empty() {
+            inst.properties.remove(&"Tags".into());
+        } else {
+            let mut t = rbx_types::Tags::new();
+            for tag in &tags {
+                t.push(tag);
+            }
+            inst.properties.insert("Tags".into(), Variant::Tags(t));
+        }
+        return true;
+    }
+
+    false
+}
+
+/// Read a namespaced sub-property from an instance. Returns None both for
+/// "not namespaced" (callers check with is_sub_property first when it
+/// matters) and "key absent".
+pub(crate) fn get_sub_property(inst: &rbx_dom_weak::Instance, name: &str) -> Option<Variant> {
+    if let Some(key) = name.strip_prefix("Attributes.") {
+        return match inst.properties.get(&"Attributes".into()) {
+            Some(Variant::Attributes(a)) => a.get(key).cloned(),
+            _ => None,
+        };
+    }
+    if let Some(tag) = name.strip_prefix("Tags.") {
+        return match inst.properties.get(&"Tags".into()) {
+            Some(Variant::Tags(t)) if t.iter().any(|t| t == tag) => {
+                Some(Variant::String(tag.to_string()))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Whether a property name addresses a granular container key.
+pub(crate) fn is_sub_property(name: &str) -> bool {
+    name.starts_with("Attributes.") || name.starts_with("Tags.")
 }

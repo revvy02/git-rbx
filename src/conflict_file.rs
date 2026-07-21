@@ -28,7 +28,7 @@ use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
 use rbx_types::{Attributes, Tags, Variant};
 use std::collections::HashMap;
 
-use crate::edit_script::{Anchor, EditOp};
+use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
 
@@ -363,6 +363,8 @@ pub fn mark_entry_custom(dom: &mut WeakDom, entry_ref: Ref, value: &serde_json::
             let inst = dom.get_by_ref(clone_ref)?;
             if prop == "Name" {
                 Some(Variant::String(inst.name.clone()))
+            } else if is_sub_property(prop) {
+                get_sub_property(inst, prop)
             } else {
                 inst.properties.get(&prop.into()).cloned()
             }
@@ -546,6 +548,8 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
                     let inst = dom.get_by_ref(clone_ref)?;
                     if prop == "Name" {
                         Some(Variant::String(inst.name.clone()))
+                    } else if is_sub_property(prop) {
+                        get_sub_property(inst, prop)
                     } else {
                         inst.properties.get(&prop.into()).cloned()
                     }
@@ -577,7 +581,9 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
                     inst.name = name;
                 }
             } else if let Some(inst) = dom.get_by_ref_mut(target) {
-                inst.properties.insert(prop.into(), value);
+                if !set_sub_property(inst, prop, Some(&value)) {
+                    inst.properties.insert(prop.into(), value);
+                }
             }
         }
         "Property" => {
@@ -594,16 +600,24 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
                     inst.name = name;
                 }
             } else {
-                let value = dom
-                    .get_by_ref(clone_ref)
-                    .and_then(|inst| inst.properties.get(&prop.into()).cloned());
+                let value = dom.get_by_ref(clone_ref).and_then(|inst| {
+                    if is_sub_property(prop) {
+                        get_sub_property(inst, prop)
+                    } else {
+                        inst.properties.get(&prop.into()).cloned()
+                    }
+                });
                 if let Some(inst) = dom.get_by_ref_mut(target) {
-                    match value {
-                        Some(v) => {
-                            inst.properties.insert(prop.into(), v);
-                        }
-                        None => {
-                            inst.properties.remove(&prop.into());
+                    if is_sub_property(prop) {
+                        set_sub_property(inst, prop, value.as_ref());
+                    } else {
+                        match value {
+                            Some(v) => {
+                                inst.properties.insert(prop.into(), v);
+                            }
+                            None => {
+                                inst.properties.remove(&prop.into());
+                            }
                         }
                     }
                 }

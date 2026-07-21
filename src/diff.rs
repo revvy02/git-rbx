@@ -372,11 +372,118 @@ fn diff_pass(
 /// A property difference carrying raw Variants — the applicable form used by
 /// the edit-script layer. Name changes are NOT included (Instance.name lives
 /// outside the property map; callers handle it separately).
+///
+/// Attributes and Tags are GRANULAR: container properties expand into one
+/// change per key, named `Attributes.<key>` / `Tags.<tag>`, so independent
+/// keys diff, merge, and conflict independently (two branches touching
+/// different attributes on one instance compose instead of conflicting).
+/// Roblox property names can't contain dots, so the namespace is unambiguous.
 #[derive(Debug, Clone)]
 pub(crate) struct RawPropertyChange {
     pub name: String,
     pub old: Option<Variant>,
     pub new: Option<Variant>,
+}
+
+/// Equality for attribute values (no Refs possible inside Attributes; float
+/// tolerance matches variants_equal).
+fn attr_value_eq(a: &Variant, b: &Variant) -> bool {
+    match (a, b) {
+        (Variant::Float32(x), Variant::Float32(y)) => {
+            x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
+        }
+        (Variant::Float64(x), Variant::Float64(y)) => {
+            x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
+        }
+        _ => a == b,
+    }
+}
+
+/// Expand an Attributes or Tags change into per-key granular changes.
+/// An empty container on one side only produces nothing — semantically
+/// identical to the property being absent (kills Studio's habit of adding
+/// empty Attributes containers on save).
+fn expand_container_changes(
+    changes: &mut Vec<RawPropertyChange>,
+    container_name: &str,
+    old: Option<&Variant>,
+    new: Option<&Variant>,
+    config: &DiffConfig,
+) {
+    match container_name {
+        "Attributes" => {
+            let empty = rbx_types::Attributes::new();
+            let old_attrs = match old {
+                Some(Variant::Attributes(a)) => a,
+                _ => &empty,
+            };
+            let new_attrs = match new {
+                Some(Variant::Attributes(a)) => a,
+                _ => &empty,
+            };
+
+            let mut keys: Vec<&str> = old_attrs
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .chain(new_attrs.iter().map(|(k, _)| k.as_str()))
+                .collect();
+            keys.sort_unstable();
+            keys.dedup();
+
+            for key in keys {
+                let name = format!("Attributes.{key}");
+                if config.ignore_properties.contains(&name) {
+                    continue;
+                }
+                let old_value = old_attrs.get(key);
+                let new_value = new_attrs.get(key);
+                let changed = match (old_value, new_value) {
+                    (Some(a), Some(b)) => !attr_value_eq(a, b),
+                    (None, None) => false,
+                    _ => true,
+                };
+                if changed {
+                    changes.push(RawPropertyChange {
+                        name,
+                        old: old_value.cloned(),
+                        new: new_value.cloned(),
+                    });
+                }
+            }
+        }
+        "Tags" => {
+            let empty = rbx_types::Tags::new();
+            let old_tags = match old {
+                Some(Variant::Tags(t)) => t,
+                _ => &empty,
+            };
+            let new_tags = match new {
+                Some(Variant::Tags(t)) => t,
+                _ => &empty,
+            };
+
+            let mut tags: Vec<&str> = old_tags.iter().chain(new_tags.iter()).collect();
+            tags.sort_unstable();
+            tags.dedup();
+
+            for tag in tags {
+                let name = format!("Tags.{tag}");
+                if config.ignore_properties.contains(&name) {
+                    continue;
+                }
+                let in_old = old_tags.iter().any(|t| t == tag);
+                let in_new = new_tags.iter().any(|t| t == tag);
+                if in_old != in_new {
+                    changes.push(RawPropertyChange {
+                        name,
+                        old: if in_old { Some(Variant::String(tag.to_string())) } else { None },
+                        new: if in_new { Some(Variant::String(tag.to_string())) } else { None },
+                    });
+                }
+            }
+        }
+        _ => unreachable!("expand_container_changes only handles Attributes/Tags"),
+    }
 }
 
 /// Compare properties between two matched instances at the Variant level.
@@ -416,7 +523,15 @@ pub(crate) fn raw_property_changes(
         }
         visited.insert(name.clone());
 
-        match old_inst.properties.get(name) {
+        let old_value = old_inst.properties.get(name);
+
+        // Container properties expand into per-key granular changes
+        if name.as_str() == "Attributes" || name.as_str() == "Tags" {
+            expand_container_changes(&mut changes, name.as_str(), old_value, Some(new_value), config);
+            continue;
+        }
+
+        match old_value {
             Some(old_value) => {
                 if !variants_equal(old_dom, new_dom, old_value, new_value, ref_mapping, old_deep, new_deep) {
                     changes.push(RawPropertyChange {
@@ -453,6 +568,11 @@ pub(crate) fn raw_property_changes(
             continue;
         }
         if !visited.contains(name) {
+            // Container property removed entirely: granular removals per key
+            if name.as_str() == "Attributes" || name.as_str() == "Tags" {
+                expand_container_changes(&mut changes, name.as_str(), Some(old_value), None, config);
+                continue;
+            }
             // Property only in old — skip if it's just a default value
             if is_default_value(defaults, name, old_value) {
                 continue;
