@@ -1,9 +1,9 @@
-local Element = require("../packages").miu.Instance
+local Element = require("../packages").miu.Element
 
-local format = require("../format")
-local theme = require("../theme")
+local format = require("../library/format")
+local theme = require("../library/theme")
 
-local conflicts = require("../ecs/library/conflicts")
+local conflicts = require("../ecs/systems/library/conflicts")
 local cts = require("../ecs/cts")
 local world = require("../ecs/world")
 
@@ -27,11 +27,7 @@ local function ComparisonCard(entity: any)
 		Element("TextLabel", {
 			id = "kind",
 			Text = kind .. (if property then ` ({property})` else ""),
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = theme.textMuted,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
+			tags = { "text", "text-small", "muted", "auto-size-y" },
 		})
 
 		OptionRow("base", "base", format.baseSummary(kind, base), theme.textMuted, resolution == nil, function()

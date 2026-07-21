@@ -1,16 +1,14 @@
-local Element = require("../../packages").miu.Instance
+local Element = require("../../packages").miu.Element
 
-local format = require("../../format")
-local theme = require("../../theme")
+local format = require("../../library/format")
+local theme = require("../../library/theme")
 
 -- Visual asset id (textures/images): thumbnail preview + the id. Non-loadable
 -- ids just render an empty frame — the text still carries the value.
 local function AssetValue(id: string, assetId: string)
 	Element("Frame", {
 		id = id,
-		Size = UDim2.new(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		tags = { "bg-none", "flex-row", "gap-sm" },
+		tags = { "bg-none", "auto-size-y", "flex-row", "gap-sm" },
 	}, function()
 		Element("ImageLabel", {
 			id = "preview",
@@ -24,12 +22,9 @@ local function AssetValue(id: string, assetId: string)
 			id = "text",
 			RichText = true,
 			Text = format.escapeRich(assetId),
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = theme.textMuted,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
-			TextWrapped = true,
+			Size = UDim2.new(1, -38, 0, 32),
+			tags = { "text", "text-small", "muted" },
+			TextTruncate = Enum.TextTruncate.AtEnd,
 		})
 	end)
 end

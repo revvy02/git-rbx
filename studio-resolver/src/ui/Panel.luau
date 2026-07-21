@@ -1,62 +1,83 @@
-local Element = require("../packages").miu.Instance
+local packages = require("../packages")
+local Element = packages.miu.Element
+local VirtualList = packages.virtualList.VirtualList
+local Dimensions = packages.virtualList.Dimensions
 
-local theme = require("../theme")
-local transport = require("../transport")
+local theme = require("../library/theme")
+local transport = require("../library/transport")
 
-local conflicts = require("../ecs/library/conflicts")
+local conflicts = require("../ecs/systems/library/conflicts")
 local cts = require("../ecs/cts")
 local world = require("../ecs/world")
 
 local ConflictRow = require("./ConflictRow")
 
--- The conflict list + Complete button. The scroller is the panel: invisible,
--- stretched to the bottom of the screen; rows and the button carry their own
--- backgrounds, and AutomaticCanvasSize extends past the viewport when content
--- overflows.
+local HEADER_HEIGHT = 24
+local CARD_HEIGHT = 92
+local CARD_GAP = 4
+local FOOTER_HEIGHT = 36
+
+-- The conflict list + Complete button. Cards render through VirtualList —
+-- only the visible slice builds ConflictRows, so real merges (1000+
+-- conflicts) stay interactive. Complete lives in a pinned footer instead of
+-- after the last card.
 local function Panel()
-	local all = conflicts.all()
+	local all = conflicts.list()
+	debug.profilebegin("rbxdiff_panel_count")
 	local unresolved = 0
 	for _, entity in all do
 		if not world:has(entity, cts.Resolution) then
 			unresolved += 1
 		end
 	end
+	debug.profileend()
 
 	local finished = world:has(cts.Finished, cts.Finished)
 	local completing = world:has(cts.Completing, cts.Completing)
 	local completeError = world:get(cts.CompleteError, cts.CompleteError) :: string?
 
-	Element("ScrollingFrame", {
+	Element("Frame", {
 		id = "panel",
 		Size = UDim2.new(1, 0, 1, 0),
 		tags = { "bg-none", "flex-col" },
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, function()
 		Element("TextLabel", {
 			id = "title",
 			Text = if finished
 				then "MERGE COMPLETE — FILE WRITTEN"
 				else `CONFLICTS — {#all - unresolved}/{#all} DECIDED`,
-			Size = UDim2.new(1, 0, 0, 24),
-			BackgroundColor3 = theme.surfaceHigh,
+			Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+			tags = { "header-band" },
 			TextColor3 = if finished then theme.added else theme.textMuted,
-			TextSize = theme.headerSize,
-			Font = theme.font,
 		})
 
 		if finished then
 			return
 		end
 
-		Element("Frame", {
-			id = "content",
-			tags = { "bg-none", "auto-size-y", "flex-col", "gap-sm", "p-sm" },
-		}, function()
-			for _, entity in all do
-				ConflictRow(entity)
-			end
+		debug.profilebegin("rbxdiff_panel_cards")
+		VirtualList({
+			id = "cards",
+			data = all,
+			dimensions = Dimensions.withSpacing(Dimensions.consistentSize(CARD_HEIGHT), CARD_GAP),
+			direction = "y",
+			Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - FOOTER_HEIGHT),
+			tags = { "bg-none" },
+		}, function(entity: any)
+			Element("UIPadding", {
+				id = "pad",
+				PaddingLeft = UDim.new(0, 4),
+				PaddingRight = UDim.new(0, 4),
+			})
+			ConflictRow(entity)
+		end)
+		debug.profileend()
 
+		Element("Frame", {
+			id = "footer",
+			Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
+			tags = { "bg-none", "flex-col", "p-sm" },
+		}, function()
 			local canComplete = unresolved == 0 and not completing
 			Element("TextButton", {
 				id = "complete",
@@ -65,12 +86,11 @@ local function Panel()
 					elseif completeError then "Complete failed — retry"
 					elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 					else "Complete",
-				Size = UDim2.new(1, 0, 0, 28),
-				tags = { "corner-sm" },
+				Size = UDim2.new(1, 0, 1, 0),
+				tags = { "corner-sm", "button" },
 				BackgroundColor3 = if canComplete then theme.accent else theme.disabled,
 				TextColor3 = if canComplete then theme.textBright else theme.textMuted,
 				TextSize = theme.textSize,
-				Font = theme.font,
 				events = {
 					Activated = function()
 						if canComplete then

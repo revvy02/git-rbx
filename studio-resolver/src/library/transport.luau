@@ -9,12 +9,12 @@ local HttpService = game:GetService("HttpService")
 
 local process = require("@rodeo/process")
 
-local config = require("@self/config")
-local format = require("@self/format")
+local config = require("./config")
+local format = require("./format")
 
-local conflicts = require("@self/ecs/library/conflicts")
-local cts = require("@self/ecs/cts")
-local world = require("@self/ecs/world")
+local conflicts = require("../ecs/systems/library/conflicts")
+local cts = require("../ecs/cts")
+local world = require("../ecs/world")
 
 local transport = {}
 
@@ -26,7 +26,7 @@ function transport.complete()
 	world:add(cts.Completing, cts.Completing)
 	world:remove(cts.CompleteError, cts.CompleteError)
 	task.spawn(function()
-		for _, entity in conflicts.all() do
+		for _, entity in conflicts.list() do
 			local entryName = (world:get(entity, cts.Entry) :: Instance).Name
 			local resolution = world:get(entity, cts.Resolution) :: string?
 			local args

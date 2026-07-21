@@ -14,16 +14,18 @@
 	fully expanded; collapses stick either way.
 ]]
 
-local Element = require("../packages").miu.Instance
+local packages = require("../packages")
+local Element = packages.miu.Element
+local VirtualList = packages.virtualList.VirtualList
+local Dimensions = packages.virtualList.Dimensions
 
-local TreeRow = require("./TreeRow")
+local TreeRow = require("@self/TreeRow")
 
-local format = require("../format")
-local theme = require("../theme")
+local format = require("../library/format")
+local theme = require("../library/theme")
 
-local conflicts = require("../ecs/library/conflicts")
+local conflicts = require("../ecs/systems/library/conflicts")
 local cts = require("../ecs/cts")
-local mirror = require("../ecs/library/mirror")
 local world = require("../ecs/world")
 
 type SideInfo = cts.SideInfo
@@ -39,14 +41,21 @@ type Row = {
 }
 
 local expanded: { [Instance]: boolean } = {}
+local expansionGen = 0
 local seeded = false
 local lastRevealed: Instance? = nil
+
+local function setExpanded(inst: Instance, isExpanded: boolean)
+	expanded[inst] = isExpanded
+	expansionGen += 1
+end
 
 local function seedExpansion()
 	if seeded then
 		return
 	end
 	seeded = true
+	expansionGen += 1
 	for _, target in world:query(cts.Target) do
 		local node = (target :: Instance).Parent
 		while node and node ~= game do
@@ -65,6 +74,7 @@ local function revealSelected()
 		return
 	end
 	lastRevealed = inst
+	expansionGen += 1
 	local node = inst.Parent
 	while node and node ~= game do
 		expanded[node] = true
@@ -97,18 +107,15 @@ local function instanceRow(inst: Instance, depth: number, hasChildren: boolean, 
 	}
 end
 
--- RESULT: the live preview DOM, read through the jecs mirror — syncTree
--- frame-diffs instances into entities with ChildOf pairs, and the walk here
--- is pure entity traversal. The diff layers will hang their components off
--- these entities.
+-- RESULT: the live preview DOM, read through the mirror's world data — the
+-- walk is pure component traversal (Roots singleton + per-node Children
+-- arrays the mirror system maintains). The diff layers will hang their
+-- components off these entities.
 local function resultRows(): { Row }
-	seedExpansion()
-	revealSelected()
-
 	local rows: { Row } = {}
 	local function visit(entity: any, depth: number)
 		local inst = world:get(entity, cts.Ref) :: Instance
-		local children = mirror.childrenOf(entity)
+		local children = (world:get(entity, cts.Children) :: { any }?) or {}
 		local isExpanded = expanded[inst] == true
 		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
 		if isExpanded then
@@ -117,8 +124,8 @@ local function resultRows(): { Row }
 			end
 		end
 	end
-	for _, root in mirror.roots() do
-		visit(mirror.entityFor(root), 0)
+	for _, root in (world:get(cts.Roots, cts.Roots) :: { any }?) or {} do
+		visit(root, 0)
 	end
 	return rows
 end
@@ -147,7 +154,7 @@ local function sideRows(tab: string): { Row }
 		return node
 	end
 
-	for _, entity in conflicts.all() do
+	for _, entity in conflicts.list() do
 		local kind = world:get(entity, cts.Kind)
 		local target = world:get(entity, cts.Target) :: Instance
 		local base = world:get(entity, cts.Base) :: Base
@@ -237,11 +244,10 @@ local function TabBar()
 				id = tab,
 				Text = tab:upper(),
 				Size = UDim2.new(0.25, -8, 1, 0),
-				tags = { "corner-sm", "vs-border" },
+				tags = { "corner-sm", "vs-border", "button" },
 				BackgroundColor3 = if isActive then theme.selection else theme.surface,
 				TextColor3 = if isActive then theme.textBright else tabColor(tab),
 				TextSize = 11,
-				Font = theme.font,
 				events = {
 					Activated = function()
 						world:set(cts.ViewTab, cts.ViewTab, tab)
@@ -264,14 +270,29 @@ local function ancestorSet(): { [Instance]: boolean }
 	return set
 end
 
+local ROW_HEIGHT = 22
+local HEADER_HEIGHT = 24
+local TABS_HEIGHT = 26
+
+local rowsCacheKey: string? = nil
+local rowsCache: { Row } = {}
+
+-- Rows render through VirtualList: only the visible index range builds
+-- TreeRows, so a fully-expanded real place stays cheap.
 local function renderRows(rows: { Row })
 	local onPath = ancestorSet()
 	local selectedInstance = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
-	for index, row in rows do
+	VirtualList({
+		id = "rows",
+		data = rows,
+		dimensions = Dimensions.consistentSize(ROW_HEIGHT),
+		direction = "y",
+		Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - TABS_HEIGHT),
+		tags = { "bg-none" },
+	}, function(row: Row, index: number)
 		local inst = row.inst
 		TreeRow({
-			id = `row{index}`,
-			layoutOrder = index,
+			id = "row",
 			depth = row.depth,
 			label = row.label,
 			className = row.className,
@@ -282,32 +303,27 @@ local function renderRows(rows: { Row })
 			stripe = index % 2 == 0,
 			onToggle = if row.hasChildren
 				then function()
-					expanded[inst] = not row.isExpanded
+					setExpanded(inst, not row.isExpanded)
 				end
 				else nil,
 			onActivated = function()
 				world:set(cts.SelectedInstance, cts.SelectedInstance, inst)
 			end,
 		})
-	end
+	end)
 end
 
-local function Explorer()
-	Element("ScrollingFrame", {
+local function ExplorerPanel()
+	Element("Frame", {
 		id = "explorer",
 		Size = UDim2.new(1, 0, 0.5, 0),
 		tags = { "bg-none", "flex-col" },
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, function()
 		Element("TextLabel", {
 			id = "title",
 			Text = "MERGE EXPLORER",
-			Size = UDim2.new(1, 0, 0, 24),
-			BackgroundColor3 = theme.surfaceHigh,
-			TextColor3 = theme.textMuted,
-			TextSize = theme.headerSize,
-			Font = theme.font,
+			Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+			tags = { "header-band" },
 		})
 
 		if world:has(cts.Finished, cts.Finished) then
@@ -316,9 +332,23 @@ local function Explorer()
 
 		TabBar()
 
+		seedExpansion()
+		revealSelected()
+
+		-- Rows are derived data: rebuilt only when the tree (MirrorGeneration),
+		-- expansion, or tab changes. Selection/on-path stay out of the key —
+		-- renderRows applies them per frame over the cached array.
 		local viewTab = world:get(cts.ViewTab, cts.ViewTab) :: string
-		renderRows(if viewTab == "result" then resultRows() else sideRows(viewTab))
+		local mirrorGen = (world:get(cts.MirrorGeneration, cts.MirrorGeneration) :: number?) or 0
+		local key = `{viewTab}:{expansionGen}:{mirrorGen}`
+		if key ~= rowsCacheKey then
+			rowsCacheKey = key
+			debug.profilebegin("rbxdiff_explorer_rows")
+			rowsCache = if viewTab == "result" then resultRows() else sideRows(viewTab)
+			debug.profileend()
+		end
+		renderRows(rowsCache)
 	end)
 end
 
-return Explorer
+return ExplorerPanel

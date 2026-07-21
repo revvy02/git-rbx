@@ -1,11 +1,10 @@
 local packages = require("../packages")
-local Element = packages.miu.Instance
+local Element = packages.miu.Element
 
-local format = require("../format")
-local preview = require("../ecs/library/preview")
-local theme = require("../theme")
+local format = require("../library/format")
+local theme = require("../library/theme")
 
-local conflicts = require("../ecs/library/conflicts")
+local conflicts = require("../ecs/systems/library/conflicts")
 local cts = require("../ecs/cts")
 local world = require("../ecs/world")
 
@@ -23,11 +22,14 @@ local function ConflictRow(entity: any)
 	local target = world:get(entity, cts.Target) :: Instance
 	local selected = world:get(cts.SelectedConflict, cts.SelectedConflict) == entity
 
+	-- Fixed-height card that fills its VirtualList slot; every line truncates
+	-- instead of wrapping so the row height stays uniform.
 	Element("TextButton", {
-		id = name,
+		id = "card",
 		Text = "",
 		AutoButtonColor = false,
-		tags = { "auto-size-y", "flex-col", "gap-sm", "p-md", "corner-sm", "vs-border" },
+		Size = UDim2.fromScale(1, 1),
+		tags = { "flex-col", "gap-sm", "p-md", "corner-sm", "vs-border" },
 		BackgroundColor3 = if selected then theme.surface:Lerp(theme.selection, 0.35) else theme.surface,
 		events = {
 			Activated = function()
@@ -36,18 +38,14 @@ local function ConflictRow(entity: any)
 			end,
 		},
 	}, function()
-		Label("path", path, theme.statusColor(resolution))
+		Label("path", path, theme.statusColor(resolution), true)
 
 		local detail = kind .. (if property then ` ({property})` else "")
 		Element("TextLabel", {
 			id = "detail",
 			Text = detail,
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = theme.textMuted,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
-			TextWrapped = true,
+			tags = { "text", "text-small", "muted", "auto-size-y" },
+			TextTruncate = Enum.TextTruncate.AtEnd,
 		})
 
 		local oursSummary = format.sideSummary(kind, property, world:get(entity, cts.Ours))
@@ -57,12 +55,8 @@ local function ConflictRow(entity: any)
 				id = "values",
 				RichText = true,
 				Text = `<font color="{theme.oursHex}">{oursSummary or "?"}</font>  ·  <font color="{theme.theirsHex}">{theirsSummary or "?"}</font>`,
-				tags = { "text-base", "auto-size-y" },
-				TextColor3 = theme.text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				TextSize = theme.textSizeSmall,
-				Font = theme.font,
-				TextWrapped = true,
+				tags = { "text", "text-small", "auto-size-y" },
+				TextTruncate = Enum.TextTruncate.AtEnd,
 			})
 		end
 
@@ -84,7 +78,7 @@ local function ConflictRow(entity: any)
 			end
 			if target:IsA("PVInstance") and target:IsDescendantOf(workspace) then
 				Button("view", "View", false, theme.neutralButton, function()
-					preview.focusOn(entity)
+					world:set(world:entity(), cts.FocusRequest, entity)
 				end)
 			end
 		end)

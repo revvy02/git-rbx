@@ -2,17 +2,19 @@
 	Presentational tree row, after game-prototype's miu-tree/TreeRow: same
 	props contract (depth, label, hasChildren, expanded, selected, onPath,
 	onActivated, onToggle) adapted to the resolver's stack — plain miu events
-	instead of the miu-flow Activated helper, theme constants instead of wind
-	state classes — plus resolver extras: a class icon, a phantom dim, and a
-	rest-state background tint for conflict rows.
+	instead of the miu-flow Activated helper — plus resolver extras: a class
+	icon and a phantom dim.
 
-	State waterfall for the background: selected > on-path > tint.
+	Background states are wind tags: selected > on-path > stripe, precedence
+	via rule priority in theme.rules().
 ]]
 
-local Element = require("../packages").miu.Instance
+local packages = require("../../packages")
+local Element = packages.miu.Element
+local tags = packages.wind.tags
 
-local classIcon = require("./classIcon")
-local theme = require("../theme")
+local classIcon = require("../classIcon")
+local theme = require("../../library/theme")
 
 export type TreeRowProps = {
 	id: string,
@@ -26,7 +28,6 @@ export type TreeRowProps = {
 	selected: boolean?,
 	onPath: boolean?, -- ancestor of the selection
 	color: Color3?, -- label color (conflict status / side)
-	tint: Color3?, -- rest background tint (conflict state)
 	stripe: boolean?, -- zebra shading for alternating rows
 	onActivated: (() -> ())?,
 	onToggle: (() -> ())?,
@@ -35,26 +36,11 @@ export type TreeRowProps = {
 local INDENT = 12
 
 local function TreeRow(props: TreeRowProps)
-	local background = theme.selection
-	local backgroundTransparency = 1
-	if props.selected then
-		backgroundTransparency = 0
-	elseif props.onPath then
-		backgroundTransparency = 0.85
-	elseif props.tint then
-		background = props.tint :: Color3
-		backgroundTransparency = 0.85
-	elseif props.stripe then
-		background = theme.bg
-		backgroundTransparency = 0.5
-	end
-
 	Element("Frame", {
 		id = props.id,
 		LayoutOrder = props.layoutOrder,
 		Size = UDim2.new(1, 0, 0, 22),
-		BackgroundColor3 = background,
-		BackgroundTransparency = backgroundTransparency,
+		tags = tags("row", props.stripe and "stripe", props.onPath and "on-path", props.selected and "selected"),
 	}, function()
 		Element("UIPadding", {
 			id = "pad",
@@ -70,10 +56,7 @@ local function TreeRow(props: TreeRowProps)
 			id = "expand",
 			Text = if not props.hasChildren then "" elseif props.expanded then "v " else "> ",
 			Size = UDim2.new(0, 16, 1, 0),
-			BackgroundTransparency = 1,
-			TextColor3 = theme.textMuted,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
+			tags = { "bg-none", "button", "muted" },
 			events = {
 				Activated = function()
 					if props.onToggle then
@@ -103,12 +86,9 @@ local function TreeRow(props: TreeRowProps)
 			RichText = true,
 			Text = ` {props.label}`,
 			Size = UDim2.new(1, -16 - iconWidth, 1, 0),
-			BackgroundTransparency = 1,
+			tags = { "text" },
 			TextColor3 = props.color or theme.text,
-			TextXAlignment = Enum.TextXAlignment.Left,
 			TextTruncate = Enum.TextTruncate.AtEnd,
-			TextSize = theme.textSize,
-			Font = theme.font,
 			events = {
 				Activated = function()
 					if props.onActivated then

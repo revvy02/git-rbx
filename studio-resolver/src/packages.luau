@@ -45,5 +45,6 @@ return {
 	miu = load("miu"),
 	planck = load("planck"),
 	planckRunService = load("planck_run_service"),
+	virtualList = load("miu_virtual_list"),
 	wind = load("miu_wind"),
 }

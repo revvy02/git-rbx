@@ -4,23 +4,14 @@
 	texture previews — with mono text as the fallback for everything else.
 ]]
 
-local format = require("../../format")
-local theme = require("../../theme")
+local format = require("../../library/format")
+local theme = require("../../library/theme")
 
 local AssetValue = require("./AssetValue")
 local BoolValue = require("./BoolValue")
 local ColorValue = require("./ColorValue")
 local InstanceValue = require("./InstanceValue")
 local TextValue = require("./TextValue")
-
--- String properties whose value is a renderable image asset.
-local VISUAL_ASSET_PROPS: { [string]: boolean } = {
-	Texture = true,
-	TextureID = true,
-	TextureId = true,
-	Image = true,
-	Icon = true,
-}
 
 local function PropertyValue(id: string, value: any, propertyName: string?)
 	local valueType = typeof(value)
@@ -34,7 +25,7 @@ local function PropertyValue(id: string, value: any, propertyName: string?)
 		InstanceValue(id, value)
 	elseif valueType == "EnumItem" then
 		TextValue(id, (value :: EnumItem).Name)
-	elseif valueType == "string" and propertyName and VISUAL_ASSET_PROPS[propertyName] and value ~= "" then
+	elseif format.isVisualAsset(propertyName, value) then
 		AssetValue(id, value)
 	else
 		TextValue(id, format.formatValue(value))

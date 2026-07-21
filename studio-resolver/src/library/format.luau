@@ -4,7 +4,7 @@
 	Everything returns RichText-safe strings.
 ]]
 
-local cts = require("@self/ecs/cts")
+local cts = require("../ecs/cts")
 
 type SideInfo = cts.SideInfo
 type Base = cts.Base
@@ -78,6 +78,32 @@ function format.encodeValue(v: any): any
 	return nil
 end
 
+-- String properties whose value is a renderable image asset (thumbnail row).
+local VISUAL_ASSET_PROPS: { [string]: boolean } = {
+	Texture = true,
+	TextureID = true,
+	TextureId = true,
+	Image = true,
+	Icon = true,
+}
+
+function format.isVisualAsset(propertyName: string?, value: any): boolean
+	return propertyName ~= nil
+		and VISUAL_ASSET_PROPS[propertyName :: string] == true
+		and typeof(value) == "string"
+		and value ~= ""
+end
+
+-- Real merges conflict on serialized-only properties (WorldPivotData,
+-- MeshData, ...) that Luau cannot touch — reads throw. Every property access
+-- in the resolver goes through here; unreadable properties still stage and
+-- resolve (the CLI writes them host-side), they just can't preview.
+function format.readProperty(inst: Instance, property: string): (boolean, any)
+	return pcall(function()
+		return (inst :: any)[property]
+	end)
+end
+
 local previewPrefix = "Workspace.RbxDiffModelPreview."
 
 function format.relPath(inst: Instance): string
@@ -94,7 +120,11 @@ function format.sideSummary(kind: string, property: string?, info: SideInfo?): s
 	end
 	if kind == "Property" then
 		local clone = info.clone
-		return clone and format.formatValue((clone :: any)[property :: string])
+		if not clone then
+			return nil
+		end
+		local ok, value = format.readProperty(clone, property :: string)
+		return if ok then format.formatValue(value) else "(not scriptable)"
 	elseif kind == "MoveTarget" then
 		local path = info.destinationPath
 		return path and `→ {format.escapeRich(path)}`

@@ -34,6 +34,14 @@ local cts = {
 	-- The live preview Instance an entity mirrors.
 	Ref = world:component(),
 
+	-- Mirror-derived tree data, written by the mirror system each sync:
+	-- ordered child entities per node, plus singletons for the root entity
+	-- list and the Instance -> entity index.
+	Children = world:component(),
+	Roots = world:component(),
+	EntityOf = world:component(),
+	MirrorGeneration = world:component(), -- bumps when a sync changes anything; readers key caches on it
+
 	-- Conflict entities, one per stamped container entry.
 	Kind = world:component(), -- "Property" | "MoveTarget" | "DeleteVsEdit"
 	Path = world:component(), -- display path of the contested instance
@@ -45,15 +53,23 @@ local cts = {
 	Theirs = world:component(), -- SideInfo
 	Base = world:component(), -- Base snapshot
 	Resolution = world:component(), -- staged side "ours"|"theirs"|"custom"; absent = unpicked
-	Rendered = world:component(), -- staged state the 3D layer currently reflects
+	Rendered = world:component(), -- staged state the 3D preview currently reflects
+	Highlighted = world:component(), -- staged state the 3D highlight currently reflects
 
 	-- Session singletons.
+	Conflicts = world:component(), -- boot-sorted conflict entity array (immutable after boot)
+	Container = world:component(), -- the stamped __RbxDiffMerge container
 	ViewTab = world:component(), -- "base" | "ours" | "theirs" | "result"
 	SelectedConflict = world:component(), -- conflict entity
 	SelectedInstance = world:component(), -- Instance the explorer/props focus on
 	CompleteError = world:component(), -- last Complete failure message
 	Completing = world:entity(), -- tag: CLI batch in flight
 	Finished = world:entity(), -- tag: finalized, file written
+
+	-- Request entities: spawned with a payload component, consumed by their
+	-- system, then tagged Destroy for the end-of-frame sweep.
+	FocusRequest = world:component(), -- payload: conflict entity the camera should frame
+	Destroy = world:entity(), -- tag: delete this entity in the cleanup sweep
 }
 
 for name, ct in cts do

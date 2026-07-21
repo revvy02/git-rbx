@@ -1,6 +1,6 @@
-local Element = require("../../packages").miu.Instance
+local Element = require("../../packages").miu.Element
 
-local theme = require("../../theme")
+local theme = require("../../library/theme")
 
 -- boolean: Studio-style checkbox + dim true/false text.
 local function BoolValue(id: string, value: boolean)
@@ -23,11 +23,7 @@ local function BoolValue(id: string, value: boolean)
 			id = "text",
 			Text = tostring(value),
 			Size = UDim2.new(1, -18, 0, 14),
-			BackgroundTransparency = 1,
-			TextColor3 = theme.textMuted,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
+			tags = { "text", "text-small", "muted" },
 		})
 	end)
 end

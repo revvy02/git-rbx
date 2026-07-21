@@ -23,13 +23,14 @@
 	only rbx-diff writes it, only at Complete. Abandoning the session leaves the
 	conflicted file exactly as `rbx-diff merge` wrote it.
 
-	Layout: the ecs/ world is the source of truth — conflict entities +
-	session singletons (ecs/cts.luau), shared query/staging APIs in
-	ecs/library/, and self-registering systems in ecs/systems/ (each returns
-	function(world, cts, scheduler) and calls scheduler:addSystem itself).
-	config.luau (launch config), format.luau (value/path text), transport.luau
-	(Complete → CLI), components/ (miu panels: Explorer + PropertiesPanel in
-	the sidebar widget, Panel with ConflictRows in the conflicts widget).
+	Layout: this file is the composition root — parse args, read the stamped
+	container into conflict entities + singletons, register systems. The world
+	is the source of truth; all behavior lives in ecs/systems/ as scheduled
+	loops (each returns a register function taking world/cts/scheduler), with
+	stateless helpers in ecs/systems/library/. library/ holds the non-ecs
+	support modules (config, format, theme, transport, viewport math);
+	ui/ holds the miu panels the ui systems render (ExplorerPanel/,
+	PropertyPanel/, and the conflicts-panel pieces).
 
 	Args: <merged-file> [--rbx-diff <path-to-binary>] [--auto <side>]
 ]]
@@ -41,26 +42,14 @@ local argparse = require("@pkg/argparse")
 -- Real packages, not vendors: packages.luau rojo-builds roblox_packages and
 -- imports it, so the pesde shims resolve as instances.
 local packages = require("@self/packages")
-local Element = packages.miu.Instance
-local Portal = packages.miu.Portal
+local jecs = packages.jecs
 
-local StyleLink = packages.wind.StyleLink
-local StyleSheet = packages.wind.StyleSheet
-local WindRules = packages.wind.WindRules
-
-local config = require("@self/config")
-local preview = require("@self/ecs/library/preview")
-local theme = require("@self/theme")
-local transport = require("@self/transport")
+local config = require("@self/library/config")
+local transport = require("@self/library/transport")
 
 local cts = require("@self/ecs/cts")
-local ecsConflicts = require("@self/ecs/library/conflicts")
 local scheduler = require("@self/ecs/scheduler")
 local world = require("@self/ecs/world")
-
-local Explorer = require("@self/components/Explorer")
-local Panel = require("@self/components/Panel")
-local PropertiesPanel = require("@self/components/PropertiesPanel")
 
 local CONTAINER_NAME = "__RbxDiffMerge"
 
@@ -74,8 +63,8 @@ local args = parser:parse(process.args)
 local mergedFile = args.file
 
 -- ============================================================================
--- Conflict model: read once from the DOM into conflict entities — from here
--- on the world is the source of truth for merge + session state.
+-- Boot: read the stamped container once into conflict entities + singletons —
+-- from here on the world is the source of truth for merge + session state.
 -- ============================================================================
 
 local container = game:FindFirstChild(CONTAINER_NAME, true)
@@ -103,7 +92,17 @@ if not container then
 	return "no-conflicts"
 end
 
-local records: { ecsConflicts.ConflictRecord } = {}
+type ConflictRecord = {
+	name: string,
+	kind: string,
+	path: string,
+	property: string?,
+	resolved: string?,
+	target: Instance,
+	entry: Instance,
+}
+
+local records: { ConflictRecord } = {}
 for _, entry in container:GetChildren() do
 	table.insert(records, {
 		name = entry.Name,
@@ -122,12 +121,28 @@ end)
 config.mergedFile = mergedFile
 config.rbxDiffBin = args.rbxDiffBin
 
-ecsConflicts.boot(records)
-preview.boot(container :: Instance)
+local conflictEntities: { any } = {}
+for index, record in records do
+	local entity = world:entity()
+	world:set(entity, jecs.Name, record.name)
+	world:set(entity, cts.Order, index)
+	world:set(entity, cts.Kind, record.kind)
+	world:set(entity, cts.Path, record.path)
+	world:set(entity, cts.Target, record.target)
+	world:set(entity, cts.Entry, record.entry)
+	if record.property then
+		world:set(entity, cts.Property, record.property)
+	end
+	if record.resolved then
+		world:set(entity, cts.Resolution, record.resolved)
+	end
+	table.insert(conflictEntities, entity)
+end
+world:set(cts.Conflicts, cts.Conflicts, conflictEntities)
+world:set(cts.Container, cts.Container, container)
 
--- Session singletons: a component set on its own entity id.
 world:set(cts.ViewTab, cts.ViewTab, "result")
-local firstConflict = ecsConflicts.all()[1]
+local firstConflict = conflictEntities[1]
 if firstConflict then
 	world:set(cts.SelectedConflict, cts.SelectedConflict, firstConflict)
 	world:set(cts.SelectedInstance, cts.SelectedInstance, world:get(firstConflict, cts.Target))
@@ -136,100 +151,29 @@ end
 print(`rbx-diff resolver: {#records} conflict(s) in {mergedFile}`)
 
 -- ============================================================================
--- Sidebar host: a real plugin dock widget so the explorer/props don't
--- overlap the viewport. rodeo runs us at plugin identity but hands us no
--- `plugin` global — the rodeo plugin itself is a Plugin instance under
--- PluginDebugService, and CreateDockWidgetPluginGuiAsync works from here.
--- ============================================================================
-
-local rodeoPlugin: Plugin?
-for _, child in game:GetService("PluginDebugService"):GetChildren() do
-	if child:IsA("Plugin") and child.Name:match("rodeo") then
-		rodeoPlugin = child
-		break
-	end
-end
-
-local function createWidget(id: string, title: string, dockState: Enum.InitialDockState): DockWidgetPluginGui
-	local widget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync(
-		id,
-		DockWidgetPluginGuiInfo.new(dockState, true, true, 300, 600, 240, 300)
-	)
-	widget.Title = title
-	return widget
-end
-
-local sidebarWidget = createWidget("RbxDiffMergeExplorer", "rbx-diff", Enum.InitialDockState.Left)
-local conflictsWidget = createWidget("RbxDiffMergeConflicts", "rbx-diff — conflicts", Enum.InitialDockState.Right)
-
--- ============================================================================
 -- Systems; the run stays alive until finalized
 -- ============================================================================
 
-local function Sidebar()
-	-- Explorer top half, properties bottom half.
-	Element("Frame", {
-		id = "sidebar",
-		Size = UDim2.new(1, 0, 1, 0),
-		tags = { "surface", "vs-border" },
-	}, function()
-		Explorer()
-		PropertiesPanel()
-	end)
-end
-
-local function ResolverSheet()
-	-- Each render surface needs its own sheet link: the wind utility classes
-	-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) plus the
-	-- resolver's VS Code-dark classes from theme.rules().
-	StyleLink(StyleSheet(function()
-		WindRules()
-		theme.rules()
-	end))
-end
-
-local Heartbeat = packages.planckRunService.Phases.Heartbeat
-
--- ECS systems self-register on the scheduler (same-phase order = add order:
--- previews render, the mirror diffs the DOM, highlights re-adorn, UI last).
+-- Same-phase run order = registration order: previews render, the mirror
+-- diffs the DOM, highlights re-adorn, focus requests resolve, UI last.
 for _, registerSystem in
 	{
 		require("@self/ecs/systems/renderPreviews"),
 		require("@self/ecs/systems/mirror"),
 		require("@self/ecs/systems/updateHighlights"),
+		require("@self/ecs/systems/focus"),
+		require("@self/ecs/systems/uiSidebar"),
+		require("@self/ecs/systems/uiConflicts"),
+		require("@self/ecs/systems/entitiesDestroy"),
 	}
 do
 	registerSystem(world, cts, scheduler)
 end
-scheduler:addSystem({
-	phase = Heartbeat,
-	system = function()
-		Portal(sidebarWidget, "rbx-diff-sidebar", function()
-			ResolverSheet()
-			Sidebar()
-		end)
-	end,
-})
-scheduler:addSystem({
-	phase = Heartbeat,
-	system = function()
-		Portal(conflictsWidget, "rbx-diff-conflicts", function()
-			ResolverSheet()
-			Element("Frame", {
-				id = "conflicts",
-				Size = UDim2.new(1, 0, 1, 0),
-				tags = { "surface", "vs-border" },
-			}, function()
-				Panel()
-			end)
-		end)
-	end,
-})
 
 -- Debug drive-through: stage everything to one side and Complete, so the
 -- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
 if args.autoSide then
-	for _, entity in ecsConflicts.all() do
+	for _, entity in conflictEntities do
 		world:set(entity, cts.Resolution, args.autoSide)
 	end
 	transport.complete()

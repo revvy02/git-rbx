@@ -5,7 +5,8 @@
 	action blue, and the VS Code semantic palette for diff states.
 ]]
 
-local StyleRule = require("@self/packages").wind.StyleRule
+local wind = require("../packages").wind
+local StyleRule = wind.StyleRule
 
 local theme = {}
 
@@ -68,6 +69,18 @@ theme.fontBold = Enum.Font.RobotoMono
 theme.textSize = 14
 theme.textSizeSmall = 12
 theme.headerSize = 12
+
+-- Each render surface needs its own sheet link: the wind utility classes
+-- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) plus the
+-- resolver's VS Code-dark classes below.
+function theme.link()
+	debug.profilebegin("rbxdiff_sheet")
+	wind.StyleLink(wind.StyleSheet(function()
+		wind.WindRules()
+		theme.rules()
+	end))
+	debug.profileend()
+end
 
 -- Resolver style classes layered on top of WindRules, after miu-wind's
 -- ThemeRules layering: role classes at priority 0, modifiers above them.

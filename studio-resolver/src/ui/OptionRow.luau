@@ -1,6 +1,6 @@
-local Element = require("../packages").miu.Instance
+local Element = require("../packages").miu.Element
 
-local theme = require("../theme")
+local theme = require("../library/theme")
 
 -- One row of the comparison card: side name + formatted value, tinted when
 -- staged, click to stage.
@@ -33,21 +33,14 @@ local function OptionRow(id: string, name: string, value: string?, color: Color3
 			id = "name",
 			Text = name,
 			Size = UDim2.new(0, 48, 0, 16),
-			BackgroundTransparency = 1,
+			tags = { "text", "text-small" },
 			TextColor3 = color,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
 		})
 		Element("TextLabel", {
 			id = "value",
 			RichText = true,
 			Text = value or "?",
-			tags = { "text-base", "auto-size-y" },
-			TextColor3 = theme.text,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextSize = theme.textSizeSmall,
-			Font = theme.font,
+			tags = { "text", "text-small", "auto-size-y" },
 			TextWrapped = true,
 		})
 	end)
