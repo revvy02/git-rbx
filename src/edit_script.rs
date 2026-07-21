@@ -84,6 +84,8 @@ pub fn compute_edit_script(
         new_dom.root_ref(),
         &old_hashes,
         &new_hashes,
+        &old_deep,
+        &new_deep,
         &mut matched,
         &mut removed_roots,
         &mut added_roots,
@@ -109,6 +111,8 @@ pub fn compute_edit_script(
             *new_root,
             &old_hashes,
             &new_hashes,
+            &old_deep,
+            &new_deep,
             &mut matched,
             &mut Vec::new(),
             &mut Vec::new(),
@@ -186,11 +190,22 @@ fn build_full_mapping(
     new_ref: Ref,
     old_hashes: &LazyHashCache,
     new_hashes: &LazyHashCache,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
     mapping: &mut HashMap<Ref, Ref>,
     removed_roots: &mut Vec<Ref>,
     added_roots: &mut Vec<Ref>,
 ) {
-    let result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
+    let result = match_children(
+        old_dom,
+        new_dom,
+        old_ref,
+        new_ref,
+        old_hashes,
+        new_hashes,
+        old_deep,
+        new_deep,
+    );
     removed_roots.extend_from_slice(&result.removed);
     added_roots.extend_from_slice(&result.added);
     for (old_child, new_child) in &result.matched {
@@ -202,6 +217,8 @@ fn build_full_mapping(
             *new_child,
             old_hashes,
             new_hashes,
+            old_deep,
+            new_deep,
             mapping,
             removed_roots,
             added_roots,
@@ -238,6 +255,8 @@ fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
         new_ref,
         ctx.old_hashes,
         ctx.new_hashes,
+        ctx.old_deep,
+        ctx.new_deep,
     );
 
     for removed in &result.removed {

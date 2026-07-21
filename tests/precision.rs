@@ -113,6 +113,29 @@ fn studio_cframe_rotation_normalization_is_ignored() {
 }
 
 #[test]
+fn reordered_duplicate_parts_match_by_tolerant_content() {
+    let duplicate = |x: f32, transparency: f32| {
+        InstanceBuilder::new("Part")
+            .with_name("P")
+            .with_property("Anchored", Variant::Bool(true))
+            .with_property("CFrame", Variant::CFrame(cframe_at(x)))
+            .with_property("Transparency", Variant::Float32(transparency))
+    };
+    let old = WeakDom::new(
+        folder("root")
+            .with_child(duplicate(0.0, 0.1))
+            .with_child(duplicate(1.0, 0.2)),
+    );
+    let new = WeakDom::new(
+        folder("root")
+            .with_child(duplicate(1.00005, 0.2))
+            .with_child(duplicate(0.00005, 0.1)),
+    );
+
+    assert!(diff_doms(&old, &new).is_empty());
+}
+
+#[test]
 fn merge_deduplication_uses_the_same_float_policy() {
     let value = 0.5_f32;
     let adjacent = f32::from_bits(value.to_bits() + 1);

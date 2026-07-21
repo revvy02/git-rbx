@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
+use crate::model_normalize::apply_model_frame;
 use crate::rigid_groups::RigidGroup;
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
@@ -105,29 +106,51 @@ pub fn stamp_conflicts(
                 .with_property("Value", Variant::Ref(conflict.base_ref)),
         );
 
-        stamp_side(
-            base,
-            entry,
-            "Ours",
-            &conflict.ours,
-            conflict.base_ref,
-            ours_dom,
-            &result.ours_matched,
-            &ours_to_base,
-        );
-        stamp_side(
-            base,
-            entry,
-            "Theirs",
-            &conflict.theirs,
-            conflict.base_ref,
-            theirs_dom,
-            &result.theirs_matched,
-            &theirs_to_base,
-        );
+        if let ConflictKind::ModelFrame { ours, theirs } = &conflict.kind {
+            stamp_model_frame_side(base, entry, "Ours", ours);
+            stamp_model_frame_side(base, entry, "Theirs", theirs);
+        } else {
+            stamp_side(
+                base,
+                entry,
+                "Ours",
+                &conflict.ours,
+                conflict.base_ref,
+                ours_dom,
+                &result.ours_matched,
+                &ours_to_base,
+            );
+            stamp_side(
+                base,
+                entry,
+                "Theirs",
+                &conflict.theirs,
+                conflict.base_ref,
+                theirs_dom,
+                &result.theirs_matched,
+                &theirs_to_base,
+            );
+        }
 
         tag_instance(base, conflict.base_ref, CONFLICT_TAG);
     }
+}
+
+fn stamp_model_frame_side(
+    base: &mut WeakDom,
+    entry: Ref,
+    side_name: &str,
+    delta: &rbx_types::CFrame,
+) {
+    base.insert(
+        entry,
+        InstanceBuilder::new("Folder")
+            .with_name(side_name)
+            .with_property(
+                "Attributes",
+                Variant::Attributes(Attributes::new().with("Delta", Variant::CFrame(*delta))),
+            ),
+    );
 }
 
 /// Materialize one side's version of the conflict under the entry folder.
@@ -198,20 +221,63 @@ fn stamp_side(
     }
 }
 
-/// Clone a branch instance for the container. Ref-valued properties are
-/// remapped into merged-DOM refs where identity allows (else nulled).
+/// Clone a branch instance for the container. Allocate all clone referents
+/// before copying properties so references between descendants keep pointing
+/// inside the snapshot. References outside the snapshot are remapped through
+/// branch identity into the live merged DOM (or nulled when identity is
+/// unknown).
 fn clone_from_branch(
     branch_dom: &WeakDom,
     branch_ref: Ref,
     branch_to_base: &HashMap<Ref, Ref>,
     deep: bool,
 ) -> InstanceBuilder {
+    let mut branch_to_clone = HashMap::new();
+    allocate_clone_refs(branch_dom, branch_ref, deep, &mut branch_to_clone);
+    build_branch_clone(
+        branch_dom,
+        branch_ref,
+        branch_to_base,
+        &branch_to_clone,
+        deep,
+    )
+}
+
+fn allocate_clone_refs(
+    branch_dom: &WeakDom,
+    branch_ref: Ref,
+    deep: bool,
+    branch_to_clone: &mut HashMap<Ref, Ref>,
+) {
+    branch_to_clone.insert(branch_ref, Ref::new());
+    if deep {
+        for &child in branch_dom.get_by_ref(branch_ref).unwrap().children() {
+            allocate_clone_refs(branch_dom, child, true, branch_to_clone);
+        }
+    }
+}
+
+fn build_branch_clone(
+    branch_dom: &WeakDom,
+    branch_ref: Ref,
+    branch_to_base: &HashMap<Ref, Ref>,
+    branch_to_clone: &HashMap<Ref, Ref>,
+    deep: bool,
+) -> InstanceBuilder {
     let inst = branch_dom.get_by_ref(branch_ref).unwrap();
-    let mut builder = InstanceBuilder::new(inst.class.as_str()).with_name(inst.name.as_str());
+    let mut builder = InstanceBuilder::new(inst.class.as_str())
+        .with_referent(branch_to_clone[&branch_ref])
+        .with_name(inst.name.as_str());
     for (name, value) in &inst.properties {
         let value = match value {
             Variant::Ref(r) if !r.is_none() => {
-                Variant::Ref(branch_to_base.get(r).copied().unwrap_or_else(Ref::none))
+                Variant::Ref(
+                    branch_to_clone
+                        .get(r)
+                        .or_else(|| branch_to_base.get(r))
+                        .copied()
+                        .unwrap_or_else(Ref::none),
+                )
             }
             other => other.clone(),
         };
@@ -221,7 +287,15 @@ fn clone_from_branch(
         let children: Vec<InstanceBuilder> = inst
             .children()
             .iter()
-            .map(|&child| clone_from_branch(branch_dom, child, branch_to_base, true))
+            .map(|&child| {
+                build_branch_clone(
+                    branch_dom,
+                    child,
+                    branch_to_base,
+                    branch_to_clone,
+                    true,
+                )
+            })
             .collect();
         builder = builder.with_children(children);
     }
@@ -248,6 +322,7 @@ fn kind_str(kind: &ConflictKind) -> &'static str {
         ConflictKind::Property { .. } => "Property",
         ConflictKind::DeleteVsEdit => "DeleteVsEdit",
         ConflictKind::MoveTarget => "MoveTarget",
+        ConflictKind::ModelFrame { .. } => "ModelFrame",
     }
 }
 
@@ -614,8 +689,14 @@ pub fn finalize(dom: &mut WeakDom) -> Result<usize> {
     }
 
     let count = entries.len();
-    for entry in entries {
-        apply_entry(dom, &entry)?;
+    // ModelFrame is deliberately last: every other resolution is expressed
+    // in the canonical content frame, then the chosen asset placement carries
+    // the complete resolved tree into world space as one operation.
+    for entry in entries.iter().filter(|entry| entry.kind != "ModelFrame") {
+        apply_entry(dom, entry)?;
+    }
+    for entry in entries.iter().filter(|entry| entry.kind == "ModelFrame") {
+        apply_entry(dom, entry)?;
     }
 
     dom.destroy(container);
@@ -761,6 +842,12 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             }
             dom.transfer_within(target, dest);
         }
+        "ModelFrame" => {
+            let delta = side_attr_cframe(dom, side_folder, "Delta").ok_or_else(|| {
+                anyhow::anyhow!("{}: {} frame has no Delta", entry.path, side_folder_name)
+            })?;
+            apply_model_frame(dom, target, &delta);
+        }
         other => bail!("{}: unknown conflict kind '{other}'", entry.path),
     }
 
@@ -816,4 +903,15 @@ fn side_attr_bool(dom: &WeakDom, side_folder: Ref, key: &str) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+fn side_attr_cframe(dom: &WeakDom, side_folder: Ref, key: &str) -> Option<rbx_types::CFrame> {
+    dom.get_by_ref(side_folder)
+        .and_then(|inst| match inst.properties.get(&"Attributes".into()) {
+            Some(Variant::Attributes(attributes)) => match attributes.get(key) {
+                Some(Variant::CFrame(value)) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
 }

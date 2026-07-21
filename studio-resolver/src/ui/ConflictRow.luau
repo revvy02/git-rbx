@@ -11,6 +11,18 @@ local world = require("../ecs/world")
 local Button = require("./Button")
 local Label = require("./Label")
 
+local function hasSpatialBounds(target: Instance): boolean
+	if target:IsA("PVInstance") then
+		return true
+	end
+	for _, descendant in target:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			return true
+		end
+	end
+	return false
+end
+
 -- One conflict — or one rigid group, which reads member state and stages
 -- every member at once.
 local function ConflictRow(entity: any)
@@ -23,7 +35,7 @@ local function ConflictRow(entity: any)
 		then conflicts.groupResolution(entity)
 		else world:get(entity, cts.Resolution) :: string?
 	local selected = world:get(cts.SelectedConflict, cts.SelectedConflict) == entity
-	local viewable = target ~= nil and target:IsA("PVInstance") and target:IsDescendantOf(workspace)
+	local viewable = target ~= nil and target:IsDescendantOf(workspace) and hasSpatialBounds(target)
 
 	local function requestFocus()
 		if viewable then

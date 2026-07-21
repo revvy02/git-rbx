@@ -123,6 +123,9 @@ function format.sideSummary(kind: string, property: string?, info: SideInfo?): s
 		if not clone then
 			return nil
 		end
+		if property == "WorldPivotData" and clone:IsA("Model") then
+			return format.formatValue(clone.WorldPivot)
+		end
 		local ok, value = format.readProperty(clone, property :: string)
 		return if ok then format.formatValue(value) else "(not scriptable)"
 	elseif kind == "MoveTarget" then
@@ -139,6 +142,8 @@ function format.sideSummary(kind: string, property: string?, info: SideInfo?): s
 			return `keep → {format.escapeRich(info.destinationPath)}`
 		end
 		return "keep"
+	elseif kind == "ModelFrame" then
+		return if info.delta then format.formatDelta(info.delta) else nil
 	end
 	return nil
 end
@@ -155,6 +160,8 @@ end
 function format.baseSummary(kind: string, base: Base): string
 	if kind == "Property" then
 		return format.formatValue(base.value)
+	elseif kind == "ModelFrame" then
+		return "canonical frame"
 	elseif kind == "MoveTarget" then
 		local parent = base.parent
 		return if parent then `→ {format.escapeRich(format.relPath(parent))}` else "→ ?"

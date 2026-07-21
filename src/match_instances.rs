@@ -5,14 +5,48 @@
 //! 2. Multi-candidate name groups with hash tiebreaking:
 //!    - Pass 1: Full property hash (exact match)
 //!    - Pass 2: No-refs hash (matches when only Ref properties changed)
-//!    - Pass 3: Positional fallback (pair remaining by sibling order)
-//! 3. Class-based fallback for remaining unmatched (catches renames)
+//!    - Pass 3: Tolerance-aware mutual-unique property match
+//!    - Pass 4: Positional fallback for indistinguishable twins
+//! 3. Content-preserving class fallback for remaining unmatched renames
 
 use rbx_dom_weak::{types::Ref, WeakDom};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
-use crate::hash::LazyHashCache;
+use crate::diff::non_ref_variants_equal;
+use crate::hash::{get_comparable_properties, DeepHashCache, LazyHashCache};
+
+const MAX_TOLERANT_PAIRWISE: usize = 100_000;
+
+fn tolerant_non_ref_properties_equal(
+    old: &rbx_dom_weak::Instance,
+    new: &rbx_dom_weak::Instance,
+) -> bool {
+    let comparable = get_comparable_properties(old.class.as_str());
+
+    for (name, old_value) in &old.properties {
+        if !comparable.contains(name.as_str()) || matches!(old_value, rbx_types::Variant::Ref(_)) {
+            continue;
+        }
+        let Some(new_value) = new.properties.get(name) else {
+            return false;
+        };
+        if matches!(new_value, rbx_types::Variant::Ref(_))
+            || !non_ref_variants_equal(old_value, new_value)
+        {
+            return false;
+        }
+    }
+    for (name, new_value) in &new.properties {
+        if !comparable.contains(name.as_str()) || matches!(new_value, rbx_types::Variant::Ref(_)) {
+            continue;
+        }
+        if !old.properties.contains_key(name) {
+            return false;
+        }
+    }
+    true
+}
 
 /// Result of matching instances between two DOMs.
 #[derive(Debug, Clone)]
@@ -35,6 +69,8 @@ pub fn match_children(
     new_parent: Ref,
     old_hashes: &LazyHashCache,
     new_hashes: &LazyHashCache,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
 ) -> MatchResult {
     let old_parent_inst = old_dom.get_by_ref(old_parent).unwrap();
     let new_parent_inst = new_dom.get_by_ref(new_parent).unwrap();
@@ -148,6 +184,7 @@ pub fn match_children(
 
         let mut pass1_count = 0usize;
         let mut pass2_count = 0usize;
+        let mut tolerant_count = 0usize;
         let mut pass3_count = 0usize;
 
         // Pass 1: Full hash match (all properties including Refs)
@@ -196,7 +233,63 @@ pub fn match_children(
             }
         }
 
-        // Pass 3: Positional fallback — pair remaining by order
+        // Pass 3: Tolerance-aware content matching. Exact hashes intentionally
+        // retain every finite bit, but model-frame normalization can introduce
+        // harmless float noise. Resolve only mutual-unique pairs here; truly
+        // identical twins remain for the positional fallback.
+        if old_candidates
+            .len()
+            .checked_mul(still_remaining.len())
+            .is_some_and(|pairs| pairs <= MAX_TOLERANT_PAIRWISE)
+        {
+            loop {
+                let remaining_old: Vec<usize> = old_candidates
+                    .iter()
+                    .copied()
+                    .filter(|&oi| !old_matched[oi])
+                    .collect();
+                let mut edges: Vec<(usize, usize)> = Vec::new();
+                let mut old_edges = vec![0usize; old_count];
+                let mut new_edges = vec![0usize; new_count];
+                for &old_idx in &remaining_old {
+                    for &new_idx in &still_remaining {
+                        let old_inst = old_dom
+                            .get_by_ref(old_children[old_idx].referent)
+                            .unwrap();
+                        let new_inst = new_dom
+                            .get_by_ref(new_children[new_idx].referent)
+                            .unwrap();
+                        if tolerant_non_ref_properties_equal(old_inst, new_inst) {
+                            edges.push((old_idx, new_idx));
+                            old_edges[old_idx] += 1;
+                            new_edges[new_idx] += 1;
+                        }
+                    }
+                }
+                let unique_pairs: Vec<(usize, usize)> = edges
+                    .iter()
+                    .copied()
+                    .filter(|(old_idx, new_idx)| {
+                        old_edges[*old_idx] == 1 && new_edges[*new_idx] == 1
+                    })
+                    .collect();
+                if unique_pairs.is_empty() {
+                    break;
+                }
+                for (old_idx, new_idx) in unique_pairs {
+                    old_matched[old_idx] = true;
+                    new_matched[new_idx] = true;
+                    matched.push((
+                        old_children[old_idx].referent,
+                        new_children[new_idx].referent,
+                    ));
+                    tolerant_count += 1;
+                }
+                still_remaining.retain(|&new_idx| !new_matched[new_idx]);
+            }
+        }
+
+        // Pass 4: Positional fallback — pair remaining indistinguishable twins
         let mut remaining_old: Vec<usize> = old_candidates
             .iter()
             .copied()
@@ -213,7 +306,7 @@ pub fn match_children(
             }
         }
 
-        if pass2_count > 0 || pass3_count > 0 {
+        if pass2_count > 0 || tolerant_count > 0 || pass3_count > 0 {
             let parent_name = old_dom
                 .get_by_ref(old_parent)
                 .map(|i| i.name.as_str())
@@ -224,14 +317,18 @@ pub fn match_children(
                 total = new_indices.len(),
                 pass1_full_hash = pass1_count,
                 pass2_no_refs = pass2_count,
-                pass3_positional = pass3_count,
+                pass3_tolerant = tolerant_count,
+                pass4_positional = pass3_count,
                 "multi-pass tiebreak"
             );
         }
     }
 
-    // ===== Class-based fallback (catches renames like "Signs" → "Sign") =====
-    // Group remaining unmatched by class and try hash-based matching
+    // ===== Class-based fallback (content-preserving renames) =====
+    // Different names are not enough evidence of shared identity. Pair only a
+    // unique old/new subtree whose deep content is identical when the root
+    // name is omitted. This catches real renames without consuming unrelated
+    // same-class additions by sibling position.
     let mut class_groups_old: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, child) in old_children.iter().enumerate() {
         if !old_matched[i] {
@@ -264,68 +361,78 @@ pub fn match_children(
             continue;
         }
 
-        // Same 3-pass tiebreaking as name groups
-        // Pass 1: Full hash
-        let mut remaining_new: Vec<usize> = Vec::new();
+        // Pass 1: full deep content, ignoring only the candidate root's name.
+        let mut old_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+        let mut new_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+        for &old_idx in &old_candidates {
+            old_by_hash
+                .entry(*old_deep
+                    .get_without_name(old_children[old_idx].referent)
+                    .as_bytes())
+                .or_default()
+                .push(old_idx);
+        }
         for &new_idx in new_indices {
-            let new_hash = new_hashes.get(new_children[new_idx].referent);
-            let new_hash_bytes = *new_hash.as_bytes();
-
-            let exact = old_candidates.iter().find(|&&oi| {
-                !old_matched[oi] && {
-                    let old_hash = old_hashes.get(old_children[oi].referent);
-                    *old_hash.as_bytes() == new_hash_bytes
-                }
-            });
-
-            if let Some(&oi) = exact {
-                old_matched[oi] = true;
-                new_matched[new_idx] = true;
-                matched.push((old_children[oi].referent, new_children[new_idx].referent));
-                class_fallback_count += 1;
-            } else {
-                remaining_new.push(new_idx);
+            new_by_hash
+                .entry(*new_deep
+                    .get_without_name(new_children[new_idx].referent)
+                    .as_bytes())
+                .or_default()
+                .push(new_idx);
+        }
+        for (hash, old_indices) in &old_by_hash {
+            let Some(new_indices) = new_by_hash.get(hash) else {
+                continue;
+            };
+            if old_indices.len() != 1 || new_indices.len() != 1 {
+                continue;
             }
+            let old_idx = old_indices[0];
+            let new_idx = new_indices[0];
+            old_matched[old_idx] = true;
+            new_matched[new_idx] = true;
+            matched.push((old_children[old_idx].referent, new_children[new_idx].referent));
+            class_fallback_count += 1;
         }
 
-        // Pass 2: No-refs hash
-        let mut still_remaining: Vec<usize> = Vec::new();
-        for new_idx in remaining_new {
-            let new_hash_nr = new_hashes.get_no_refs(new_children[new_idx].referent);
-            let new_hash_nr_bytes = *new_hash_nr.as_bytes();
-
-            let nr_match = old_candidates.iter().find(|&&oi| {
-                !old_matched[oi] && {
-                    let old_hash_nr = old_hashes.get_no_refs(old_children[oi].referent);
-                    *old_hash_nr.as_bytes() == new_hash_nr_bytes
-                }
-            });
-
-            if let Some(&oi) = nr_match {
-                old_matched[oi] = true;
-                new_matched[new_idx] = true;
-                matched.push((old_children[oi].referent, new_children[new_idx].referent));
-                class_fallback_count += 1;
-            } else {
-                still_remaining.push(new_idx);
+        // Pass 2: the same strong match while allowing Ref retargeting.
+        let mut old_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+        let mut new_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+        for &old_idx in &old_candidates {
+            if old_matched[old_idx] {
+                continue;
             }
+            old_by_hash
+                .entry(*old_deep
+                    .get_without_name_no_refs(old_children[old_idx].referent)
+                    .as_bytes())
+                .or_default()
+                .push(old_idx);
         }
-
-        // Pass 3: Positional fallback
-        let mut remaining_old: Vec<usize> = old_candidates
-            .iter()
-            .copied()
-            .filter(|&oi| !old_matched[oi])
-            .collect();
-
-        for new_idx in still_remaining {
-            if let Some(oi) = remaining_old.first().copied() {
-                remaining_old.remove(0);
-                old_matched[oi] = true;
-                new_matched[new_idx] = true;
-                matched.push((old_children[oi].referent, new_children[new_idx].referent));
-                class_fallback_count += 1;
+        for &new_idx in new_indices {
+            if new_matched[new_idx] {
+                continue;
             }
+            new_by_hash
+                .entry(*new_deep
+                    .get_without_name_no_refs(new_children[new_idx].referent)
+                    .as_bytes())
+                .or_default()
+                .push(new_idx);
+        }
+        for (hash, old_indices) in &old_by_hash {
+            let Some(new_indices) = new_by_hash.get(hash) else {
+                continue;
+            };
+            if old_indices.len() != 1 || new_indices.len() != 1 {
+                continue;
+            }
+            let old_idx = old_indices[0];
+            let new_idx = new_indices[0];
+            old_matched[old_idx] = true;
+            new_matched[new_idx] = true;
+            matched.push((old_children[old_idx].referent, new_children[new_idx].referent));
+            class_fallback_count += 1;
         }
     }
 

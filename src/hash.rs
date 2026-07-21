@@ -219,6 +219,7 @@ pub struct DeepHashCache<'a> {
     dom: &'a WeakDom,
     ignore_properties: &'a HashSet<String>,
     cache: RefCell<HashMap<Ref, Hash>>,
+    cache_no_refs: RefCell<HashMap<Ref, Hash>>,
 }
 
 impl<'a> DeepHashCache<'a> {
@@ -227,6 +228,7 @@ impl<'a> DeepHashCache<'a> {
             dom,
             ignore_properties,
             cache: RefCell::new(HashMap::new()),
+            cache_no_refs: RefCell::new(HashMap::new()),
         }
     }
 
@@ -236,6 +238,27 @@ impl<'a> DeepHashCache<'a> {
             return *hash;
         }
         self.compute(referent)
+    }
+
+    /// Get a deep hash excluding Ref-valued properties at every level.
+    pub fn get_no_refs(&self, referent: Ref) -> Hash {
+        if let Some(hash) = self.cache_no_refs.borrow().get(&referent) {
+            return *hash;
+        }
+        self.compute_no_refs(referent)
+    }
+
+    /// Hash a subtree while ignoring only the root instance's name. Children
+    /// retain their names, so equal hashes are strong evidence of a rename
+    /// rather than two unrelated same-class containers.
+    pub fn get_without_name(&self, referent: Ref) -> Hash {
+        self.compute_without_name(referent, true)
+    }
+
+    /// Root-name-independent deep hash that also excludes Ref properties.
+    /// This preserves rename identity when only references were retargeted.
+    pub fn get_without_name_no_refs(&self, referent: Ref) -> Hash {
+        self.compute_without_name(referent, false)
     }
 
     fn compute(&self, referent: Ref) -> Hash {
@@ -270,6 +293,69 @@ impl<'a> DeepHashCache<'a> {
         let hash = hasher.finalize();
         self.cache.borrow_mut().insert(referent, hash);
         hash
+    }
+
+    fn compute_no_refs(&self, referent: Ref) -> Hash {
+        let inst = self.dom.get_by_ref(referent).unwrap();
+        let comparable = get_comparable_properties(&inst.class);
+        let mut hasher = Hasher::new();
+
+        hasher.update(inst.name.as_bytes());
+        hasher.update(inst.class.as_bytes());
+
+        let mut props: Vec<_> = inst.properties.iter().collect();
+        props.sort_unstable_by_key(|(name, _)| name.as_str());
+        for (name, value) in props {
+            if self.ignore_properties.contains(name.as_str())
+                || matches!(value, Variant::Ref(_))
+                || !comparable.contains(name.as_str())
+            {
+                continue;
+            }
+            hasher.update(name.as_bytes());
+            hash_variant(self.dom, &mut hasher, value);
+        }
+
+        for &child_ref in inst.children() {
+            let child_hash = self.get_no_refs(child_ref);
+            hasher.update(child_hash.as_bytes());
+        }
+
+        let hash = hasher.finalize();
+        self.cache_no_refs.borrow_mut().insert(referent, hash);
+        hash
+    }
+
+    fn compute_without_name(&self, referent: Ref, include_refs: bool) -> Hash {
+        let inst = self.dom.get_by_ref(referent).unwrap();
+        let comparable = get_comparable_properties(&inst.class);
+        let mut hasher = Hasher::new();
+
+        hasher.update(inst.class.as_bytes());
+
+        let mut props: Vec<_> = inst.properties.iter().collect();
+        props.sort_unstable_by_key(|(name, _)| name.as_str());
+        for (name, value) in props {
+            if self.ignore_properties.contains(name.as_str())
+                || (!include_refs && matches!(value, Variant::Ref(_)))
+                || !comparable.contains(name.as_str())
+            {
+                continue;
+            }
+            hasher.update(name.as_bytes());
+            hash_variant(self.dom, &mut hasher, value);
+        }
+
+        for &child_ref in inst.children() {
+            let child_hash = if include_refs {
+                self.get(child_ref)
+            } else {
+                self.get_no_refs(child_ref)
+            };
+            hasher.update(child_hash.as_bytes());
+        }
+
+        hasher.finalize()
     }
 }
 

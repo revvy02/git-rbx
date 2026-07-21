@@ -7,7 +7,7 @@
 //! conflict is reported for a resolver to decide.
 
 use rbx_dom_weak::{types::Ref, WeakDom};
-use rbx_types::Variant;
+use rbx_types::{CFrame, Variant};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
@@ -16,7 +16,7 @@ use crate::edit_script::{apply_ops, compute_edit_script, Anchor, EditOp, EditScr
 use crate::hash::DeepHashCache;
 use crate::match_instances::get_instance_path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConflictKind {
     /// Both sides set the same property (or name) to different values.
     Property { name: String },
@@ -25,6 +25,9 @@ pub enum ConflictKind {
     /// Both sides moved the same instance to different parents, or a move
     /// destination can't be proven equal across branches.
     MoveTarget,
+    /// Both branches placed an otherwise canonical model asset in different
+    /// world frames. The deltas take canonical/base content to each side.
+    ModelFrame { ours: CFrame, theirs: CFrame },
 }
 
 #[derive(Debug)]

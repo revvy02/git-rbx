@@ -190,6 +190,61 @@ fn delete_vs_edit_finalize_both_ways() {
 }
 
 #[test]
+fn delete_vs_edit_snapshot_preserves_internal_references() {
+    let linked_model = |transparency| {
+        let front = part_with("Front", transparency);
+        let rear = part_with("Rear", 0.0);
+        let front_ref = front.referent();
+        let rear_ref = rear.referent();
+        folder("A")
+            .with_child(front)
+            .with_child(rear)
+            .with_child(
+                InstanceBuilder::new("WeldConstraint")
+                    .with_name("Joint")
+                    .with_property("Part0", Variant::Ref(front_ref))
+                    .with_property("Part1", Variant::Ref(rear_ref)),
+            )
+    };
+
+    let mut base = WeakDom::new(folder("root").with_child(linked_model(0.0)));
+    let ours = WeakDom::new(folder("root").with_child(linked_model(0.5)));
+    let theirs = WeakDom::new(folder("root"));
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+    assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
+    assert_eq!(result.conflicts[0].kind, rbx_diff::ConflictKind::DeleteVsEdit);
+
+    stamp_conflicts(&mut base, &ours, &theirs, &result);
+
+    // Exercise the same serialization boundary as the Studio resolver.
+    let mut buffer = Vec::new();
+    rbx_binary::to_writer(&mut buffer, &base, base.root().children()).unwrap();
+    let mut resolved: WeakDom = rbx_binary::from_reader(buffer.as_slice()).unwrap();
+
+    let container = find_container(&resolved).unwrap();
+    let entry = list_entries(&resolved, container)[0].entry_ref;
+    mark_entry(&mut resolved, entry, "ours").unwrap();
+    finalize(&mut resolved).unwrap();
+
+    let front = resolved
+        .descendants()
+        .find(|inst| inst.name == "Front")
+        .unwrap()
+        .referent();
+    let rear = resolved
+        .descendants()
+        .find(|inst| inst.name == "Rear")
+        .unwrap()
+        .referent();
+    let joint = resolved
+        .descendants()
+        .find(|inst| inst.name == "Joint")
+        .unwrap();
+    assert_eq!(joint.properties.get(&"Part0".into()), Some(&Variant::Ref(front)));
+    assert_eq!(joint.properties.get(&"Part1".into()), Some(&Variant::Ref(rear)));
+}
+
+#[test]
 fn stamped_file_diffs_cleanly_against_base() {
     // The container is tool metadata: diffing a conflicted file against base
     // must not report it (the conflicted property stays at base value).

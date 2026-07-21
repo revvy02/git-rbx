@@ -97,10 +97,12 @@ pub fn detect_moves(
     }
     let pass_b_count = moves.len() - pass_a_count;
 
-    // Passes C/D: the same two pairings over roots PLUS their descendants —
-    // subtrees that reappear inside the other side's added/removed content
-    // (moved into a new group, or out of a deleted folder). Claimed roots are
-    // not expanded: their contents moved with them.
+    // Passes C/D: pair an unmatched boundary root with a node inside the other
+    // side's unmatched tree. This detects content moved into a newly-added
+    // group or out of a deleted folder. We deliberately never pair two proper
+    // descendants here: identical generic Parts inside unrelated replacement
+    // containers are copies, not evidence that one was moved into the other.
+    // Claimed roots are not expanded: their contents moved with them.
     let leftover_removed: Vec<Ref> = removed
         .iter()
         .copied()
@@ -123,8 +125,17 @@ pub fn detect_moves(
             moves.push((o, n));
         };
         pair_by_exact_hash(
-            &old_pool,
+            &leftover_removed,
             &new_pool,
+            old_deep,
+            new_deep,
+            &can_old,
+            &can_new,
+            &mut on_pair,
+        );
+        pair_by_exact_hash(
+            &old_pool,
+            &leftover_added,
             old_deep,
             new_deep,
             &can_old,
@@ -145,8 +156,19 @@ pub fn detect_moves(
         pair_by_similarity(
             old_dom,
             new_dom,
-            &old_pool,
+            &leftover_removed,
             &new_pool,
+            old_deep,
+            new_deep,
+            &can_old,
+            &can_new,
+            &mut on_pair,
+        );
+        pair_by_similarity(
+            old_dom,
+            new_dom,
+            &old_pool,
+            &leftover_added,
             old_deep,
             new_deep,
             &can_old,

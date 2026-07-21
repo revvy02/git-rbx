@@ -22,11 +22,13 @@ local FOOTER_HEIGHT = 36
 -- conflicts) stay interactive. Complete lives in a pinned footer instead of
 -- after the last card.
 local function Panel()
-	local all = conflicts.list()
+	local cards = conflicts.cards()
 	debug.profilebegin("rbxdiff_panel_count")
 	local unresolved = 0
-	for _, entity in all do
-		if not world:has(entity, cts.Resolution) then
+	for _, entity in cards do
+		local members = world:get(entity, cts.Members) :: { any }?
+		local resolution = if members then conflicts.groupResolution(entity) else world:get(entity, cts.Resolution)
+		if resolution == nil then
 			unresolved += 1
 		end
 	end
@@ -45,7 +47,7 @@ local function Panel()
 			id = "title",
 			Text = if finished
 				then "MERGE COMPLETE — FILE WRITTEN"
-				else `CONFLICTS — {#all - unresolved}/{#all} DECIDED`,
+				else `CONFLICTS — {#cards - unresolved}/{#cards} DECIDED`,
 			Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
 			tags = { "header-band" },
 			TextColor3 = if finished then theme.added else theme.textMuted,
@@ -58,7 +60,7 @@ local function Panel()
 		debug.profilebegin("rbxdiff_panel_cards")
 		VirtualList({
 			id = "cards",
-			data = conflicts.cards(),
+			data = cards,
 			dimensions = Dimensions.withSpacing(Dimensions.consistentSize(CARD_HEIGHT), CARD_GAP),
 			direction = "y",
 			Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - FOOTER_HEIGHT),

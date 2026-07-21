@@ -3,12 +3,9 @@
 	| RESULT. No diff presentation here yet (badges, tints, phantoms) — this
 	is a normal explorer per state; the diff layers come back iteratively.
 
-	RESULT walks the live preview DOM. The side tabs reconstruct that side's
-	world from what the stamped state can support: ancestor chains as a
-	skeleton with the side's version of each contested subtree grafted at its
-	position in that side — a moved instance sits under that side's parent,
-	and content a side deletes simply isn't there. Content is the stamped
-	Ours/Theirs clones (the target itself for BASE).
+	All four tabs walk ECS-owned Explorer projection tables. Nodes share
+	canonical subjects but carry view-specific sources and parents, so moved,
+	deleted, cloned, or virtualized content needs no UI-side tree grafting.
 
 	Conflict ancestor chains start expanded so each contested root is visible,
 	but subtree contents start collapsed. Search temporarily forces every branch
@@ -26,46 +23,63 @@ local TreeRow = require("@self/TreeRow")
 local format = require("../library/format")
 local theme = require("../library/theme")
 
-local conflicts = require("../ecs/systems/library/conflicts")
 local cts = require("../ecs/cts")
 local world = require("../ecs/world")
 
-type SideInfo = cts.SideInfo
-type Base = cts.Base
+type ExplorerNode = cts.ExplorerNode
+type ExplorerProjection = cts.ExplorerProjection
 
 type Row = {
-	inst: Instance,
+	node: ExplorerNode,
+	source: Instance?,
+	subject: Instance?,
+	expansionKey: any,
 	label: string,
 	searchText: string,
-	className: string,
+	className: string?,
+	phantom: boolean?,
 	depth: number,
 	hasChildren: boolean,
 	isExpanded: boolean,
 }
 
-local expanded: { [Instance]: boolean } = {}
+local VIEW_ENTITIES = {
+	base = cts.ExplorerBaseView,
+	ours = cts.ExplorerOursView,
+	theirs = cts.ExplorerTheirsView,
+	result = cts.ExplorerResultView,
+}
+
+local expanded: { [any]: boolean } = {}
 local expansionGen = 0
-local seeded = false
-local lastRevealed: Instance? = nil
+local seededViews: { [any]: boolean } = {}
+local lastRevealedInstance: Instance? = nil
+local lastRevealedView: any? = nil
+local lastRevealedGeneration = -1
 local searchText = ""
 local searchGen = 0
 
-local function setExpanded(inst: Instance, isExpanded: boolean)
-	expanded[inst] = isExpanded
+local function setExpanded(key: any, isExpanded: boolean)
+	expanded[key] = isExpanded
 	expansionGen += 1
 end
 
-local function seedExpansion()
-	if seeded then
+local function expansionKey(node: ExplorerNode): any
+	return node.subject or node.source or node
+end
+
+local function seedExpansion(view: any, projection: ExplorerProjection)
+	if seededViews[view] then
 		return
 	end
-	seeded = true
+	seededViews[view] = true
 	expansionGen += 1
 	for _, target in world:query(cts.Target) do
-		local node = (target :: Instance).Parent
-		while node and node ~= game do
-			expanded[node] = true
-			node = node.Parent
+		local node = projection.index[target :: Instance]
+		node = node and node.parent
+		while node do
+			expanded[expansionKey(node)] = true
+			node = node.parent
 		end
 	end
 end
@@ -73,146 +87,56 @@ end
 -- Expand the selected instance's ancestor chain when the selection changes
 -- (e.g. clicked from the conflict list) — but only then, so a manual
 -- collapse afterwards sticks.
-local function revealSelected()
+local function revealSelected(view: any, projection: ExplorerProjection, explorerGeneration: number)
 	local inst = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
-	if inst == nil or inst == lastRevealed then
+	if
+		inst == nil
+		or (inst == lastRevealedInstance and view == lastRevealedView and explorerGeneration == lastRevealedGeneration)
+	then
 		return
 	end
-	lastRevealed = inst
+	lastRevealedInstance = inst
+	lastRevealedView = view
+	lastRevealedGeneration = explorerGeneration
 	expansionGen += 1
-	local node = inst.Parent
-	while node and node ~= game do
-		expanded[node] = true
-		node = node.Parent
+	local node = projection.index[inst]
+	node = node and node.parent
+	while node do
+		expanded[expansionKey(node)] = true
+		node = node.parent
 	end
 end
 
--- Session artifacts stay out of the tree.
-local function visibleChildren(inst: Instance): { Instance }
-	local out: { Instance } = {}
-	for _, child in inst:GetChildren() do
-		if child.ClassName ~= "Highlight" and child.Name ~= "__RbxDiffMerge" then
-			table.insert(out, child)
-		end
-	end
-	table.sort(out, function(a: Instance, b: Instance)
-		return a.Name < b.Name
-	end)
-	return out
-end
-
-local function instanceRow(inst: Instance, depth: number, hasChildren: boolean, isExpanded: boolean): Row
+local function explorerRow(node: ExplorerNode, depth: number, hasChildren: boolean, isExpanded: boolean): Row
+	local classSuffix = if node.className then `  <font color="{theme.textDimHex}">{node.className}</font>` else ""
 	return {
-		inst = inst,
-		label = `{format.escapeRich(inst.Name)}  <font color="{theme.textDimHex}">{inst.ClassName}</font>`,
-		searchText = string.lower(`{inst.Name} {inst.ClassName}`),
-		className = inst.ClassName,
+		node = node,
+		source = node.source,
+		subject = node.subject,
+		expansionKey = expansionKey(node),
+		label = `{format.escapeRich(node.name)}{classSuffix}`,
+		searchText = string.lower(`{node.name} {node.className or ""}`),
+		className = node.className,
+		phantom = node.phantom,
 		depth = depth,
 		hasChildren = hasChildren,
 		isExpanded = isExpanded,
 	}
 end
 
--- RESULT: the live preview DOM, read through the mirror's world data — the
--- walk is pure component traversal (Roots singleton + per-node Children
--- arrays the mirror system maintains). The diff layers will hang their
--- components off these entities.
-local function resultRows(forceExpanded: boolean): { Row }
+local function projectionRows(projection: ExplorerProjection, forceExpanded: boolean): { Row }
 	local rows: { Row } = {}
-	local function visit(entity: any, depth: number)
-		local inst = world:get(entity, cts.Ref) :: Instance
-		local children = (world:get(entity, cts.Children) :: { any }?) or {}
-		local isExpanded = forceExpanded or expanded[inst] == true
-		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
+	local function visit(node: ExplorerNode, depth: number)
+		local isExpanded = forceExpanded or expanded[expansionKey(node)] == true
+		table.insert(rows, explorerRow(node, depth, #node.children > 0, isExpanded))
 		if isExpanded then
-			for _, child in children do
+			for _, child in node.children do
 				visit(child, depth + 1)
 			end
 		end
 	end
-	for _, root in (world:get(cts.Roots, cts.Roots) :: { any }?) or {} do
+	for _, root in projection.roots do
 		visit(root, 0)
-	end
-	return rows
-end
-
--- BASE / OURS / THEIRS: that side's world — ancestor skeleton with the
--- side's version of each contested subtree grafted at its position in that
--- side. Content a side deletes simply is not in its tree.
-local function sideRows(tab: string, forceExpanded: boolean): { Row }
-	type SideNode = { inst: Instance, children: { SideNode }, grafts: { Instance } }
-	local nodes: { [Instance]: SideNode } = {}
-	local roots: { SideNode } = {}
-
-	local function nodeFor(inst: Instance): SideNode
-		local existing = nodes[inst]
-		if existing then
-			return existing
-		end
-		local node: SideNode = { inst = inst, children = {}, grafts = {} }
-		nodes[inst] = node
-		local parent = inst.Parent
-		if parent and parent ~= game and parent ~= workspace then
-			table.insert(nodeFor(parent).children, node)
-		else
-			table.insert(roots, node)
-		end
-		return node
-	end
-
-	for _, entity in conflicts.list() do
-		local kind = world:get(entity, cts.Kind)
-		local target = world:get(entity, cts.Target) :: Instance
-		local base = world:get(entity, cts.Base) :: Base
-		local content: Instance?
-		local sideParent: Instance?
-		if tab == "base" then
-			content = target
-			sideParent = if kind == "MoveTarget" then base.parent else target.Parent
-		else
-			local info = (
-				if tab == "ours" then world:get(entity, cts.Ours) else world:get(entity, cts.Theirs)
-			) :: SideInfo
-			content = info.clone
-			sideParent = if kind == "MoveTarget" then (info.destination or base.parent) else target.Parent
-		end
-		if content and sideParent then
-			table.insert(nodeFor(sideParent).grafts, content)
-		end
-	end
-
-	local rows: { Row } = {}
-
-	local function visitContent(inst: Instance, depth: number)
-		local children = visibleChildren(inst)
-		local isExpanded = forceExpanded or expanded[inst] == true
-		table.insert(rows, instanceRow(inst, depth, #children > 0, isExpanded))
-		if isExpanded then
-			for _, child in children do
-				visitContent(child, depth + 1)
-			end
-		end
-	end
-
-	local function visitNode(node: SideNode, depth: number)
-		local isExpanded = forceExpanded or expanded[node.inst] == true
-		table.insert(rows, instanceRow(node.inst, depth, true, isExpanded))
-		if not isExpanded then
-			return
-		end
-		for _, graft in node.grafts do
-			visitContent(graft, depth + 1)
-		end
-		table.sort(node.children, function(a: SideNode, b: SideNode)
-			return a.inst.Name < b.inst.Name
-		end)
-		for _, child in node.children do
-			visitNode(child, depth + 1)
-		end
-	end
-
-	for _, root in roots do
-		visitNode(root, 0)
 	end
 	return rows
 end
@@ -264,14 +188,17 @@ local function TabBar()
 	end)
 end
 
--- Ancestors of the selection light up as on-path.
-local function ancestorSet(): { [Instance]: boolean }
-	local set: { [Instance]: boolean } = {}
-	local node = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
-	node = node and node.Parent
-	while node and node ~= game do
+-- Ancestors of the selected occurrence light up as on-path. Following the
+-- projected parent (rather than Instance.Parent) gives move views and virtual
+-- nodes their own topology.
+local function ancestorSet(projection: ExplorerProjection): { [ExplorerNode]: boolean }
+	local set: { [any]: boolean } = {}
+	local selected = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
+	local node = selected and projection.index[selected]
+	node = node and node.parent
+	while node do
 		set[node] = true
-		node = node.Parent
+		node = node.parent
 	end
 	return set
 end
@@ -286,9 +213,10 @@ local rowsCache: { Row } = {}
 
 -- Rows render through VirtualList: only the visible index range builds
 -- TreeRows, so even a large search result stays cheap.
-local function renderRows(rows: { Row }, searching: boolean)
-	local onPath = ancestorSet()
+local function renderRows(rows: { Row }, searching: boolean, projection: ExplorerProjection)
+	local onPath = ancestorSet(projection)
 	local selectedInstance = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
+	local selectedNode = selectedInstance and projection.index[selectedInstance]
 	VirtualList({
 		id = "rows",
 		data = rows,
@@ -297,25 +225,27 @@ local function renderRows(rows: { Row }, searching: boolean)
 		Size = UDim2.new(1, 0, 1, -HEADER_HEIGHT - TABS_HEIGHT - SEARCH_HEIGHT),
 		tags = { "bg-none" },
 	}, function(row: Row, index: number)
-		local inst = row.inst
 		TreeRow({
 			id = "row",
 			depth = row.depth,
 			label = row.label,
 			className = row.className,
+			phantom = row.phantom,
 			hasChildren = row.hasChildren,
 			expanded = row.isExpanded,
-			selected = inst == selectedInstance,
-			onPath = onPath[inst] == true,
+			selected = row.node == selectedNode,
+			onPath = onPath[row.node] == true,
 			stripe = index % 2 == 0,
 			onToggle = if row.hasChildren and not searching
 				then function()
-					setExpanded(inst, not row.isExpanded)
+					setExpanded(row.expansionKey, not row.isExpanded)
 				end
 				else nil,
-			onActivated = function()
-				world:set(cts.SelectedInstance, cts.SelectedInstance, inst)
-			end,
+			onActivated = if row.source or row.subject
+				then function()
+					world:set(cts.SelectedInstance, cts.SelectedInstance, row.source or row.subject)
+				end
+				else nil,
 		})
 	end)
 end
@@ -334,9 +264,7 @@ local function rowMatches(row: Row, query: string): boolean
 end
 
 -- Rows are pre-order, so each match's nearest preceding shallower rows are
--- precisely its visual ancestors. This also works for side-tree grafts whose
--- real Instance.Parent points into the stamped conflict container rather than
--- at the skeleton parent displayed here.
+-- precisely its projected visual ancestors even when Instance.Parent differs.
 local function filterRows(rows: { Row }, query: string): { Row }
 	if query == "" then
 		return rows
@@ -429,25 +357,33 @@ local function ExplorerPanel()
 		TabBar()
 		SearchBar()
 
-		seedExpansion()
-		revealSelected()
+		local viewTab = world:get(cts.ViewTab, cts.ViewTab) :: string
+		local view = VIEW_ENTITIES[viewTab]
+		local explorerGen = (world:get(cts.ExplorerGeneration, cts.ExplorerGeneration) :: number?) or 0
+		local projection = view and world:get(view, cts.ExplorerProjection) :: ExplorerProjection?
+		-- Systems begin running as they are registered. The first UI frame can
+		-- therefore precede the mirror/projection's initial Heartbeat; an empty
+		-- panel is the correct intermediate state and avoids querying a nil view.
+		if not view or not projection or explorerGen == 0 then
+			return
+		end
+		seedExpansion(view, projection)
+		revealSelected(view, projection, explorerGen)
 
-		-- Rows are derived data: rebuilt only when the tree (MirrorGeneration),
+		-- Rows are derived data: rebuilt only when the projected tree,
 		-- expansion, or tab changes. Selection/on-path stay out of the key —
 		-- renderRows applies them per frame over the cached array.
-		local viewTab = world:get(cts.ViewTab, cts.ViewTab) :: string
-		local mirrorGen = (world:get(cts.MirrorGeneration, cts.MirrorGeneration) :: number?) or 0
 		local query = normalizedSearch()
 		local searching = query ~= ""
-		local key = `{viewTab}:{expansionGen}:{mirrorGen}:{searchGen}`
+		local key = `{viewTab}:{expansionGen}:{explorerGen}:{searchGen}`
 		if key ~= rowsCacheKey then
 			rowsCacheKey = key
 			debug.profilebegin("rbxdiff_explorer_rows")
-			local rows = if viewTab == "result" then resultRows(searching) else sideRows(viewTab, searching)
+			local rows = projectionRows(projection, searching)
 			rowsCache = filterRows(rows, query)
 			debug.profileend()
 		end
-		renderRows(rowsCache, searching)
+		renderRows(rowsCache, searching, projection)
 	end)
 end
 

@@ -67,6 +67,13 @@ pub(crate) struct Rigid {
 }
 
 impl Rigid {
+    pub(crate) fn identity() -> Self {
+        Rigid {
+            r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            p: [0.0, 0.0, 0.0],
+        }
+    }
+
     pub(crate) fn from_cframe(cf: &CFrame) -> Self {
         let row = |v: &Vector3| [v.x as f64, v.y as f64, v.z as f64];
         Rigid {

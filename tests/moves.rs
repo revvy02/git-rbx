@@ -195,6 +195,56 @@ fn plain_add_and_remove_still_work() {
 }
 
 #[test]
+fn unrelated_same_class_siblings_are_not_positional_renames() {
+    // A deleted Model and two newly-added Models share only their class. The
+    // old instance must not be consumed as a rename of the first new sibling.
+    let old = WeakDom::new(folder("root").with_child(
+        InstanceBuilder::new("Model")
+            .with_name("Gone")
+            .with_child(folder("OldOnly")),
+    ));
+    let new = WeakDom::new(
+        folder("root")
+            .with_child(
+                InstanceBuilder::new("Model")
+                    .with_name("NewOne")
+                    .with_child(InstanceBuilder::new("SpotLight").with_name("NewOnly")),
+            )
+            .with_child(
+                InstanceBuilder::new("Model")
+                    .with_name("NewTwo")
+                    .with_child(InstanceBuilder::new("Attachment").with_name("AlsoNew")),
+            ),
+    );
+
+    let diffs = diff_doms(&old, &new);
+    let (added, removed, modified, moved) = summarize(&diffs);
+    assert_eq!((added, removed, modified, moved), (2, 1, 0, 0), "{diffs:#?}");
+}
+
+#[test]
+fn descendants_of_replaced_containers_are_not_moves() {
+    // Both boundary containers are unrelated replacements. Even though each
+    // contains an identical `Shared` Part, pairing the two interior nodes as a
+    // move would cannibalize the deleted tree when a merge keeps it.
+    let old = WeakDom::new(folder("root").with_child(
+        folder("Deleted")
+            .with_child(part_with_color("Shared", 0.25))
+            .with_child(folder("OldOnly")),
+    ));
+    let new = WeakDom::new(folder("root").with_child(
+        InstanceBuilder::new("Model")
+            .with_name("Added")
+            .with_child(part_with_color("Shared", 0.25))
+            .with_child(folder("NewOnly")),
+    ));
+
+    let diffs = diff_doms(&old, &new);
+    let (added, removed, modified, moved) = summarize(&diffs);
+    assert_eq!((added, removed, modified, moved), (1, 1, 0, 0), "{diffs:#?}");
+}
+
+#[test]
 fn move_into_added_group_is_detected() {
     // The group_workspace_dupes pattern: existing instances get gathered
     // under a brand-new container. The container is added; the contents are

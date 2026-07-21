@@ -228,11 +228,13 @@ print(`rbx-diff resolver: {#records} conflict(s) in {mergedFile}`)
 -- ============================================================================
 
 -- Same-phase run order = registration order: previews render, the mirror
--- diffs the DOM, highlights re-adorn, focus requests resolve, UI last.
+-- diffs the DOM, Explorer views project it, highlights re-adorn, focus
+-- requests resolve, UI last.
 for _, registerSystem in
 	{
 		require("@self/ecs/systems/renderPreviews"),
 		require("@self/ecs/systems/mirror"),
+		require("@self/ecs/systems/explorerProjection"),
 		require("@self/ecs/systems/updateHighlights"),
 		require("@self/ecs/systems/focus"),
 		require("@self/ecs/systems/uiSidebar"),
@@ -242,7 +244,6 @@ for _, registerSystem in
 do
 	registerSystem(world, cts, scheduler)
 end
-
 -- Debug drive-through: stage everything to one side and Complete, so the
 -- whole pipeline can run headlessly (rodeo run ... -- <file> --auto ours)
 if args.autoSide then

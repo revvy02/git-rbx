@@ -327,7 +327,16 @@ pub(crate) fn build_ref_mapping(
     removed_roots: &mut Vec<Ref>,
     added_roots: &mut Vec<Ref>,
 ) {
-    let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
+    let match_result = match_children(
+        old_dom,
+        new_dom,
+        old_ref,
+        new_ref,
+        old_hashes,
+        new_hashes,
+        old_deep,
+        new_deep,
+    );
     removed_roots.extend_from_slice(&match_result.removed);
     added_roots.extend_from_slice(&match_result.added);
     for (old_child, new_child) in &match_result.matched {
@@ -367,7 +376,16 @@ fn diff_pass(
     moved_new: &HashSet<Ref>,
     diffs: &mut Vec<DiffEntry>,
 ) {
-    let match_result = match_children(old_dom, new_dom, old_ref, new_ref, old_hashes, new_hashes);
+    let match_result = match_children(
+        old_dom,
+        new_dom,
+        old_ref,
+        new_ref,
+        old_hashes,
+        new_hashes,
+        old_deep,
+        new_deep,
+    );
 
     // Report removed instances (skipping those reclassified as moves)
     for removed_ref in &match_result.removed {

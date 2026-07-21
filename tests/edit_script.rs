@@ -63,6 +63,30 @@ fn round_trip_rename() {
 }
 
 #[test]
+fn content_preserving_rename_uses_identity_op() {
+    let old = WeakDom::new(folder("root").with_child(folder("A").with_child(part("OldName"))));
+    let new = WeakDom::new(folder("root").with_child(folder("A").with_child(part("NewName"))));
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+
+    assert!(
+        script
+            .ops
+            .iter()
+            .any(|op| matches!(op, EditOp::SetName { name, .. } if name == "NewName")),
+        "{:#?}",
+        script.ops
+    );
+    assert!(
+        !script.ops.iter().any(|op| matches!(
+            op,
+            EditOp::AddSubtree { .. } | EditOp::RemoveSubtree { .. }
+        )),
+        "{:#?}",
+        script.ops
+    );
+}
+
+#[test]
 fn round_trip_move_with_edit() {
     let old = WeakDom::new(
         folder("root")

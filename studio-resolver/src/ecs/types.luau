@@ -12,6 +12,8 @@ export type Scheduler = any -- Planck.Scheduler
 
 export type SideInfo = cts.SideInfo
 export type Base = cts.Base
+export type ExplorerNode = cts.ExplorerNode
+export type ExplorerProjection = cts.ExplorerProjection
 
 export type SystemInit = (world: World, cts: Cts, scheduler: Scheduler) -> ()
 

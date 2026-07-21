@@ -11,9 +11,10 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    detect_rigid_groups, diff_doms_with_config, finalize, find_container, list_entries, mark_entry,
-    mark_entry_custom, merge_doms, normalize_model_dom_to_base, stamp_conflicts,
-    stamp_rigid_groups, ConflictKind, DiffConfig, CONTAINER_NAME,
+    apply_model_frame_to_dom, detect_rigid_groups, diff_doms_with_config, finalize, find_container,
+    list_entries, mark_entry, mark_entry_custom, merge_doms, normalize_model_dom_to_base,
+    normalize_model_merge_frames, stamp_conflicts, stamp_rigid_groups, ConflictKind, DiffConfig,
+    MergeConflict, ModelFrameDecision, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -256,25 +257,38 @@ fn cmd_merge(
     eprintln!("Loading theirs {}...", theirs_path);
     let mut theirs = load_file(theirs_path)?;
 
-    if is_model_asset_path(base_path)
+    let model_frames = if is_model_asset_path(base_path)
         && is_model_asset_path(ours_path)
         && is_model_asset_path(theirs_path)
     {
-        if let Some(normalization) = normalize_model_dom_to_base(&base, &mut ours) {
+        let frames = normalize_model_merge_frames(&base, &mut ours, &mut theirs);
+        if let Some(frames) = &frames {
             eprintln!(
                 "Normalized ours model frame from {}/{} matched parts ({})",
-                normalization.supporting_parts,
-                normalization.matched_parts,
-                format_delta(&normalization.side_delta),
+                frames.ours.supporting_parts,
+                frames.ours.matched_parts,
+                format_delta(&frames.ours.side_delta),
             );
-        }
-        if let Some(normalization) = normalize_model_dom_to_base(&base, &mut theirs) {
             eprintln!(
                 "Normalized theirs model frame from {}/{} matched parts ({})",
-                normalization.supporting_parts,
-                normalization.matched_parts,
-                format_delta(&normalization.side_delta),
+                frames.theirs.supporting_parts,
+                frames.theirs.matched_parts,
+                format_delta(&frames.theirs.side_delta),
             );
+        }
+        frames
+    } else {
+        None
+    };
+
+    if let Some(frames) = &model_frames {
+        if let ModelFrameDecision::Automatic(frame) = &frames.decision {
+            // Merge every branch in the automatically selected output frame.
+            // This also carries additions and conflict-side clones into the
+            // correct placement without special cases later.
+            apply_model_frame_to_dom(&mut base, frame);
+            apply_model_frame_to_dom(&mut ours, frame);
+            apply_model_frame_to_dom(&mut theirs, frame);
         }
     }
 
@@ -282,7 +296,22 @@ fn cmd_merge(
 
     eprintln!("Merging...");
     let start = Instant::now();
-    let result = merge_doms(&mut base, &ours, &theirs, &config);
+    let mut result = merge_doms(&mut base, &ours, &theirs, &config);
+    if let Some(frames) = &model_frames {
+        if matches!(frames.decision, ModelFrameDecision::Conflict) {
+            result.conflicts.push(MergeConflict {
+                kind: ConflictKind::ModelFrame {
+                    ours: frames.ours.side_delta,
+                    theirs: frames.theirs.side_delta,
+                },
+                base_ref: frames.target_ref,
+                path: frames.path.clone(),
+                ours: Vec::new(),
+                theirs: Vec::new(),
+            });
+            result.stats.conflicted += 1;
+        }
+    }
     eprintln!(
         "Merged in {:.2?}: {} ours + {} theirs ops applied, {} deduped, {} conflicts",
         start.elapsed(),
@@ -297,8 +326,8 @@ fn cmd_merge(
     // discovery. `rbx-diff resolve` (or Studio) consumes it.
     let mut groups = Vec::new();
     if !result.conflicts.is_empty() {
-        stamp_conflicts(&mut base, &ours, &theirs, &result);
         groups = detect_rigid_groups(&base, &result.conflicts);
+        stamp_conflicts(&mut base, &ours, &theirs, &result);
         stamp_rigid_groups(&mut base, &groups);
     }
 
@@ -334,6 +363,7 @@ fn cmd_merge(
             ConflictKind::Property { name } => format!("property '{}'", name),
             ConflictKind::DeleteVsEdit => "delete vs edit".to_string(),
             ConflictKind::MoveTarget => "conflicting move destinations".to_string(),
+            ConflictKind::ModelFrame { .. } => "model frame".to_string(),
         };
         eprintln!("  ! {} — {} (base content kept)", conflict.path, kind);
     }

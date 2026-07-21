@@ -19,7 +19,10 @@ pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValu
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use edit_script::{apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript};
 pub use merge::{merge_doms, ConflictKind, MergeConflict, MergeResult, MergeStats};
-pub use model_normalize::{normalize_model_dom_to_base, ModelNormalization};
+pub use model_normalize::{
+    apply_model_frame, apply_model_frame_to_dom, model_frames_close, normalize_model_dom_to_base,
+    normalize_model_merge_frames, ModelFrameDecision, ModelFrameMerge, ModelNormalization,
+};
 pub use rigid_groups::{detect_rigid_groups, RigidGroup};
 
 use rbx_dom_weak::WeakDom;

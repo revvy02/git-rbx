@@ -24,7 +24,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		-- Frame what the preview is actually rendering — the staged clone
 		-- when a delete-vs-edit keep side is staged, the target otherwise.
 		local target = conflicts.renderedInstance(conflictEntity)
-		local cframe, size = getBoundingBox(target :: PVInstance)
+		local cframe, size = getBoundingBox(target)
 		camera.CFrame = getIdealCameraCFrame(cframe, size, {
 			fov = camera.FieldOfView,
 			aspectRatio = camera.ViewportSize.X / camera.ViewportSize.Y,

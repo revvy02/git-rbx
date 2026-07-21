@@ -31,6 +31,17 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		end
 	end
 
+	local function eachModel(root: Instance, fn: (Model) -> ())
+		if root:IsA("Model") then
+			fn(root)
+		end
+		for _, descendant in root:GetDescendants() do
+			if descendant:IsA("Model") then
+				fn(descendant)
+			end
+		end
+	end
+
 	local function sideInfo(entry: Instance, sideName: string): SideInfo
 		local info: SideInfo = {}
 		local folder = entry:FindFirstChild(sideName)
@@ -45,6 +56,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			end
 			info.deleted = folder:GetAttribute("Deleted") :: boolean?
 			info.destinationPath = folder:GetAttribute("DestinationPath") :: string?
+			info.delta = folder:GetAttribute("Delta") :: CFrame?
 		end
 		return info
 	end
@@ -72,6 +84,8 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			local property = world:get(entity, cts.Property) :: string
 			if property == "Name" then
 				base.value = target.Name
+			elseif property == "WorldPivotData" and target:IsA("Model") then
+				base.value = target.WorldPivot
 			else
 				local ok, value = format.readProperty(target, property)
 				base.value = if ok then value else nil
@@ -84,6 +98,17 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				parts[part] = part.Transparency
 			end)
 			base.parts = parts
+		elseif kind == "ModelFrame" then
+			local frameParts: { [BasePart]: CFrame } = {}
+			local frameModels: { [Model]: CFrame } = {}
+			eachPart(target, function(part)
+				frameParts[part] = part.CFrame
+			end)
+			eachModel(target, function(model)
+				frameModels[model] = model.WorldPivot
+			end)
+			base.frameParts = frameParts
+			base.frameModels = frameModels
 		end
 		world:set(entity, cts.Base, base)
 	end
@@ -104,10 +129,16 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 					elseif staged == "theirs" then theirs.clone
 					else nil
 				local property = world:get(entity, cts.Property) :: string
-				-- Serialized-only properties can't preview (Luau can't read or
-				-- write them) — staging still works, the CLI applies them at
-				-- Complete host-side.
-				if sideClone then
+				if property == "WorldPivotData" and target:IsA("Model") then
+					-- WorldPivotData itself is serialized-only. WorldPivot exposes
+					-- the same pivot and, unlike PivotTo, assigning it deliberately
+					-- does not move descendants.
+					if sideClone and sideClone:IsA("Model") then
+						target.WorldPivot = sideClone.WorldPivot
+					elseif staged == nil and base.value ~= nil then
+						target.WorldPivot = base.value
+					end
+				elseif sideClone then
 					pcall(function()
 						(target :: any)[property] = (sideClone :: any)[property]
 					end)
@@ -146,6 +177,41 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			if clone then
 				clone.Parent = if staged == keepSide then target.Parent else keepInfo.folder
 			end
+		elseif kind == "ModelFrame" then
+			local info = if staged == "ours" then ours elseif staged == "theirs" then theirs else nil
+			local delta = if info then info.delta else CFrame.identity
+			if delta then
+				if target:IsA("PVInstance") then
+					-- PivotTo performs exactly the left-multiplied world transform
+					-- represented by Delta, including nested explicit pivots.
+					target:PivotTo(delta * target:GetPivot())
+				else
+					eachPart(target, function(part)
+						part.CFrame = delta * part.CFrame
+					end)
+					eachModel(target, function(model)
+						model.WorldPivot = delta * model.WorldPivot
+					end)
+				end
+			end
+		end
+	end
+
+	local function restoreCanonicalFrames()
+		for _, entity in conflictList do
+			if world:get(entity, cts.Kind) == "ModelFrame" then
+				local base = world:get(entity, cts.Base) :: Base
+				for part, cframe in base.frameParts or {} do
+					if part.Parent then
+						part.CFrame = cframe
+					end
+				end
+				for model, pivot in base.frameModels or {} do
+					if model.Parent then
+						model.WorldPivot = pivot
+					end
+				end
+			end
 		end
 	end
 
@@ -157,11 +223,32 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				return
 			end
 			debug.profilebegin("rbxdiff_previews")
+			local changed = false
 			for _, entity in conflictList do
 				local staged = (world:get(entity, cts.Resolution) :: string?) or "unresolved"
 				if world:get(entity, cts.Rendered) ~= staged then
+					changed = true
+					break
+				end
+			end
+			if changed then
+				-- Rebuild from the canonical frame on every decision change so
+				-- switching ours/theirs never compounds transforms. Ordinary
+				-- property/tree choices run first; ModelFrame runs last.
+				restoreCanonicalFrames()
+				for _, entity in conflictList do
+					if world:get(entity, cts.Kind) ~= "ModelFrame" then
+						applyPreview(entity)
+					end
+				end
+				for _, entity in conflictList do
+					if world:get(entity, cts.Kind) == "ModelFrame" then
+						applyPreview(entity)
+					end
+				end
+				for _, entity in conflictList do
+					local staged = (world:get(entity, cts.Resolution) :: string?) or "unresolved"
 					world:set(entity, cts.Rendered, staged)
-					applyPreview(entity)
 				end
 			end
 			debug.profileend()

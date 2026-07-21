@@ -22,6 +22,7 @@ export type SideInfo = {
 	deleted: boolean?, -- this side removes the subtree (stamped Deleted attribute)
 	destination: Instance?, -- the parent this side moves the target to
 	destinationPath: string?,
+	delta: CFrame?, -- ModelFrame: canonical/base content -> this side's world frame
 }
 
 -- Boot snapshot of the base state, restored on unpick (preview.boot).
@@ -29,6 +30,27 @@ export type Base = {
 	value: any, -- Property: value to restore
 	parent: Instance?, -- MoveTarget: parent to restore
 	parts: { [BasePart]: number }?, -- DeleteVsEdit: true transparencies
+	frameParts: { [BasePart]: CFrame }?, -- ModelFrame: canonical world transforms
+	frameModels: { [Model]: CFrame }?, -- ModelFrame: canonical pivots
+}
+
+-- One occurrence in a projected Explorer view. `subject` and `entity` retain
+-- canonical merged-DOM identity across views; `source` is the concrete version
+-- this occurrence presents. Virtual rows can omit all three.
+export type ExplorerNode = {
+	source: Instance?,
+	subject: Instance?,
+	entity: any?,
+	name: string,
+	className: string?,
+	phantom: boolean?,
+	parent: ExplorerNode?,
+	children: { ExplorerNode },
+}
+
+export type ExplorerProjection = {
+	roots: { ExplorerNode },
+	index: { [Instance]: ExplorerNode },
 }
 
 local cts = {
@@ -43,8 +65,18 @@ local cts = {
 	EntityOf = world:component(),
 	MirrorGeneration = world:component(), -- bumps when a sync changes anything; readers key caches on it
 
+	-- Explorer projections are immutable, view-scoped tree tables. Canonical
+	-- mirror entities remain shared identity; per-view parentage lives in the
+	-- table, avoiding an ECS entity and several relations for every visible row.
+	ExplorerProjection = world:component(),
+	ExplorerGeneration = world:component(),
+	ExplorerBaseView = world:entity(),
+	ExplorerOursView = world:entity(),
+	ExplorerTheirsView = world:entity(),
+	ExplorerResultView = world:entity(),
+
 	-- Conflict entities, one per stamped container entry.
-	Kind = world:component(), -- "Property" | "MoveTarget" | "DeleteVsEdit"
+	Kind = world:component(), -- "Property" | "MoveTarget" | "DeleteVsEdit" | "ModelFrame"
 	Path = world:component(), -- display path of the contested instance
 	Property = world:component(), -- Property kind: the contested property name
 	Target = world:component(), -- the contested live Instance
