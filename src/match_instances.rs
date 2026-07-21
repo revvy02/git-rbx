@@ -180,14 +180,30 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     for (i, child) in old_children.iter().enumerate() {
         name_index.entry(child.name.as_str()).or_default().push(i);
     }
+    let mut new_name_class_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for child in &new_children {
+        *new_name_class_counts
+            .entry((child.name.as_str(), child.class.as_str()))
+            .or_default() += 1;
+    }
 
     // ===== Single-candidate matching (no ambiguity) =====
     //
     // Names alone are not identities: a Model may be replaced by a Part with
     // the same name. Pairing those would emit the Part's properties onto the
     // Model (for example, Color3uint8 into Model.Color) and make an invalid
-    // Roblox file. A direct name match must therefore preserve the class.
+    // Roblox file. A direct name match must preserve the class and be unique
+    // on both sides. Old-side uniqueness alone is insufficient: if two new
+    // siblings converge on one name, whichever happens to occur first could
+    // steal the sole old sibling before content-aware matching runs.
     for (new_idx, new_child) in new_children.iter().enumerate() {
+        if new_name_class_counts
+            .get(&(new_child.name.as_str(), new_child.class.as_str()))
+            .copied()
+            != Some(1)
+        {
+            continue;
+        }
         let candidates: Vec<usize> = name_index
             .get(new_child.name.as_str())
             .map(|indices| {

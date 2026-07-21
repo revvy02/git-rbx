@@ -65,23 +65,6 @@ fn shape_distance(a: &BTreeMap<String, usize>, b: &BTreeMap<String, usize>) -> u
     distance
 }
 
-fn child_named(dom: &WeakDom, parent: Ref, name: &str) -> Option<Ref> {
-    dom.get_by_ref(parent)?
-        .children()
-        .iter()
-        .copied()
-        .find(|child| {
-            dom.get_by_ref(*child)
-                .is_some_and(|instance| instance.name == name)
-        })
-}
-
-fn path_ref(dom: &WeakDom, names: &[&str]) -> Option<Ref> {
-    names.iter().try_fold(dom.root_ref(), |parent, name| {
-        child_named(dom, parent, name)
-    })
-}
-
 fn cframe(dom: &WeakDom, referent: Ref) -> Option<CFrame> {
     match dom.get_by_ref(referent)?.properties.get(&"CFrame".into()) {
         Some(Variant::CFrame(value)) => Some(*value),
@@ -89,8 +72,10 @@ fn cframe(dom: &WeakDom, referent: Ref) -> Option<CFrame> {
     }
 }
 
-fn mesh_id(dom: &WeakDom, referent: Ref) -> Option<String> {
-    let instance = dom.get_by_ref(referent)?;
+fn mesh_id(dom: &WeakDom, referent: Ref) -> String {
+    let Some(instance) = dom.get_by_ref(referent) else {
+        return String::new();
+    };
     ["MeshContent", "MeshId", "MeshID"]
         .into_iter()
         .find_map(|name| instance.properties.get(&name.into()))
@@ -102,110 +87,63 @@ fn mesh_id(dom: &WeakDom, referent: Ref) -> Option<String> {
             Variant::ContentId(content) => Some(content.as_str().to_string()),
             _ => None,
         })
-        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
 }
 
-/// Express a part CFrame in the reference part's coordinate system. This is
-/// intentionally independent of rbx-diff's matcher and frame normalization.
-fn relative_components(reference: CFrame, part: CFrame) -> [f64; 12] {
-    let rows = |value: CFrame| {
-        [
-            [
-                value.orientation.x.x as f64,
-                value.orientation.x.y as f64,
-                value.orientation.x.z as f64,
-            ],
-            [
-                value.orientation.y.x as f64,
-                value.orientation.y.y as f64,
-                value.orientation.y.z as f64,
-            ],
-            [
-                value.orientation.z.x as f64,
-                value.orientation.z.y as f64,
-                value.orientation.z.z as f64,
-            ],
-        ]
-    };
-    let reference_rotation = rows(reference);
-    let part_rotation = rows(part);
-    let inverse = [
-        [
-            reference_rotation[0][0],
-            reference_rotation[1][0],
-            reference_rotation[2][0],
-        ],
-        [
-            reference_rotation[0][1],
-            reference_rotation[1][1],
-            reference_rotation[2][1],
-        ],
-        [
-            reference_rotation[0][2],
-            reference_rotation[1][2],
-            reference_rotation[2][2],
-        ],
-    ];
-    let position_delta = [
-        (part.position.x - reference.position.x) as f64,
-        (part.position.y - reference.position.y) as f64,
-        (part.position.z - reference.position.z) as f64,
-    ];
-    let multiply_vector = |matrix: &[[f64; 3]; 3], vector: [f64; 3]| {
-        [0, 1, 2].map(|row| {
-            matrix[row][0] * vector[0] + matrix[row][1] * vector[1] + matrix[row][2] * vector[2]
-        })
-    };
-    let position = multiply_vector(&inverse, position_delta);
-    let mut rotation = [[0.0; 3]; 3];
-    for (row, cells) in rotation.iter_mut().enumerate() {
-        for (column, cell) in cells.iter_mut().enumerate() {
-            *cell = (0..3)
-                .map(|inner| inverse[row][inner] * part_rotation[inner][column])
-                .sum();
+fn vector3_components(dom: &WeakDom, referent: Ref, property: &str) -> Option<[f64; 3]> {
+    match dom.get_by_ref(referent)?.properties.get(&property.into()) {
+        Some(Variant::Vector3(value)) => {
+            Some([value.x as f64, value.y as f64, value.z as f64])
         }
+        _ => None,
     }
-    [
-        position[0],
-        position[1],
-        position[2],
-        rotation[0][0],
-        rotation[0][1],
-        rotation[0][2],
-        rotation[1][0],
-        rotation[1][1],
-        rotation[1][2],
-        rotation[2][0],
-        rotation[2][1],
-        rotation[2][2],
-    ]
 }
 
-fn cab_mesh_layout(dom: &WeakDom, cab_name: &str) -> Option<BTreeMap<String, Vec<[f64; 12]>>> {
-    let cab = path_ref(
-        dom,
-        &["1234567", "2026_Sierra_HT", "assembly", "cab", cab_name],
-    )?;
-    let drive_seat = child_named(dom, cab, "DriveSeat")?;
-    let reference = cframe(dom, drive_seat)?;
-    let mut result: BTreeMap<String, Vec<[f64; 12]>> = BTreeMap::new();
-    let mut pending = vec![cab];
-    while let Some(referent) = pending.pop() {
-        let instance = dom.get_by_ref(referent)?;
-        pending.extend(instance.children().iter().copied());
+fn mesh_components(dom: &WeakDom, referent: Ref) -> Option<[f64; 18]> {
+    let frame = cframe(dom, referent)?;
+    let size = vector3_components(dom, referent, "Size")?;
+    let initial_size = vector3_components(dom, referent, "InitialSize")?;
+    Some([
+        frame.position.x as f64,
+        frame.position.y as f64,
+        frame.position.z as f64,
+        frame.orientation.x.x as f64,
+        frame.orientation.x.y as f64,
+        frame.orientation.x.z as f64,
+        frame.orientation.y.x as f64,
+        frame.orientation.y.y as f64,
+        frame.orientation.y.z as f64,
+        frame.orientation.z.x as f64,
+        frame.orientation.z.y as f64,
+        frame.orientation.z.z as f64,
+        size[0],
+        size[1],
+        size[2],
+        initial_size[0],
+        initial_size[1],
+        initial_size[2],
+    ])
+}
+
+/// Raw oracle independent of rbx-diff's matcher. Each structural path and
+/// content ID maps to a multiset so duplicate siblings remain order-agnostic.
+/// `InitialSize` is included because Studio uses it to scale MeshContent; a
+/// mismatched value can make a correctly sized part render gigantic.
+fn mesh_states(dom: &WeakDom) -> Option<BTreeMap<String, Vec<[f64; 18]>>> {
+    let mut result: BTreeMap<String, Vec<[f64; 18]>> = BTreeMap::new();
+    for instance in dom.descendants() {
         if instance.class.as_str() != "MeshPart" {
             continue;
         }
-        let (Some(id), Some(frame)) = (mesh_id(dom, referent), cframe(dom, referent)) else {
-            continue;
-        };
+        let referent = instance.referent();
+        let key = format!("{}|{}", instance_path(dom, referent), mesh_id(dom, referent));
         result
-            .entry(id)
+            .entry(key)
             .or_default()
-            .push(relative_components(reference, frame));
+            .push(mesh_components(dom, referent)?);
     }
-    for transforms in result.values_mut() {
-        transforms.sort_by(|left, right| {
+    for states in result.values_mut() {
+        states.sort_by(|left, right| {
             left.iter()
                 .zip(right)
                 .map(|(left, right)| left.total_cmp(right))
@@ -216,28 +154,23 @@ fn cab_mesh_layout(dom: &WeakDom, cab_name: &str) -> Option<BTreeMap<String, Vec
     Some(result)
 }
 
-fn cab_mesh_layouts_match(actual: &WeakDom, expected: &WeakDom) -> bool {
-    for cab_name in ["crew", "extended", "standard"] {
-        let (Some(actual), Some(expected)) = (
-            cab_mesh_layout(actual, cab_name),
-            cab_mesh_layout(expected, cab_name),
-        ) else {
-            return false;
-        };
-        if actual.keys().ne(expected.keys()) {
+fn mesh_states_match(actual: &WeakDom, expected: &WeakDom) -> bool {
+    let (Some(actual), Some(expected)) = (mesh_states(actual), mesh_states(expected)) else {
+        return false;
+    };
+    if actual.keys().ne(expected.keys()) {
+        return false;
+    }
+    for (key, actual_states) in actual {
+        let expected_states = &expected[&key];
+        if actual_states.len() != expected_states.len() {
             return false;
         }
-        for (mesh_id, actual_transforms) in actual {
-            let expected_transforms = &expected[&mesh_id];
-            if actual_transforms.len() != expected_transforms.len() {
-                return false;
-            }
-            for (actual, expected) in actual_transforms.iter().zip(expected_transforms) {
-                for component in 0..12 {
-                    let tolerance = if component < 3 { 0.01 } else { 1e-4 };
-                    if (actual[component] - expected[component]).abs() > tolerance {
-                        return false;
-                    }
+        for (actual, expected) in actual_states.iter().zip(expected_states) {
+            for component in 0..18 {
+                let tolerance = if component < 3 { 0.01 } else { 1e-4 };
+                if (actual[component] - expected[component]).abs() > tolerance {
+                    return false;
                 }
             }
         }
@@ -349,7 +282,7 @@ fn human_merge_is_reachable_from_binary_conflict_decisions() {
         normalize_model_dom_to_base(&expected, &mut candidate)
             .expect("candidate should have a dominant model frame");
         if diff_doms(&expected, &candidate).is_empty()
-            && cab_mesh_layouts_match(&candidate, &expected)
+            && mesh_states_match(&candidate, &expected)
         {
             exact_matches.push(mask);
         }

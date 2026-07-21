@@ -29,6 +29,14 @@ fn mesh_part(mesh_id: &str, x: f32) -> InstanceBuilder {
         )
 }
 
+fn sized_mesh_part(name: &str, mesh_id: &str, size: Vector3) -> InstanceBuilder {
+    InstanceBuilder::new("MeshPart")
+        .with_name(name)
+        .with_property("MeshContent", Variant::Content(Content::from_uri(mesh_id)))
+        .with_property("Size", Variant::Vector3(size))
+        .with_property("InitialSize", Variant::Vector3(size))
+}
+
 fn mesh_positions(dom: &WeakDom) -> std::collections::BTreeMap<String, f32> {
     dom.descendants()
         .filter(|instance| instance.class.as_str() == "MeshPart")
@@ -251,6 +259,40 @@ fn reordered_moved_meshparts_keep_geometry_attached_to_placement() {
     apply_edit_script(&mut old, &new, &script);
 
     assert_eq!(mesh_positions(&old), mesh_positions(&new));
+}
+
+#[test]
+fn rename_into_duplicate_name_waits_for_content_matching() {
+    let small = Vector3::new(0.34, 0.31, 0.57);
+    let large = Vector3::new(8.20, 6.16, 8.39);
+    let mut old = WeakDom::new(
+        folder("root")
+            .with_child(sized_mesh_part("Paint", "rbxassetid://2", large))
+            .with_child(sized_mesh_part("paint:body", "rbxassetid://1", small)),
+    );
+    // The renamed small mesh intentionally occurs first. An old-side-only
+    // name fast path used to pair it with the large old `Paint` instance.
+    let new = WeakDom::new(
+        folder("root")
+            .with_child(sized_mesh_part("Paint", "rbxassetid://1", small))
+            .with_child(sized_mesh_part("Paint", "rbxassetid://2", large)),
+    );
+
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+    apply_edit_script(&mut old, &new, &script);
+
+    assert!(diff_doms(&old, &new).is_empty());
+    for instance in old
+        .descendants()
+        .filter(|instance| instance.class.as_str() == "MeshPart")
+    {
+        assert_eq!(
+            instance.properties.get(&"Size".into()),
+            instance.properties.get(&"InitialSize".into()),
+            "{} inherited another mesh's InitialSize",
+            instance.name
+        );
+    }
 }
 
 #[test]

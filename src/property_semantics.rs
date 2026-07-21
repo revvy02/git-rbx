@@ -59,7 +59,17 @@ const CONTENT_PROPERTY_EXCEPTIONS: &[(&str, &[&str])] = &[
     ),
     (
         "MeshPart",
-        &["MeshContent", "TextureContent", "MeshId", "TextureID"],
+        &[
+            "MeshContent",
+            "TextureContent",
+            "MeshId",
+            "TextureID",
+            // Studio uses this persisted source-mesh extent to scale the
+            // rendered mesh from `Size`. Keeping MeshContent but borrowing a
+            // different part's InitialSize produces visually gigantic or tiny
+            // geometry even though MeshId, Size, and CFrame all look correct.
+            "InitialSize",
+        ],
     ),
     ("SpecialMesh", &["MeshId", "TextureId"]),
     ("Terrain", &["SmoothGrid", "Decoration"]),
@@ -194,5 +204,6 @@ mod tests {
         let properties = get_authored_properties("MeshPart");
         assert!(properties.contains("MeshContent"));
         assert!(properties.contains("TextureContent"));
+        assert!(properties.contains("InitialSize"));
     }
 }
