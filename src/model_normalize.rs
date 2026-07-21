@@ -52,8 +52,9 @@ use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::{CFrame, Variant};
 use std::collections::HashSet;
 
+use crate::dom_utils::{class_is_a, lowest_common_ancestor};
 use crate::hash::{DeepHashCache, LazyHashCache};
-use crate::match_instances::{get_instance_path, match_children};
+use crate::match_instances::{get_instance_path, Matcher};
 use crate::rigid_groups::Rigid;
 
 const MIN_SUPPORT: usize = 2;
@@ -89,59 +90,16 @@ pub struct ModelFrameMerge {
     pub decision: ModelFrameDecision,
 }
 
-fn class_is_a(class_name: &str, ancestor: &str) -> bool {
-    let Ok(database) = rbx_reflection_database::get() else {
-        return false;
-    };
-    let mut current = class_name;
-    loop {
-        if current == ancestor {
-            return true;
-        }
-        let Some(class) = database.classes.get(current) else {
-            return false;
-        };
-        let Some(parent) = class.superclass.as_ref() else {
-            return false;
-        };
-        current = parent;
-    }
-}
-
 fn collect_matches(
-    base: &WeakDom,
-    side: &WeakDom,
+    matcher: &Matcher<'_>,
     base_parent: Ref,
     side_parent: Ref,
-    base_hashes: &LazyHashCache,
-    side_hashes: &LazyHashCache,
-    base_deep: &DeepHashCache,
-    side_deep: &DeepHashCache,
     matches: &mut Vec<(Ref, Ref)>,
 ) {
-    let result = match_children(
-        base,
-        side,
-        base_parent,
-        side_parent,
-        base_hashes,
-        side_hashes,
-        base_deep,
-        side_deep,
-    );
-    for (base_ref, side_ref) in result.matched {
+    let result = matcher.match_children(base_parent, side_parent);
+    for &(base_ref, side_ref) in &result.matched {
         matches.push((base_ref, side_ref));
-        collect_matches(
-            base,
-            side,
-            base_ref,
-            side_ref,
-            base_hashes,
-            side_hashes,
-            base_deep,
-            side_deep,
-            matches,
-        );
+        collect_matches(matcher, base_ref, side_ref, matches);
     }
 }
 
@@ -151,41 +109,6 @@ fn cframe_property(dom: &WeakDom, referent: Ref) -> Option<CFrame> {
         Some(Variant::CFrame(cframe)) => Some(*cframe),
         _ => None,
     }
-}
-
-fn ancestors(dom: &WeakDom, mut referent: Ref) -> Vec<Ref> {
-    let mut result = vec![referent];
-    while let Some(instance) = dom.get_by_ref(referent) {
-        let parent = instance.parent();
-        if parent.is_none() {
-            break;
-        }
-        result.push(parent);
-        referent = parent;
-    }
-    result
-}
-
-fn lowest_common_ancestor(dom: &WeakDom, referents: &[Ref]) -> Ref {
-    let mut result = referents[0];
-    for &other in &referents[1..] {
-        let result_ancestors = ancestors(dom, result);
-        let mut candidate = other;
-        loop {
-            if result_ancestors.contains(&candidate) {
-                result = candidate;
-                break;
-            }
-            let Some(parent) = dom.get_by_ref(candidate).map(|instance| instance.parent()) else {
-                break;
-            };
-            if parent.is_none() {
-                break;
-            }
-            candidate = parent;
-        }
-    }
-    result
 }
 
 fn serialized_asset_root(dom: &WeakDom, mut referent: Ref) -> Ref {
@@ -206,18 +129,16 @@ fn dominant_delta(base: &WeakDom, side: &WeakDom) -> Option<(Rigid, usize, Vec<R
     let ignored = HashSet::new();
     let base_deep = DeepHashCache::new(base, &ignored);
     let side_deep = DeepHashCache::new(side, &ignored);
-    let mut matches = Vec::new();
-    collect_matches(
+    let matcher = Matcher::new(
         base,
         side,
-        base.root_ref(),
-        side.root_ref(),
         &base_hashes,
         &side_hashes,
         &base_deep,
         &side_deep,
-        &mut matches,
     );
+    let mut matches = Vec::new();
+    collect_matches(&matcher, base.root_ref(), side.root_ref(), &mut matches);
 
     struct Cluster {
         delta: Rigid,

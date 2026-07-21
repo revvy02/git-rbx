@@ -10,11 +10,13 @@
 //! 3. Content-preserving class fallback for remaining unmatched renames
 
 use rbx_dom_weak::{types::Ref, WeakDom};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use tracing::{debug, info};
 
-use crate::diff::non_ref_variants_equal;
 use crate::hash::{get_comparable_properties, DeepHashCache, LazyHashCache};
+use crate::value_compare::non_ref_variants_equal;
 
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
 
@@ -59,19 +61,78 @@ pub struct MatchResult {
     pub added: Vec<Ref>,
 }
 
-/// Match children of two parent instances.
-/// Returns matched pairs, removed (old only), and added (new only).
-/// Hashes are computed lazily - only when there are multiple candidates with the same name.
-pub fn match_children(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
-    old_parent: Ref,
-    new_parent: Ref,
-    old_hashes: &LazyHashCache,
-    new_hashes: &LazyHashCache,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
-) -> MatchResult {
+/// Shared matching context for one DOM pair. Besides removing cache plumbing
+/// from every recursive call, this memoizes each parent-pair result so mapping,
+/// diff, and edit-script walks reuse the exact same identity decisions.
+pub(crate) struct Matcher<'a> {
+    old_dom: &'a WeakDom,
+    new_dom: &'a WeakDom,
+    old_hashes: &'a LazyHashCache<'a>,
+    new_hashes: &'a LazyHashCache<'a>,
+    old_deep: &'a DeepHashCache<'a>,
+    new_deep: &'a DeepHashCache<'a>,
+    child_matches: RefCell<HashMap<(Ref, Ref), Rc<MatchResult>>>,
+}
+
+impl<'a> Matcher<'a> {
+    pub(crate) fn new(
+        old_dom: &'a WeakDom,
+        new_dom: &'a WeakDom,
+        old_hashes: &'a LazyHashCache<'a>,
+        new_hashes: &'a LazyHashCache<'a>,
+        old_deep: &'a DeepHashCache<'a>,
+        new_deep: &'a DeepHashCache<'a>,
+    ) -> Self {
+        Self {
+            old_dom,
+            new_dom,
+            old_hashes,
+            new_hashes,
+            old_deep,
+            new_deep,
+            child_matches: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn match_children(&self, old_parent: Ref, new_parent: Ref) -> Rc<MatchResult> {
+        let key = (old_parent, new_parent);
+        if let Some(result) = self.child_matches.borrow().get(&key) {
+            return Rc::clone(result);
+        }
+        let result = Rc::new(compute_child_matches(self, old_parent, new_parent));
+        self.child_matches
+            .borrow_mut()
+            .insert(key, Rc::clone(&result));
+        result
+    }
+
+    pub(crate) fn old_dom(&self) -> &'a WeakDom {
+        self.old_dom
+    }
+
+    pub(crate) fn new_dom(&self) -> &'a WeakDom {
+        self.new_dom
+    }
+
+    pub(crate) fn old_deep(&self) -> &'a DeepHashCache<'a> {
+        self.old_deep
+    }
+
+    pub(crate) fn new_deep(&self) -> &'a DeepHashCache<'a> {
+        self.new_deep
+    }
+}
+
+/// Match children of two parent instances. Hashes are computed lazily only
+/// when multiple candidates share a name.
+fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref) -> MatchResult {
+    let old_dom = matcher.old_dom;
+    let new_dom = matcher.new_dom;
+    let old_hashes = matcher.old_hashes;
+    let new_hashes = matcher.new_hashes;
+    let old_deep = matcher.old_deep;
+    let new_deep = matcher.new_deep;
+
     let old_parent_inst = old_dom.get_by_ref(old_parent).unwrap();
     let new_parent_inst = new_dom.get_by_ref(new_parent).unwrap();
 
@@ -253,12 +314,8 @@ pub fn match_children(
                 let mut new_edges = vec![0usize; new_count];
                 for &old_idx in &remaining_old {
                     for &new_idx in &still_remaining {
-                        let old_inst = old_dom
-                            .get_by_ref(old_children[old_idx].referent)
-                            .unwrap();
-                        let new_inst = new_dom
-                            .get_by_ref(new_children[new_idx].referent)
-                            .unwrap();
+                        let old_inst = old_dom.get_by_ref(old_children[old_idx].referent).unwrap();
+                        let new_inst = new_dom.get_by_ref(new_children[new_idx].referent).unwrap();
                         if tolerant_non_ref_properties_equal(old_inst, new_inst) {
                             edges.push((old_idx, new_idx));
                             old_edges[old_idx] += 1;
@@ -366,17 +423,21 @@ pub fn match_children(
         let mut new_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
         for &old_idx in &old_candidates {
             old_by_hash
-                .entry(*old_deep
-                    .get_without_name(old_children[old_idx].referent)
-                    .as_bytes())
+                .entry(
+                    *old_deep
+                        .get_without_name(old_children[old_idx].referent)
+                        .as_bytes(),
+                )
                 .or_default()
                 .push(old_idx);
         }
         for &new_idx in new_indices {
             new_by_hash
-                .entry(*new_deep
-                    .get_without_name(new_children[new_idx].referent)
-                    .as_bytes())
+                .entry(
+                    *new_deep
+                        .get_without_name(new_children[new_idx].referent)
+                        .as_bytes(),
+                )
                 .or_default()
                 .push(new_idx);
         }
@@ -391,7 +452,10 @@ pub fn match_children(
             let new_idx = new_indices[0];
             old_matched[old_idx] = true;
             new_matched[new_idx] = true;
-            matched.push((old_children[old_idx].referent, new_children[new_idx].referent));
+            matched.push((
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+            ));
             class_fallback_count += 1;
         }
 
@@ -403,9 +467,11 @@ pub fn match_children(
                 continue;
             }
             old_by_hash
-                .entry(*old_deep
-                    .get_without_name_no_refs(old_children[old_idx].referent)
-                    .as_bytes())
+                .entry(
+                    *old_deep
+                        .get_without_name_no_refs(old_children[old_idx].referent)
+                        .as_bytes(),
+                )
                 .or_default()
                 .push(old_idx);
         }
@@ -414,9 +480,11 @@ pub fn match_children(
                 continue;
             }
             new_by_hash
-                .entry(*new_deep
-                    .get_without_name_no_refs(new_children[new_idx].referent)
-                    .as_bytes())
+                .entry(
+                    *new_deep
+                        .get_without_name_no_refs(new_children[new_idx].referent)
+                        .as_bytes(),
+                )
                 .or_default()
                 .push(new_idx);
         }
@@ -431,7 +499,10 @@ pub fn match_children(
             let new_idx = new_indices[0];
             old_matched[old_idx] = true;
             new_matched[new_idx] = true;
-            matched.push((old_children[old_idx].referent, new_children[new_idx].referent));
+            matched.push((
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+            ));
             class_fallback_count += 1;
         }
     }

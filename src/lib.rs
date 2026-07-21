@@ -2,6 +2,7 @@
 
 mod conflict_file;
 mod diff;
+mod dom_utils;
 mod edit_script;
 mod hash;
 mod match_instances;
@@ -10,6 +11,7 @@ mod model_normalize;
 mod move_detect;
 pub mod output;
 mod rigid_groups;
+mod value_compare;
 
 pub use conflict_file::{
     finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_conflicts,

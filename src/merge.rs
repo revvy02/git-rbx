@@ -445,7 +445,7 @@ fn values_equal(
                 _ => false,
             }
         }
-        (Some(va), Some(vb)) => crate::diff::non_ref_variants_equal(va, vb),
+        (Some(va), Some(vb)) => crate::value_compare::non_ref_variants_equal(va, vb),
         _ => false,
     }
 }

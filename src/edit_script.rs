@@ -18,7 +18,7 @@ use tracing::info;
 
 use crate::diff::{is_studio_artifact, raw_property_changes, DiffConfig};
 use crate::hash::{DeepHashCache, LazyHashCache};
-use crate::match_instances::match_children;
+use crate::match_instances::Matcher;
 use crate::move_detect::detect_moves;
 
 /// Where a parent lives when an op needs one: an instance that exists in the
@@ -72,20 +72,23 @@ pub fn compute_edit_script(
     let new_hashes = LazyHashCache::new(new_dom);
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
     let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
+    let matcher = Matcher::new(
+        old_dom,
+        new_dom,
+        &old_hashes,
+        &new_hashes,
+        &old_deep,
+        &new_deep,
+    );
 
     // Full (unpruned) match walk: identity for every matched instance
     let mut matched = HashMap::new();
     let mut removed_roots = Vec::new();
     let mut added_roots = Vec::new();
     build_full_mapping(
-        old_dom,
-        new_dom,
+        &matcher,
         old_dom.root_ref(),
         new_dom.root_ref(),
-        &old_hashes,
-        &new_hashes,
-        &old_deep,
-        &new_deep,
         &mut matched,
         &mut removed_roots,
         &mut added_roots,
@@ -105,14 +108,9 @@ pub fn compute_edit_script(
     for (old_root, new_root) in &moves {
         matched.insert(*old_root, *new_root);
         build_full_mapping(
-            old_dom,
-            new_dom,
+            &matcher,
             *old_root,
             *new_root,
-            &old_hashes,
-            &new_hashes,
-            &old_deep,
-            &new_deep,
             &mut matched,
             &mut Vec::new(),
             &mut Vec::new(),
@@ -120,6 +118,8 @@ pub fn compute_edit_script(
     }
 
     let mut ops = Vec::new();
+    let reverse_matched: HashMap<Ref, Ref> =
+        matched.iter().map(|(old, new)| (*new, *old)).collect();
 
     // Move ops first in new-side depth order (parents settle before children),
     // so applying in script order can never transfer into an unsettled spot.
@@ -135,18 +135,13 @@ pub fn compute_edit_script(
             .unwrap_or_else(Ref::none);
         ops.push(EditOp::Move {
             old_ref: *old_root,
-            new_parent: anchor_for(new_parent, &matched),
+            new_parent: anchor_for(new_parent, &reverse_matched),
         });
     }
 
     // Structural + property ops from the matched walk
     let ctx = BuildCtx {
-        old_dom,
-        new_dom,
-        old_hashes: &old_hashes,
-        new_hashes: &new_hashes,
-        old_deep: &old_deep,
-        new_deep: &new_deep,
+        matcher: &matcher,
         config,
         matched: &matched,
         moved_old: &moved_old,
@@ -171,12 +166,7 @@ pub fn compute_edit_script(
 }
 
 struct BuildCtx<'a> {
-    old_dom: &'a WeakDom,
-    new_dom: &'a WeakDom,
-    old_hashes: &'a LazyHashCache<'a>,
-    new_hashes: &'a LazyHashCache<'a>,
-    old_deep: &'a DeepHashCache<'a>,
-    new_deep: &'a DeepHashCache<'a>,
+    matcher: &'a Matcher<'a>,
     config: &'a DiffConfig,
     matched: &'a HashMap<Ref, Ref>,
     moved_old: &'a HashSet<Ref>,
@@ -184,41 +174,22 @@ struct BuildCtx<'a> {
 }
 
 fn build_full_mapping(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    matcher: &Matcher<'_>,
     old_ref: Ref,
     new_ref: Ref,
-    old_hashes: &LazyHashCache,
-    new_hashes: &LazyHashCache,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
     mapping: &mut HashMap<Ref, Ref>,
     removed_roots: &mut Vec<Ref>,
     added_roots: &mut Vec<Ref>,
 ) {
-    let result = match_children(
-        old_dom,
-        new_dom,
-        old_ref,
-        new_ref,
-        old_hashes,
-        new_hashes,
-        old_deep,
-        new_deep,
-    );
+    let result = matcher.match_children(old_ref, new_ref);
     removed_roots.extend_from_slice(&result.removed);
     added_roots.extend_from_slice(&result.added);
     for (old_child, new_child) in &result.matched {
         mapping.insert(*old_child, *new_child);
         build_full_mapping(
-            old_dom,
-            new_dom,
+            matcher,
             *old_child,
             *new_child,
-            old_hashes,
-            new_hashes,
-            old_deep,
-            new_deep,
             mapping,
             removed_roots,
             added_roots,
@@ -237,34 +208,25 @@ fn new_side_depth(new_dom: &WeakDom, mut referent: Ref) -> usize {
 
 /// Address a new-DOM instance as an apply-time parent: through the identity
 /// mapping when it matched, otherwise it must be part of an added subtree.
-fn anchor_for(new_ref: Ref, matched: &HashMap<Ref, Ref>) -> Anchor {
-    // matched is old→new; reverse lookup (small n of anchors, built rarely)
-    for (old, new) in matched {
-        if *new == new_ref {
-            return Anchor::Old(*old);
-        }
-    }
-    Anchor::Added(new_ref)
+fn anchor_for(new_ref: Ref, reverse_matched: &HashMap<Ref, Ref>) -> Anchor {
+    reverse_matched
+        .get(&new_ref)
+        .copied()
+        .map(Anchor::Old)
+        .unwrap_or(Anchor::Added(new_ref))
 }
 
 fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
-    let result = match_children(
-        ctx.old_dom,
-        ctx.new_dom,
-        old_ref,
-        new_ref,
-        ctx.old_hashes,
-        ctx.new_hashes,
-        ctx.old_deep,
-        ctx.new_deep,
-    );
+    let old_dom = ctx.matcher.old_dom();
+    let new_dom = ctx.matcher.new_dom();
+    let result = ctx.matcher.match_children(old_ref, new_ref);
 
     for removed in &result.removed {
         if ctx.moved_old.contains(removed) {
             continue;
         }
-        if let Some(inst) = ctx.old_dom.get_by_ref(*removed) {
-            if is_studio_artifact(ctx.old_dom, old_ref, inst) {
+        if let Some(inst) = old_dom.get_by_ref(*removed) {
+            if is_studio_artifact(old_dom, old_ref, inst) {
                 continue;
             }
         }
@@ -275,8 +237,8 @@ fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
         if ctx.moved_new.contains(added) {
             continue;
         }
-        if let Some(inst) = ctx.new_dom.get_by_ref(*added) {
-            if is_studio_artifact(ctx.new_dom, new_ref, inst) {
+        if let Some(inst) = new_dom.get_by_ref(*added) {
+            if is_studio_artifact(new_dom, new_ref, inst) {
                 continue;
             }
         }
@@ -289,7 +251,7 @@ fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
     for (old_child, new_child) in &result.matched {
         // Pruning is safe here: mapping is already complete, and identical
         // subtrees need no ops.
-        if ctx.old_deep.get(*old_child) == ctx.new_deep.get(*new_child) {
+        if ctx.matcher.old_deep().get(*old_child) == ctx.matcher.new_deep().get(*new_child) {
             continue;
         }
         emit_instance_edits(ctx, *old_child, *new_child, ops);
@@ -298,8 +260,10 @@ fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
 }
 
 fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
-    let old_inst = ctx.old_dom.get_by_ref(old_ref).unwrap();
-    let new_inst = ctx.new_dom.get_by_ref(new_ref).unwrap();
+    let old_dom = ctx.matcher.old_dom();
+    let new_dom = ctx.matcher.new_dom();
+    let old_inst = old_dom.get_by_ref(old_ref).unwrap();
+    let new_inst = new_dom.get_by_ref(new_ref).unwrap();
 
     if old_inst.name != new_inst.name {
         ops.push(EditOp::SetName {
@@ -309,14 +273,14 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
     }
 
     for change in raw_property_changes(
-        ctx.old_dom,
-        ctx.new_dom,
+        old_dom,
+        new_dom,
         old_ref,
         new_ref,
         ctx.config,
         ctx.matched,
-        ctx.old_deep,
-        ctx.new_deep,
+        ctx.matcher.old_deep(),
+        ctx.matcher.new_deep(),
     ) {
         ops.push(EditOp::SetProperty {
             old_ref,

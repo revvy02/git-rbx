@@ -21,6 +21,7 @@ use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::{CFrame, Matrix3, Variant, Vector3};
 use std::collections::{HashMap, HashSet};
 
+use crate::dom_utils::{class_is_a, is_descendant_or_same, lowest_common_ancestor};
 use crate::edit_script::EditOp;
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeConflict};
@@ -151,25 +152,6 @@ fn spatial_cframe(value: &Variant) -> Option<&CFrame> {
     }
 }
 
-fn class_is_a(class_name: &str, ancestor: &str) -> bool {
-    let Ok(database) = rbx_reflection_database::get() else {
-        return false;
-    };
-    let mut current = class_name;
-    loop {
-        if current == ancestor {
-            return true;
-        }
-        let Some(class) = database.classes.get(current) else {
-            return false;
-        };
-        let Some(parent) = class.superclass.as_ref() else {
-            return false;
-        };
-        current = parent;
-    }
-}
-
 fn spatial_kind(class_name: &str, property_name: &str) -> Option<SpatialKind> {
     match property_name {
         "CFrame" if class_is_a(class_name, "BasePart") => Some(SpatialKind::BasePart),
@@ -218,54 +200,6 @@ fn spatial_conflict(
 
 fn same_deltas(a: &SpatialConflict, b: &SpatialConflict) -> bool {
     Rigid::close(&a.delta_ours, &b.delta_ours) && Rigid::close(&a.delta_theirs, &b.delta_theirs)
-}
-
-fn ancestors(dom: &WeakDom, mut r: Ref) -> Vec<Ref> {
-    let mut chain = vec![r];
-    while let Some(inst) = dom.get_by_ref(r) {
-        let parent = inst.parent();
-        if parent.is_none() {
-            break;
-        }
-        chain.push(parent);
-        r = parent;
-    }
-    chain
-}
-
-fn lowest_common_ancestor(dom: &WeakDom, refs: &[Ref]) -> Ref {
-    let mut lca = refs[0];
-    for &other in &refs[1..] {
-        let chain: HashSet<Ref> = ancestors(dom, lca).into_iter().collect();
-        let mut node = other;
-        loop {
-            if chain.contains(&node) {
-                lca = node;
-                break;
-            }
-            match dom.get_by_ref(node).map(|i| i.parent()) {
-                Some(parent) if !parent.is_none() => node = parent,
-                _ => break,
-            }
-        }
-    }
-    lca
-}
-
-fn is_descendant_or_same(dom: &WeakDom, mut node: Ref, ancestor: Ref) -> bool {
-    loop {
-        if node == ancestor {
-            return true;
-        }
-        let Some(instance) = dom.get_by_ref(node) else {
-            return false;
-        };
-        let parent = instance.parent();
-        if parent.is_none() {
-            return false;
-        }
-        node = parent;
-    }
 }
 
 fn build_group(
