@@ -11,9 +11,10 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, info_span};
 
-use crate::hash::{get_comparable_properties, DeepHashCache, LazyHashCache};
+use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
 use crate::move_detect::detect_moves;
+use crate::property_semantics::get_authored_properties;
 use crate::value_compare::non_ref_variants_equal;
 
 /// A single difference found between two DOMs.
@@ -707,9 +708,9 @@ fn diff_properties(
 }
 
 /// Check if a property should be compared (is meaningful for diffing).
-/// Uses the shared comparable properties set from hash.rs.
+/// Uses the shared authored-property policy from property_semantics.rs.
 fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
-    get_comparable_properties(class_name).contains(prop_name)
+    get_authored_properties(class_name).contains(prop_name)
 }
 
 /// Studio serializes every service under the DataModel root on save, plus

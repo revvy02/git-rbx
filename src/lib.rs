@@ -10,6 +10,7 @@ mod merge;
 mod model_normalize;
 mod move_detect;
 pub mod output;
+mod property_semantics;
 mod rigid_groups;
 mod value_compare;
 

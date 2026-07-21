@@ -3,7 +3,7 @@
 
 use rbx_diff::{diff_doms, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::Variant;
+use rbx_types::{Content, Variant};
 
 fn folder(name: &str) -> InstanceBuilder {
     InstanceBuilder::new("Folder").with_name(name)
@@ -14,6 +14,14 @@ fn part(name: &str) -> InstanceBuilder {
         .with_name(name)
         .with_property("Anchored", Variant::Bool(true))
         .with_property("Transparency", Variant::Float32(0.0))
+}
+
+fn mesh_part(name: &str, mesh_id: &str) -> InstanceBuilder {
+    InstanceBuilder::new("MeshPart")
+        .with_name(name)
+        .with_property("Anchored", Variant::Bool(true))
+        .with_property("Transparency", Variant::Float32(0.0))
+        .with_property("MeshContent", Variant::Content(Content::from_uri(mesh_id)))
 }
 
 fn summarize(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
@@ -97,6 +105,23 @@ fn move_with_edit_reports_moved_with_property_changes() {
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn different_mesh_content_is_not_inferred_as_a_move() {
+    let old = WeakDom::new(
+        folder("root")
+            .with_child(folder("A").with_child(mesh_part("P", "rbxassetid://1")))
+            .with_child(folder("B")),
+    );
+    let new = WeakDom::new(
+        folder("root")
+            .with_child(folder("A"))
+            .with_child(folder("B").with_child(mesh_part("P", "rbxassetid://2"))),
+    );
+
+    let diffs = diff_doms(&old, &new);
+    assert_eq!(summarize(&diffs), (1, 1, 0, 0), "{diffs:#?}");
 }
 
 #[test]

@@ -5,8 +5,9 @@
 //! 2. Multi-candidate name groups with hash tiebreaking:
 //!    - Pass 1: Full property hash (exact match)
 //!    - Pass 2: No-refs hash (matches when only Ref properties changed)
-//!    - Pass 3: Tolerance-aware mutual-unique property match
-//!    - Pass 4: Positional fallback for indistinguishable twins
+//!    - Pass 3: Stable content identity (for example MeshPart.MeshContent)
+//!    - Pass 4: Tolerance-aware mutual-unique property match
+//!    - Pass 5: Positional fallback only within the same identity class
 //! 3. Content-preserving class fallback for remaining unmatched renames
 
 use rbx_dom_weak::{types::Ref, WeakDom};
@@ -15,7 +16,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use tracing::{debug, info};
 
-use crate::hash::{get_comparable_properties, DeepHashCache, LazyHashCache};
+use crate::hash::{DeepHashCache, LazyHashCache};
+use crate::property_semantics::{get_authored_properties, stable_content_identity};
 use crate::value_compare::non_ref_variants_equal;
 
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
@@ -24,10 +26,10 @@ fn tolerant_non_ref_properties_equal(
     old: &rbx_dom_weak::Instance,
     new: &rbx_dom_weak::Instance,
 ) -> bool {
-    let comparable = get_comparable_properties(old.class.as_str());
+    let authored = get_authored_properties(old.class.as_str());
 
     for (name, old_value) in &old.properties {
-        if !comparable.contains(name.as_str()) || matches!(old_value, rbx_types::Variant::Ref(_)) {
+        if !authored.contains(name.as_str()) || matches!(old_value, rbx_types::Variant::Ref(_)) {
             continue;
         }
         let Some(new_value) = new.properties.get(name) else {
@@ -40,7 +42,7 @@ fn tolerant_non_ref_properties_equal(
         }
     }
     for (name, new_value) in &new.properties {
-        if !comparable.contains(name.as_str()) || matches!(new_value, rbx_types::Variant::Ref(_)) {
+        if !authored.contains(name.as_str()) || matches!(new_value, rbx_types::Variant::Ref(_)) {
             continue;
         }
         if !old.properties.contains_key(name) {
@@ -245,8 +247,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
 
         let mut pass1_count = 0usize;
         let mut pass2_count = 0usize;
+        let mut identity_count = 0usize;
         let mut tolerant_count = 0usize;
-        let mut pass3_count = 0usize;
+        let mut positional_count = 0usize;
 
         // Pass 1: Full hash match (all properties including Refs)
         let mut remaining_new: Vec<usize> = Vec::new();
@@ -294,7 +297,64 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
         }
 
-        // Pass 3: Tolerance-aware content matching. Exact hashes intentionally
+        // Pass 3: placement-independent authored identity. A reordered set of
+        // same-named MeshParts may move every CFrame while retaining MeshContent;
+        // matching those siblings by position would detach geometry from its
+        // intended transform.
+        let old_identities: HashMap<usize, String> = old_candidates
+            .iter()
+            .filter(|&&old_idx| !old_matched[old_idx])
+            .filter_map(|&old_idx| {
+                let instance = old_dom.get_by_ref(old_children[old_idx].referent)?;
+                stable_content_identity(instance).map(|identity| (old_idx, identity))
+            })
+            .collect();
+        let new_identities: HashMap<usize, String> = still_remaining
+            .iter()
+            .filter_map(|&new_idx| {
+                let instance = new_dom.get_by_ref(new_children[new_idx].referent)?;
+                stable_content_identity(instance).map(|identity| (new_idx, identity))
+            })
+            .collect();
+        let mut old_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut new_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (&index, identity) in &old_identities {
+            old_by_identity
+                .entry(identity.as_str())
+                .or_default()
+                .push(index);
+        }
+        for (&index, identity) in &new_identities {
+            new_by_identity
+                .entry(identity.as_str())
+                .or_default()
+                .push(index);
+        }
+        for &new_idx in &still_remaining {
+            let Some(identity) = new_identities.get(&new_idx) else {
+                continue;
+            };
+            let (Some(old_indices), Some(new_indices)) = (
+                old_by_identity.get(identity.as_str()),
+                new_by_identity.get(identity.as_str()),
+            ) else {
+                continue;
+            };
+            if old_indices.len() != 1 || new_indices.len() != 1 {
+                continue;
+            }
+            let old_idx = old_indices[0];
+            old_matched[old_idx] = true;
+            new_matched[new_idx] = true;
+            matched.push((
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+            ));
+            identity_count += 1;
+        }
+        still_remaining.retain(|&new_idx| !new_matched[new_idx]);
+
+        // Pass 4: Tolerance-aware content matching. Exact hashes intentionally
         // retain every finite bit, but model-frame normalization can introduce
         // harmless float noise. Resolve only mutual-unique pairs here; truly
         // identical twins remain for the positional fallback.
@@ -346,7 +406,10 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
         }
 
-        // Pass 4: Positional fallback — pair remaining indistinguishable twins
+        // Pass 5: positional fallback. Strongly identified instances may only
+        // pair with the same identity. MeshParts with different content IDs
+        // must not be arbitrarily paired just because they share a sibling
+        // position. Instances without a stable key retain the legacy behavior.
         let mut remaining_old: Vec<usize> = old_candidates
             .iter()
             .copied()
@@ -354,16 +417,20 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             .collect();
 
         for new_idx in still_remaining {
-            if let Some(oi) = remaining_old.first().copied() {
-                remaining_old.remove(0);
+            let new_identity = new_identities.get(&new_idx).map(String::as_str);
+            let old_position = remaining_old.iter().position(|old_idx| {
+                old_identities.get(old_idx).map(String::as_str) == new_identity
+            });
+            if let Some(old_position) = old_position {
+                let oi = remaining_old.remove(old_position);
                 old_matched[oi] = true;
                 new_matched[new_idx] = true;
                 matched.push((old_children[oi].referent, new_children[new_idx].referent));
-                pass3_count += 1;
+                positional_count += 1;
             }
         }
 
-        if pass2_count > 0 || tolerant_count > 0 || pass3_count > 0 {
+        if pass2_count > 0 || identity_count > 0 || tolerant_count > 0 || positional_count > 0 {
             let parent_name = old_dom
                 .get_by_ref(old_parent)
                 .map(|i| i.name.as_str())
@@ -374,8 +441,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 total = new_indices.len(),
                 pass1_full_hash = pass1_count,
                 pass2_no_refs = pass2_count,
-                pass3_tolerant = tolerant_count,
-                pass4_positional = pass3_count,
+                pass3_identity = identity_count,
+                pass4_tolerant = tolerant_count,
+                pass5_positional = positional_count,
                 "multi-pass tiebreak"
             );
         }

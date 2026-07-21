@@ -174,7 +174,7 @@ pub(crate) fn non_ref_variants_equal(a: &Variant, b: &Variant) -> bool {
         }
         // Studio rewrites equivalent asset URL spellings on save.
         (Variant::Content(a), Variant::Content(b)) => {
-            use crate::hash::normalize_asset_uri;
+            use crate::property_semantics::normalize_asset_uri;
             use rbx_types::ContentType;
             match (a.value(), b.value()) {
                 (ContentType::None, ContentType::None) => true,
@@ -187,8 +187,8 @@ pub(crate) fn non_ref_variants_equal(a: &Variant, b: &Variant) -> bool {
             }
         }
         (Variant::ContentId(a), Variant::ContentId(b)) => {
-            crate::hash::normalize_asset_uri(a.as_str())
-                == crate::hash::normalize_asset_uri(b.as_str())
+            crate::property_semantics::normalize_asset_uri(a.as_str())
+                == crate::property_semantics::normalize_asset_uri(b.as_str())
         }
         (Variant::UniqueId(_), Variant::UniqueId(_)) => true,
         _ => a == b,

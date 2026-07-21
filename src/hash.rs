@@ -7,11 +7,12 @@
 
 use blake3::{Hash, Hasher};
 use rbx_dom_weak::{types::Ref, WeakDom};
-use rbx_reflection::{PropertyKind, PropertySerialization, Scriptability};
 use rbx_types::{PhysicalProperties, Variant, Vector3};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use tracing::info;
+
+use crate::property_semantics::{get_authored_properties, normalize_asset_uri};
 
 macro_rules! n_hash {
     ($hash:ident, $($num:expr),*) => {
@@ -71,40 +72,6 @@ fn ref_index_path(dom: &WeakDom, target: Ref) -> Vec<u32> {
     path
 }
 
-/// Normalize a Roblox asset URI to a canonical form so different spellings of
-/// the same asset compare equal — Studio rewrites e.g.
-/// `http://www.roblox.com/asset/?id=123` to `rbxassetid://123` on save.
-pub(crate) fn normalize_asset_uri(uri: &str) -> String {
-    let s = uri.trim();
-    let lower = s.to_ascii_lowercase();
-
-    let digits_at = |start: usize| -> String {
-        s[start..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect()
-    };
-
-    if let Some(pos) = lower.find("roblox.com/asset") {
-        if let Some(id_pos) = lower[pos..].find("id=") {
-            let digits = digits_at(pos + id_pos + 3);
-            if !digits.is_empty() {
-                return format!("rbxassetid://{digits}");
-            }
-        }
-    }
-    if let Some(rest_pos) = lower
-        .strip_prefix("rbxassetid://")
-        .map(|_| "rbxassetid://".len())
-    {
-        let digits = digits_at(rest_pos);
-        if !digits.is_empty() {
-            return format!("rbxassetid://{digits}");
-        }
-    }
-    s.to_string()
-}
-
 #[derive(Clone, Copy)]
 struct HashPolicy {
     include_name: bool,
@@ -120,7 +87,7 @@ const NO_REFS_HASH: HashPolicy = HashPolicy {
     include_refs: false,
 };
 
-/// Hash one instance's class and comparable properties under a policy. Deep
+/// Hash one instance's class and authored properties under a policy. Deep
 /// hashing builds on the same prefix before adding child hashes.
 fn hash_instance(
     dom: &WeakDom,
@@ -129,7 +96,7 @@ fn hash_instance(
     policy: HashPolicy,
 ) -> Hasher {
     let inst = dom.get_by_ref(referent).unwrap();
-    let comparable = get_comparable_properties(&inst.class);
+    let authored = get_authored_properties(&inst.class);
     let mut hasher = Hasher::new();
 
     if policy.include_name {
@@ -142,7 +109,7 @@ fn hash_instance(
     for (name, value) in props {
         if ignore_properties.is_some_and(|ignored| ignored.contains(name.as_str()))
             || (!policy.include_refs && matches!(value, Variant::Ref(_)))
-            || !comparable.contains(name.as_str())
+            || !authored.contains(name.as_str())
         {
             continue;
         }
@@ -521,134 +488,5 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
         }
         Variant::UniqueId(_) => {} // Skip - non-deterministic
         _ => {}                    // Skip unknown variants
-    }
-}
-
-/// Get the set of comparable property names for a class.
-/// Caches per class — builds the set once by walking the class hierarchy.
-/// Properties NOT in this set should be skipped (non-reflected, non-scriptable, non-serializable).
-pub fn get_comparable_properties(class_name: &str) -> &'static HashSet<String> {
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-
-    static CLASS_PROPS: OnceLock<Mutex<HashMap<String, &'static HashSet<String>>>> =
-        OnceLock::new();
-
-    let map_mutex = CLASS_PROPS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = map_mutex.lock().unwrap();
-
-    if !map.contains_key(class_name) {
-        // One allocation per reflection class for the process lifetime. The
-        // stable allocation lets callers release the mutex before reading the
-        // set; storing HashSet values directly here was unsound because a
-        // later HashMap reallocation invalidated previously returned refs.
-        let props = Box::leak(Box::new(build_comparable_properties(class_name)));
-        map.insert(class_name.to_string(), props);
-    }
-
-    let props = *map.get(class_name).unwrap();
-    drop(map);
-    props
-}
-
-/// Serialized-but-not-scriptable properties that carry real user content.
-/// The scriptability filter below would drop these, making the diff blind to
-/// CSG edits, terrain sculpting, and collision group changes. Derived/volatile
-/// None-scriptability props (PhysicsData, UnscaledVolume, UniqueId, ...) stay
-/// excluded — extend this list for new cases rather than widening the filter.
-const CONTENT_PROPERTY_EXCEPTIONS: &[(&str, &[&str])] = &[
-    (
-        "PartOperation",
-        &[
-            "MeshData",
-            "MeshData2",
-            "ChildData",
-            "ChildData2",
-            "AssetId",
-        ],
-    ),
-    ("Terrain", &["SmoothGrid", "Decoration"]),
-    ("Workspace", &["CollisionGroupData"]),
-];
-
-fn build_comparable_properties(class_name: &str) -> HashSet<String> {
-    let database = rbx_reflection_database::get().unwrap();
-    let mut result = HashSet::new();
-
-    // Walk up the class hierarchy, collecting all comparable properties
-    let mut current_class = class_name;
-    loop {
-        let class_data = match database.classes.get(current_class) {
-            Some(data) => data,
-            None => break,
-        };
-
-        for (class, props) in CONTENT_PROPERTY_EXCEPTIONS {
-            if *class == current_class {
-                for prop in *props {
-                    result.insert((*prop).to_string());
-                }
-            }
-        }
-
-        for (prop_name, prop_data) in &class_data.properties {
-            // Skip non-scriptable and read-only properties: users can't set them
-            // and a merge can't apply them (e.g. UnionOperation.TriangleCount)
-            if matches!(
-                prop_data.scriptability,
-                Scriptability::None | Scriptability::Read
-            ) {
-                continue;
-            }
-            let dominated = match &prop_data.kind {
-                PropertyKind::Canonical { serialization } => {
-                    matches!(serialization, PropertySerialization::DoesNotSerialize)
-                }
-                PropertyKind::Alias { .. } => continue, // Skip aliases, canonical will be found
-                _ => false,
-            };
-            if !dominated {
-                result.insert(prop_name.to_string());
-            }
-        }
-
-        match class_data.superclass.as_ref() {
-            Some(super_class) => current_class = super_class,
-            None => break,
-        }
-    }
-
-    result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::get_comparable_properties;
-
-    #[test]
-    fn comparable_property_references_survive_cache_growth_and_concurrency() {
-        let part_properties = get_comparable_properties("Part");
-        assert!(part_properties.contains("CFrame"));
-
-        let classes: Vec<String> = rbx_reflection_database::get()
-            .unwrap()
-            .classes
-            .keys()
-            .map(|name| name.to_string())
-            .collect();
-
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                scope.spawn(|| {
-                    for class in &classes {
-                        let _ = get_comparable_properties(class);
-                    }
-                });
-            }
-        });
-
-        // This reference predates every insertion above. It must still point
-        // to the same stable set after the backing HashMap has grown.
-        assert!(part_properties.contains("CFrame"));
     }
 }

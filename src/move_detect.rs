@@ -24,7 +24,8 @@ use rbx_types::Variant;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
-use crate::hash::{get_comparable_properties, hash_variant, DeepHashCache};
+use crate::hash::{hash_variant, DeepHashCache};
+use crate::property_semantics::{get_authored_properties, stable_content_identity};
 
 /// Minimum similarity score for a Pass B pairing to count as a move.
 const SIMILARITY_THRESHOLD: f32 = 0.5;
@@ -331,6 +332,15 @@ fn pair_by_similarity(
         let mut scored: Vec<(f32, Ref, Ref)> = Vec::new();
         for &o in old_group {
             for &n in new_group {
+                let old_instance = old_dom.get_by_ref(o).unwrap();
+                let new_instance = new_dom.get_by_ref(n).unwrap();
+                // Similarity is useful evidence only after strong identity
+                // agrees. Otherwise many generic MeshPart properties can
+                // outvote a different MeshContent and invent a destructive
+                // move between unrelated pieces of geometry.
+                if stable_content_identity(old_instance) != stable_content_identity(new_instance) {
+                    continue;
+                }
                 let score = similarity(old_dom, new_dom, o, n, old_deep, new_deep);
                 if score >= SIMILARITY_THRESHOLD {
                     scored.push((score, o, n));
@@ -464,21 +474,21 @@ fn similarity(
     }
 }
 
-/// Fraction of comparable properties with equal values (by variant hash).
-/// Returns None when neither side has comparable properties (no signal).
+/// Fraction of authored properties with equal values (by variant hash).
+/// Returns None when neither side has authored properties (no signal).
 fn property_similarity(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
     old_inst: &rbx_dom_weak::Instance,
     new_inst: &rbx_dom_weak::Instance,
 ) -> Option<f32> {
-    let comparable = get_comparable_properties(old_inst.class.as_str());
+    let authored = get_authored_properties(old_inst.class.as_str());
 
     let mut total = 0usize;
     let mut equal = 0usize;
 
     for (name, old_value) in &old_inst.properties {
-        if !comparable.contains(name.as_str()) {
+        if !authored.contains(name.as_str()) {
             continue;
         }
         total += 1;
@@ -490,7 +500,7 @@ fn property_similarity(
     }
     // Properties only on the new side count against similarity
     for (name, _) in &new_inst.properties {
-        if comparable.contains(name.as_str()) && !old_inst.properties.contains_key(name) {
+        if authored.contains(name.as_str()) && !old_inst.properties.contains_key(name) {
             total += 1;
         }
     }

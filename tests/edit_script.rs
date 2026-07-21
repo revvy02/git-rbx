@@ -3,7 +3,7 @@
 
 use rbx_diff::{apply_edit_script, compute_edit_script, diff_doms, DiffConfig, EditOp};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::{Color3uint8, Variant};
+use rbx_types::{CFrame, Color3uint8, Content, Matrix3, Variant, Vector3};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -17,6 +17,36 @@ fn part(name: &str) -> InstanceBuilder {
         .with_name(name)
         .with_property("Anchored", Variant::Bool(true))
         .with_property("Transparency", Variant::Float32(0.0))
+}
+
+fn mesh_part(mesh_id: &str, x: f32) -> InstanceBuilder {
+    InstanceBuilder::new("MeshPart")
+        .with_name("Part")
+        .with_property("MeshContent", Variant::Content(Content::from_uri(mesh_id)))
+        .with_property(
+            "CFrame",
+            Variant::CFrame(CFrame::new(Vector3::new(x, 0.0, 0.0), Matrix3::identity())),
+        )
+}
+
+fn mesh_positions(dom: &WeakDom) -> std::collections::BTreeMap<String, f32> {
+    dom.descendants()
+        .filter(|instance| instance.class.as_str() == "MeshPart")
+        .map(|instance| {
+            let Variant::Content(mesh_content) =
+                instance.properties.get(&"MeshContent".into()).unwrap()
+            else {
+                panic!("MeshPart.MeshContent missing")
+            };
+            let Variant::CFrame(cframe) = instance.properties.get(&"CFrame".into()).unwrap() else {
+                panic!("MeshPart.CFrame missing")
+            };
+            (
+                mesh_content.as_uri().unwrap().to_string(),
+                cframe.position.x,
+            )
+        })
+        .collect()
 }
 
 /// Round-trip: compute script old→new, apply to old, assert diff is empty.
@@ -187,6 +217,40 @@ fn round_trip_ref_into_added_subtree() {
             .with_child(target)
     }));
     assert_round_trip(old, new);
+}
+
+#[test]
+fn mesh_id_changes_are_authored_property_changes() {
+    let mut old = WeakDom::new(folder("root").with_child(mesh_part("rbxassetid://1", 0.0)));
+    let new = WeakDom::new(folder("root").with_child(mesh_part("rbxassetid://2", 0.0)));
+
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+    assert!(script
+        .ops
+        .iter()
+        .any(|op| matches!(op, EditOp::SetProperty { name, .. } if name == "MeshContent")));
+
+    apply_edit_script(&mut old, &new, &script);
+    assert_eq!(mesh_positions(&old), mesh_positions(&new));
+}
+
+#[test]
+fn reordered_moved_meshparts_keep_geometry_attached_to_placement() {
+    let mut old = WeakDom::new(
+        folder("root")
+            .with_child(mesh_part("rbxassetid://1", 0.0))
+            .with_child(mesh_part("rbxassetid://2", 10.0)),
+    );
+    let new = WeakDom::new(
+        folder("root")
+            .with_child(mesh_part("rbxassetid://2", 110.0))
+            .with_child(mesh_part("rbxassetid://1", 100.0)),
+    );
+
+    let script = compute_edit_script(&old, &new, &DiffConfig::default());
+    apply_edit_script(&mut old, &new, &script);
+
+    assert_eq!(mesh_positions(&old), mesh_positions(&new));
 }
 
 #[test]
