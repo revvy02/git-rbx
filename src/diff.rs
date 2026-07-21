@@ -408,7 +408,6 @@ fn expand_container_changes(
     container_name: &str,
     old: Option<&Variant>,
     new: Option<&Variant>,
-    config: &DiffConfig,
 ) {
     match container_name {
         "Attributes" => {
@@ -432,9 +431,6 @@ fn expand_container_changes(
 
             for key in keys {
                 let name = format!("Attributes.{key}");
-                if config.ignore_properties.contains(&name) {
-                    continue;
-                }
                 let old_value = old_attrs.get(key);
                 let new_value = new_attrs.get(key);
                 let changed = match (old_value, new_value) {
@@ -468,9 +464,6 @@ fn expand_container_changes(
 
             for tag in tags {
                 let name = format!("Tags.{tag}");
-                if config.ignore_properties.contains(&name) {
-                    continue;
-                }
                 let in_old = old_tags.iter().any(|t| t == tag);
                 let in_new = new_tags.iter().any(|t| t == tag);
                 if in_old != in_new {
@@ -527,7 +520,7 @@ pub(crate) fn raw_property_changes(
 
         // Container properties expand into per-key granular changes
         if name.as_str() == "Attributes" || name.as_str() == "Tags" {
-            expand_container_changes(&mut changes, name.as_str(), old_value, Some(new_value), config);
+            expand_container_changes(&mut changes, name.as_str(), old_value, Some(new_value));
             continue;
         }
 
@@ -570,7 +563,7 @@ pub(crate) fn raw_property_changes(
         if !visited.contains(name) {
             // Container property removed entirely: granular removals per key
             if name.as_str() == "Attributes" || name.as_str() == "Tags" {
-                expand_container_changes(&mut changes, name.as_str(), Some(old_value), None, config);
+                expand_container_changes(&mut changes, name.as_str(), Some(old_value), None);
                 continue;
             }
             // Property only in old — skip if it's just a default value

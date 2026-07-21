@@ -42,9 +42,6 @@ enum Command {
         #[arg(long)]
         json: bool,
 
-        /// Properties to ignore (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        ignore_property: Vec<String>,
 
         /// Show timing information
         #[arg(long, short = 't')]
@@ -67,9 +64,6 @@ enum Command {
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Properties to ignore (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        ignore_property: Vec<String>,
     },
     /// Inspect and resolve conflicts stored in a merged file
     Resolve {
@@ -135,11 +129,11 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Diff { old_file, new_file, summary_only, json, ignore_property, timing } => {
-            cmd_diff(&old_file, &new_file, summary_only, json, &ignore_property, timing)
+        Command::Diff { old_file, new_file, summary_only, json, timing } => {
+            cmd_diff(&old_file, &new_file, summary_only, json, timing)
         }
-        Command::Merge { base, ours, theirs, output, ignore_property } => {
-            cmd_merge(&base, &ours, &theirs, output.as_deref(), &ignore_property)
+        Command::Merge { base, ours, theirs, output } => {
+            cmd_merge(&base, &ours, &theirs, output.as_deref())
         }
         Command::Resolve { file, list, take, value, path, entry, all, finalize, studio, studio_auto } => {
             if studio {
@@ -157,7 +151,6 @@ fn cmd_diff(
     new_file: &str,
     summary_only: bool,
     json: bool,
-    ignore_property: &[String],
     timing: bool,
 ) -> Result<()> {
     let total_start = Instant::now();
@@ -178,7 +171,7 @@ fn cmd_diff(
     };
     let new_load_time = load_start.elapsed();
 
-    let config = build_config(ignore_property);
+    let config = DiffConfig::default();
 
     let diff_start = Instant::now();
     eprintln!("Computing differences...");
@@ -215,7 +208,6 @@ fn cmd_merge(
     ours_path: &str,
     theirs_path: &str,
     output: Option<&str>,
-    ignore_property: &[String],
 ) -> Result<()> {
     eprintln!("Loading base {}...", base_path);
     let mut base = load_file(base_path)?;
@@ -224,7 +216,7 @@ fn cmd_merge(
     eprintln!("Loading theirs {}...", theirs_path);
     let theirs = load_file(theirs_path)?;
 
-    let config = build_config(ignore_property);
+    let config = DiffConfig::default();
 
     eprintln!("Merging...");
     let start = Instant::now();
@@ -455,14 +447,6 @@ fn cmd_check(file: &str) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn build_config(ignore_property: &[String]) -> DiffConfig {
-    let mut config = DiffConfig::default();
-    for prop in ignore_property {
-        config.ignore_properties.insert(prop.clone());
-    }
-    config
 }
 
 /// Load a Roblox file (binary or XML, model or place) based on extension.
