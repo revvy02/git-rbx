@@ -14,6 +14,7 @@ local Element = packages.miu.Element
 local tags = packages.wind.tags
 
 local classIcon = require("../classIcon")
+local Icon = require("../Icon")
 local theme = require("../../library/theme")
 
 export type TreeRowProps = {
@@ -49,14 +50,17 @@ local function TreeRow(props: TreeRowProps)
 		Element("UIListLayout", {
 			id = "layout",
 			FillDirection = Enum.FillDirection.Horizontal,
+			SortOrder = Enum.SortOrder.LayoutOrder,
 			VerticalAlignment = Enum.VerticalAlignment.Center,
 		})
 
 		Element("TextButton", {
 			id = "expand",
-			Text = if not props.hasChildren then "" elseif props.expanded then "v " else "> ",
+			LayoutOrder = 1,
+			Text = "",
 			Size = UDim2.new(0, 16, 1, 0),
-			tags = { "bg-none", "button", "muted" },
+			AutoButtonColor = false,
+			tags = { "bg-none" },
 			events = {
 				Activated = function()
 					if props.onToggle then
@@ -64,7 +68,16 @@ local function TreeRow(props: TreeRowProps)
 					end
 				end,
 			},
-		})
+		}, function()
+			if props.hasChildren then
+				Icon(
+					"disclosure",
+					if props.expanded then "bxs:down-arrow" else "bxs:right-arrow",
+					theme.textMuted,
+					UDim2.fromOffset(8, 8)
+				)
+			end
+		end)
 
 		local iconWidth = 0
 		if props.className then
@@ -72,6 +85,7 @@ local function TreeRow(props: TreeRowProps)
 			local icon = classIcon(props.className :: string)
 			Element("ImageLabel", {
 				id = "icon",
+				LayoutOrder = 2,
 				Image = icon.Image,
 				ImageRectOffset = icon.ImageRectOffset,
 				ImageRectSize = icon.ImageRectSize,
@@ -83,6 +97,7 @@ local function TreeRow(props: TreeRowProps)
 
 		Element("TextButton", {
 			id = "label",
+			LayoutOrder = 3,
 			RichText = true,
 			Text = ` {props.label}`,
 			Size = UDim2.new(1, -16 - iconWidth, 1, 0),

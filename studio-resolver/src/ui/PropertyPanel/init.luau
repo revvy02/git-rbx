@@ -205,8 +205,7 @@ end
 local function PropertyPanel()
 	Element("Frame", {
 		id = "properties",
-		Position = UDim2.new(0, 0, 0.5, 0),
-		Size = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromScale(1, 1),
 		tags = { "bg-none", "flex-col" },
 	}, function()
 		local inst = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?

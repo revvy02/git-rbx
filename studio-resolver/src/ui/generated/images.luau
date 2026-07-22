@@ -3,7 +3,7 @@
 local images = {
 	iconify = {
 		ui = {
-			["1"] = "rbxasset://.asphalt-rbx-diff/7f7fce0de8f6622acd8b035923194c893746123981af346ba08b64f44f33c158.png",
+			["1"] = "rbxasset://.asphalt-rbx-diff/f988c7e7f90f12bffb03dda85b268fbec59b47492c994a68659fa70a2478dfe7.png",
 		},
 	},
 }

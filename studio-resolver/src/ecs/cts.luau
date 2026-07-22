@@ -25,6 +25,27 @@ export type SideInfo = {
 	delta: CFrame?, -- ModelFrame: canonical/base content -> this side's world frame
 }
 
+-- Canonical direct patch emitted by Rust for one side of a decision.
+-- `operations` are the exact edit script shown by the sparse diff tree;
+-- `affectedIds` supports exact de-duplicated counts when rigid cards aggregate.
+export type ImpactOperation = {
+	kind: string, -- Property | Add | Delete | Move
+	nodeId: number?,
+	path: string,
+	property: string?,
+	destination: string?,
+	instanceCount: number,
+	before: any?, -- serialized diff::PropertyValue
+	after: any?,
+}
+
+export type ImpactSide = {
+	operations: { ImpactOperation },
+	affectedIds: { number },
+	instanceCount: number,
+	propertyCount: number,
+}
+
 -- Boot snapshot of the base state, restored on unpick (preview.boot).
 export type Base = {
 	value: any, -- Property: value to restore
@@ -100,6 +121,8 @@ local cts = {
 	Order = world:component(), -- stable list position (entry-name sort)
 	Ours = world:component(), -- SideInfo
 	Theirs = world:component(), -- SideInfo
+	ImpactOurs = world:component(), -- ImpactSide
+	ImpactTheirs = world:component(), -- ImpactSide
 	Base = world:component(), -- Base snapshot
 	Resolution = world:component(), -- staged side "ours"|"theirs"|"custom"; absent = unpicked
 	Rendered = world:component(), -- staged state the 3D preview currently reflects

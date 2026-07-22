@@ -11,6 +11,7 @@
 //!                                   attrs: Kind, Path, Property?, Resolved?
 //!     Target                        ObjectValue -> live instance (base state)
 //!     Ours                          Folder; attrs: Deleted?, DestinationPath?
+//!       __RbxDiffImpact             StringValue; exact direct patch for this choice
 //!       <clone of our version>      (shallow for property conflicts,
 //!                                    full subtree for delete-vs-edit)
 //!     Theirs                        Folder; same shape
@@ -26,14 +27,17 @@
 use anyhow::{bail, Result};
 use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
 use rbx_types::{Attributes, Tags, Variant};
-use std::collections::HashMap;
+use serde::Serialize;
+use std::collections::{BTreeSet, HashMap};
 
+use crate::diff::{variant_to_property_value, PropertyValue};
+use crate::dom_utils::class_is_a;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
-use crate::explorer_tree::{ExplorerTree, ExplorerTrees};
+use crate::explorer_tree::{ExplorerTree, ExplorerTrees, ExplorerVersion};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
 use crate::model_normalize::apply_model_frame;
-use crate::rigid_groups::RigidGroup;
+use crate::rigid_groups::{Rigid, RigidGroup};
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
 pub const CONFLICT_TAG: &str = "RbxDiffConflict";
@@ -72,7 +76,7 @@ pub fn stamp_conflicts(
                 "Attributes",
                 Variant::Attributes(
                     Attributes::new()
-                        .with("Version", Variant::Float64(2.0))
+                        .with("Version", Variant::Float64(3.0))
                         .with(
                             "ConflictCount",
                             Variant::Float64(result.conflicts.len() as f64),
@@ -121,8 +125,12 @@ pub fn stamp_conflicts(
         );
 
         if let ConflictKind::ModelFrame { ours, theirs } = &conflict.kind {
-            stamp_model_frame_side(base, entry, "Ours", ours);
-            stamp_model_frame_side(base, entry, "Theirs", theirs);
+            let ours_impact =
+                model_frame_impact(base, conflict.base_ref, &result.explorer_trees, ours);
+            let theirs_impact =
+                model_frame_impact(base, conflict.base_ref, &result.explorer_trees, theirs);
+            stamp_model_frame_side(base, entry, "Ours", ours, &ours_impact);
+            stamp_model_frame_side(base, entry, "Theirs", theirs, &theirs_impact);
         } else {
             stamp_side(
                 base,
@@ -133,6 +141,8 @@ pub fn stamp_conflicts(
                 ours_dom,
                 &result.ours_matched,
                 &ours_to_base,
+                &result.explorer_trees,
+                ExplorerVersion::Ours,
             );
             stamp_side(
                 base,
@@ -143,6 +153,8 @@ pub fn stamp_conflicts(
                 theirs_dom,
                 &result.theirs_matched,
                 &theirs_to_base,
+                &result.explorer_trees,
+                ExplorerVersion::Theirs,
             );
         }
 
@@ -248,8 +260,9 @@ fn stamp_model_frame_side(
     entry: Ref,
     side_name: &str,
     delta: &rbx_types::CFrame,
+    impact: &ImpactSide,
 ) {
-    base.insert(
+    let side_folder = base.insert(
         entry,
         InstanceBuilder::new("Folder")
             .with_name(side_name)
@@ -258,6 +271,7 @@ fn stamp_model_frame_side(
                 Variant::Attributes(Attributes::new().with("Delta", Variant::CFrame(*delta))),
             ),
     );
+    stamp_impact(base, side_folder, impact);
 }
 
 /// Materialize one side's version of the conflict under the entry folder.
@@ -270,6 +284,8 @@ fn stamp_side(
     branch_dom: &WeakDom,
     base_to_branch: &HashMap<Ref, Ref>,
     branch_to_base: &HashMap<Ref, Ref>,
+    trees: &ExplorerTrees,
+    version: ExplorerVersion,
 ) {
     let mut side_attrs = Attributes::new();
     let mut deep_clone = false;
@@ -302,6 +318,9 @@ fn stamp_side(
             .with_property("Attributes", Variant::Attributes(side_attrs)),
     );
 
+    let impact = impact_for_ops(base, branch_dom, side_ops, base_to_branch, trees, version);
+    stamp_impact(base, side_folder, &impact);
+
     // Move destination for finalize, when it maps to a live base instance
     if let Some(EditOp::Move {
         new_parent: Anchor::Old(parent),
@@ -325,6 +344,263 @@ fn stamp_side(
             let builder = clone_from_branch(branch_dom, branch_ref, branch_to_base, deep_clone);
             base.insert(side_folder, builder);
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImpactSide {
+    operations: Vec<ImpactOperation>,
+    affected_ids: Vec<u32>,
+    instance_count: usize,
+    property_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImpactOperation {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_id: Option<u32>,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
+    instance_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before: Option<PropertyValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<PropertyValue>,
+}
+
+fn stamp_impact(base: &mut WeakDom, side_folder: Ref, impact: &ImpactSide) {
+    let encoded = serde_json::to_string(impact).expect("conflict impact is serializable");
+    base.insert(
+        side_folder,
+        InstanceBuilder::new("StringValue")
+            .with_name("__RbxDiffImpact")
+            .with_property("Value", Variant::String(encoded)),
+    );
+}
+
+fn patch_value(dom: &WeakDom, value: Option<&Variant>) -> PropertyValue {
+    match value {
+        None => PropertyValue::Nil,
+        Some(Variant::Ref(r)) if r.is_none() => PropertyValue::Nil,
+        Some(Variant::Ref(r)) => PropertyValue::Ref {
+            value: dom
+                .get_by_ref(*r)
+                .map(|_| get_instance_path(dom, *r))
+                .unwrap_or_else(|| format!("{r}")),
+        },
+        Some(value) => variant_to_property_value(value),
+    }
+}
+
+fn property_at(dom: &WeakDom, referent: Ref, name: &str) -> Option<Variant> {
+    let instance = dom.get_by_ref(referent)?;
+    if is_sub_property(name) {
+        get_sub_property(instance, name)
+    } else {
+        instance.properties.get(&name.into()).cloned()
+    }
+}
+
+fn impact_for_ops(
+    base: &WeakDom,
+    branch: &WeakDom,
+    ops: &[EditOp],
+    base_to_branch: &HashMap<Ref, Ref>,
+    trees: &ExplorerTrees,
+    version: ExplorerVersion,
+) -> ImpactSide {
+    let mut operations = Vec::new();
+    let mut affected = BTreeSet::new();
+    let mut property_count = 0;
+
+    let base_path = |referent| get_instance_path(base, referent);
+    let side_path = |referent| {
+        base_to_branch
+            .get(&referent)
+            .map(|branch_ref| get_instance_path(branch, *branch_ref))
+            .unwrap_or_else(|| base_path(referent))
+    };
+
+    for op in ops {
+        let (kind, node_id, path, property, destination, ids, before, after) = match op {
+            EditOp::SetProperty {
+                old_ref,
+                name,
+                value,
+            } => {
+                property_count += 1;
+                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
+                let old_value = property_at(base, *old_ref, name);
+                (
+                    "Property",
+                    id,
+                    side_path(*old_ref),
+                    Some(name.clone()),
+                    None,
+                    id.into_iter().collect(),
+                    Some(patch_value(base, old_value.as_ref())),
+                    Some(patch_value(branch, value.as_ref())),
+                )
+            }
+            EditOp::SetName { old_ref, name } => {
+                property_count += 1;
+                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
+                let old_name = &base.get_by_ref(*old_ref).unwrap().name;
+                (
+                    "Property",
+                    id,
+                    side_path(*old_ref),
+                    Some("Name".to_string()),
+                    None,
+                    id.into_iter().collect(),
+                    Some(PropertyValue::String {
+                        value: old_name.clone(),
+                    }),
+                    Some(PropertyValue::String {
+                        value: name.clone(),
+                    }),
+                )
+            }
+            EditOp::RemoveSubtree { old_ref } => {
+                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
+                let ids = id
+                    .map(|root| trees.subtree_ids(ExplorerVersion::Base, root))
+                    .unwrap_or_default();
+                (
+                    "Delete",
+                    id,
+                    base_path(*old_ref),
+                    None,
+                    None,
+                    ids,
+                    None,
+                    None,
+                )
+            }
+            EditOp::Move {
+                old_ref,
+                new_parent,
+            } => {
+                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
+                let ids = id
+                    .map(|root| trees.subtree_ids(version, root))
+                    .unwrap_or_default();
+                let destination = match new_parent {
+                    Anchor::Old(parent) => Some(side_path(*parent)),
+                    Anchor::Added(branch_ref) => Some(get_instance_path(branch, *branch_ref)),
+                };
+                (
+                    "Move",
+                    id,
+                    base_path(*old_ref),
+                    None,
+                    destination,
+                    ids,
+                    None,
+                    None,
+                )
+            }
+            EditOp::AddSubtree { new_ref, .. } => {
+                let id = trees.id_for(version, *new_ref);
+                let ids = id
+                    .map(|root| trees.subtree_ids(version, root))
+                    .unwrap_or_default();
+                (
+                    "Add",
+                    id,
+                    get_instance_path(branch, *new_ref),
+                    None,
+                    None,
+                    ids,
+                    None,
+                    None,
+                )
+            }
+        };
+        affected.extend(ids.iter().copied());
+        operations.push(ImpactOperation {
+            kind,
+            node_id,
+            path,
+            property,
+            destination,
+            instance_count: ids.len(),
+            before,
+            after,
+        });
+    }
+
+    ImpactSide {
+        operations,
+        affected_ids: affected.iter().copied().collect(),
+        instance_count: affected.len(),
+        property_count,
+    }
+}
+
+fn model_frame_impact(
+    base: &WeakDom,
+    target: Ref,
+    trees: &ExplorerTrees,
+    delta: &rbx_types::CFrame,
+) -> ImpactSide {
+    let mut pending = vec![target];
+    let mut affected = BTreeSet::new();
+    let mut operations = Vec::new();
+    let transform = Rigid::from_cframe(delta);
+    while let Some(referent) = pending.pop() {
+        let Some(instance) = base.get_by_ref(referent) else {
+            continue;
+        };
+        pending.extend(instance.children().iter().copied());
+
+        let property_and_frame = if class_is_a(instance.class.as_str(), "BasePart") {
+            match instance.properties.get(&"CFrame".into()) {
+                Some(Variant::CFrame(frame)) => Some(("CFrame", *frame)),
+                _ => None,
+            }
+        } else if class_is_a(instance.class.as_str(), "Model")
+            && !class_is_a(instance.class.as_str(), "WorldRoot")
+        {
+            match instance.properties.get(&"WorldPivotData".into()) {
+                Some(Variant::OptionalCFrame(Some(frame))) => Some(("WorldPivotData", *frame)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let (Some(id), Some((property, frame))) = (
+            trees.id_for(ExplorerVersion::Base, referent),
+            property_and_frame,
+        ) else {
+            continue;
+        };
+        let transformed = transform.mul(Rigid::from_cframe(&frame)).to_cframe();
+        affected.insert(id);
+        operations.push(ImpactOperation {
+            kind: "Property",
+            node_id: Some(id),
+            path: get_instance_path(base, referent),
+            property: Some(property.to_string()),
+            destination: None,
+            instance_count: 1,
+            before: Some(variant_to_property_value(&Variant::CFrame(frame))),
+            after: Some(variant_to_property_value(&Variant::CFrame(transformed))),
+        });
+    }
+
+    let affected_ids: Vec<u32> = affected.iter().copied().collect();
+    ImpactSide {
+        operations,
+        instance_count: affected_ids.len(),
+        property_count: affected_ids.len(),
+        affected_ids,
     }
 }
 
@@ -377,15 +653,13 @@ fn build_branch_clone(
         .with_name(inst.name.as_str());
     for (name, value) in &inst.properties {
         let value = match value {
-            Variant::Ref(r) if !r.is_none() => {
-                Variant::Ref(
-                    branch_to_clone
-                        .get(r)
-                        .or_else(|| branch_to_base.get(r))
-                        .copied()
-                        .unwrap_or_else(Ref::none),
-                )
-            }
+            Variant::Ref(r) if !r.is_none() => Variant::Ref(
+                branch_to_clone
+                    .get(r)
+                    .or_else(|| branch_to_base.get(r))
+                    .copied()
+                    .unwrap_or_else(Ref::none),
+            ),
             other => other.clone(),
         };
         builder = builder.with_property(name.as_str(), value);
@@ -395,13 +669,7 @@ fn build_branch_clone(
             .children()
             .iter()
             .map(|&child| {
-                build_branch_clone(
-                    branch_dom,
-                    child,
-                    branch_to_base,
-                    branch_to_clone,
-                    true,
-                )
+                build_branch_clone(branch_dom, child, branch_to_base, branch_to_clone, true)
             })
             .collect();
         builder = builder.with_children(children);
@@ -1032,7 +1300,7 @@ fn child_object_value(dom: &WeakDom, parent: Ref, name: &str) -> Option<Ref> {
     }
 }
 
-/// The materialized clone under a side folder (skipping ObjectValues).
+/// The materialized clone under a side folder (skipping resolver metadata).
 fn first_non_value_child(dom: &WeakDom, side_folder: Ref) -> Option<Ref> {
     dom.get_by_ref(side_folder)?
         .children()
@@ -1040,7 +1308,7 @@ fn first_non_value_child(dom: &WeakDom, side_folder: Ref) -> Option<Ref> {
         .copied()
         .find(|&c| {
             dom.get_by_ref(c)
-                .map(|i| i.class.as_str() != "ObjectValue")
+                .map(|i| i.class.as_str() != "ObjectValue" && i.name != "__RbxDiffImpact")
                 .unwrap_or(false)
         })
 }

@@ -34,6 +34,7 @@ theme.disabled = Color3.fromRGB(64, 64, 64) -- #404040
 theme.added = Color3.fromRGB(78, 201, 176) -- #4ec9b0
 theme.removed = Color3.fromRGB(241, 76, 76) -- #f14c4c
 theme.modified = Color3.fromRGB(220, 220, 170) -- #dcdcaa
+theme.moved = Color3.fromRGB(78, 193, 255) -- #4ec1ff
 theme.propName = Color3.fromRGB(156, 220, 254) -- #9cdcfe
 
 theme.unresolved = theme.modified
@@ -118,9 +119,8 @@ function theme.rules()
 		BorderStrokePosition = Enum.BorderStrokePosition.Inner,
 	})
 
-	-- Row backgrounds: the precedence waterfall as rule priorities —
-	-- selected > on-path > stripe over an invisible `.row` base, so a row
-	-- just carries whichever state tags apply.
+	-- Row backgrounds: selected > on-path > stripe over an invisible `.row`
+	-- base, so a row just carries whichever state tags apply.
 	StyleRule(".row", { BackgroundColor3 = theme.bg, BackgroundTransparency = 1 })
 	StyleRule(".stripe", { BackgroundColor3 = theme.bg, BackgroundTransparency = 0.5 }, nil, 1)
 	StyleRule(".on-path", { BackgroundColor3 = theme.selection, BackgroundTransparency = 0.85 }, nil, 2)

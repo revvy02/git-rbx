@@ -56,6 +56,49 @@ fn small_asset(offset: f32, transparency: f32) -> WeakDom {
     )
 }
 
+/// Ours moves `Outer` (including `Inner`), while theirs moves only `Inner`.
+/// Outer has four of the asset's five parts and Inner has three, so the two
+/// branches establish different, overlapping strict-majority frames.
+fn overlapping_nested_asset(outer_offset: f32, inner_offset: f32) -> WeakDom {
+    let part = |name: &str, x: f32| {
+        InstanceBuilder::new("Part")
+            .with_name(name)
+            .with_property("CFrame", Variant::CFrame(translated(x)))
+    };
+    let inner_origin = 20.0 + outer_offset + inner_offset;
+    WeakDom::new(
+        InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Model")
+                .with_name("Asset")
+                .with_property(
+                    "WorldPivotData",
+                    Variant::OptionalCFrame(Some(translated(0.0))),
+                )
+                .with_child(part("Static", 0.0))
+                .with_child(
+                    InstanceBuilder::new("Model")
+                        .with_name("Outer")
+                        .with_property(
+                            "WorldPivotData",
+                            Variant::OptionalCFrame(Some(translated(10.0 + outer_offset))),
+                        )
+                        .with_child(part("OuterPart", 10.0 + outer_offset))
+                        .with_child(
+                            InstanceBuilder::new("Model")
+                                .with_name("Inner")
+                                .with_property(
+                                    "WorldPivotData",
+                                    Variant::OptionalCFrame(Some(translated(inner_origin))),
+                                )
+                                .with_child(part("InnerA", inner_origin))
+                                .with_child(part("InnerB", inner_origin + 4.0))
+                                .with_child(part("InnerC", inner_origin + 8.0)),
+                        ),
+                ),
+        ),
+    )
+}
+
 fn spatial_values(dom: &WeakDom) -> Vec<(String, String, CFrame)> {
     let mut values = Vec::new();
     for instance in dom.descendants() {
@@ -257,5 +300,67 @@ fn one_sided_frame_move_is_automatic_and_carries_the_other_sides_edit() {
         b.properties.get(&"Transparency".into()),
         Some(&Variant::Float32(0.5))
     );
+    std::fs::remove_dir_all(&scratch).unwrap();
+}
+
+#[test]
+fn overlapping_nested_moves_do_not_become_incompatible_asset_frames() {
+    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-nested-model-frame-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let base_path = scratch.join("base.rbxm");
+    let ours_path = scratch.join("ours.rbxm");
+    let theirs_path = scratch.join("theirs.rbxm");
+    let merged_theirs_path = scratch.join("merged-theirs.rbxm");
+    let conflicted_path = scratch.join("conflicted.rbxm");
+    save(&base_path, &overlapping_nested_asset(0.0, 0.0));
+    save(&ours_path, &overlapping_nested_asset(100.0, 0.0));
+    save(&theirs_path, &overlapping_nested_asset(0.0, -50.0));
+    // Taking theirs for the contested inner move still keeps ours' independent,
+    // one-sided outer move. Because serialized model contents are world-space,
+    // the selected inner branch values remain at their authored world position.
+    save(
+        &merged_theirs_path,
+        &overlapping_nested_asset(100.0, -150.0),
+    );
+
+    run(
+        binary,
+        &[
+            "merge",
+            base_path.to_str().unwrap(),
+            ours_path.to_str().unwrap(),
+            theirs_path.to_str().unwrap(),
+            "--output",
+            conflicted_path.to_str().unwrap(),
+        ],
+        false,
+    );
+
+    for (side, expected) in [("ours", &ours_path), ("theirs", &merged_theirs_path)] {
+        let resolved = scratch.join(format!("resolved-{side}.rbxm"));
+        std::fs::copy(&conflicted_path, &resolved).unwrap();
+        run(
+            binary,
+            &[
+                "resolve",
+                resolved.to_str().unwrap(),
+                "--take",
+                side,
+                "--all",
+            ],
+            true,
+        );
+        run(
+            binary,
+            &["resolve", resolved.to_str().unwrap(), "--finalize"],
+            true,
+        );
+        assert_raw_spatial_match(&resolved, expected);
+    }
+
     std::fs::remove_dir_all(&scratch).unwrap();
 }

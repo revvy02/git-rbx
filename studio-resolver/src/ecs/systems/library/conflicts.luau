@@ -10,6 +10,8 @@ local cts = require("../../cts")
 local world = require("../../world")
 
 type SideInfo = cts.SideInfo
+type ImpactSide = cts.ImpactSide
+type ImpactOperation = cts.ImpactOperation
 
 local conflicts = {}
 
@@ -44,6 +46,73 @@ function conflicts.select(entity: any)
 	end
 	local revealGeneration = (world:get(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration) :: number?) or 0
 	world:set(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration, revealGeneration + 1)
+end
+
+-- Select one logical node from the direct patch while keeping the
+-- owning conflict selected. Virtual nodes intentionally clear the property
+-- panel but remain selectable/revealable in every version Explorer.
+function conflicts.selectExplorerId(id: number)
+	world:set(cts.SelectedExplorerId, cts.SelectedExplorerId, id)
+	local subjects = (world:get(cts.VirtualSubjects, cts.VirtualSubjects) :: { [number]: Instance }?) or {}
+	local subject = subjects[id]
+	if subject then
+		world:set(cts.SelectedInstance, cts.SelectedInstance, subject)
+	else
+		world:remove(cts.SelectedInstance, cts.SelectedInstance)
+	end
+	local generation = (world:get(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration) :: number?) or 0
+	world:set(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration, generation + 1)
+end
+
+local function emptyImpact(): ImpactSide
+	return {
+		operations = {},
+		affectedIds = {},
+		instanceCount = 0,
+		propertyCount = 0,
+	}
+end
+
+-- One side's canonical decision patch. Rigid cards aggregate their member
+-- patches while preserving direct operations and de-duplicating exact extent.
+function conflicts.impact(entity: any, side: string): ImpactSide
+	local component = if side == "ours" then cts.ImpactOurs else cts.ImpactTheirs
+	local members = world:get(entity, cts.Members) :: { any }?
+	if not members then
+		return (world:get(entity, component) :: ImpactSide?) or emptyImpact()
+	end
+
+	local operations: { ImpactOperation } = {}
+	local affected: { [number]: boolean } = {}
+	local properties: { [string]: boolean } = {}
+	for _, member in members do
+		local impact = (world:get(member, component) :: ImpactSide?) or emptyImpact()
+		for _, operation in impact.operations do
+			table.insert(operations, operation)
+			if operation.property then
+				properties[`{operation.nodeId or 0}:{operation.property}`] = true
+			end
+		end
+		for _, id in impact.affectedIds do
+			affected[id] = true
+		end
+	end
+
+	local affectedIds = {}
+	for id in affected do
+		table.insert(affectedIds, id)
+	end
+	table.sort(affectedIds)
+	local propertyCount = 0
+	for _ in properties do
+		propertyCount += 1
+	end
+	return {
+		operations = operations,
+		affectedIds = affectedIds,
+		instanceCount = #affectedIds,
+		propertyCount = propertyCount,
+	}
 end
 
 -- A group's uniform member resolution, or nil when unpicked/mixed.

@@ -40,7 +40,7 @@ local function Panel()
 
 	Element("Frame", {
 		id = "panel",
-		Size = UDim2.new(1, 0, 1, 0),
+		Size = UDim2.fromScale(1, 1),
 		tags = { "bg-none", "flex-col" },
 	}, function()
 		Element("TextLabel", {
@@ -88,7 +88,7 @@ local function Panel()
 					elseif completeError then "Complete failed — retry"
 					elseif unresolved > 0 then `Complete ({unresolved} undecided)`
 					else "Complete",
-				Size = UDim2.new(1, 0, 1, 0),
+				Size = UDim2.fromScale(1, 1),
 				tags = { "corner-sm", "button" },
 				BackgroundColor3 = if canComplete then theme.accent else theme.disabled,
 				TextColor3 = if canComplete then theme.textBright else theme.textMuted,

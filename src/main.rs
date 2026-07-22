@@ -548,7 +548,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         cmd.arg(&abs_file);
     }
     cmd.arg("--focus")
-        .arg("--no-hud")
+        .args(["--show-widgets", "none"])
         .arg(RESOLVER_ENTRY)
         .arg("--")
         .arg(&abs_file)

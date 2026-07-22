@@ -420,7 +420,7 @@ end
 local function ExplorerPanel()
 	Element("Frame", {
 		id = "explorer",
-		Size = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromScale(1, 1),
 		tags = { "bg-none", "flex-col" },
 	}, function()
 		Element("TextLabel", {

@@ -11,6 +11,8 @@ export type Cts = typeof(cts)
 export type Scheduler = any -- Planck.Scheduler
 
 export type SideInfo = cts.SideInfo
+export type ImpactOperation = cts.ImpactOperation
+export type ImpactSide = cts.ImpactSide
 export type Base = cts.Base
 export type ExplorerNode = cts.ExplorerNode
 export type ExplorerProjection = cts.ExplorerProjection

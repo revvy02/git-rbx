@@ -6,7 +6,14 @@
 
 local widgets = {}
 
-function widgets.create(id: string, title: string, dockState: Enum.InitialDockState): DockWidgetPluginGui
+export type Size = {
+	width: number?,
+	height: number?,
+	minWidth: number?,
+	minHeight: number?,
+}
+
+function widgets.create(id: string, title: string, dockState: Enum.InitialDockState, size: Size?): DockWidgetPluginGui
 	local rodeoPlugin: Plugin?
 	for _, child in game:GetService("PluginDebugService"):GetChildren() do
 		if child:IsA("Plugin") and child.Name:match("rodeo") then
@@ -17,7 +24,15 @@ function widgets.create(id: string, title: string, dockState: Enum.InitialDockSt
 
 	local widget = (rodeoPlugin :: Plugin):CreateDockWidgetPluginGuiAsync(
 		id,
-		DockWidgetPluginGuiInfo.new(dockState, true, true, 300, 600, 240, 300)
+		DockWidgetPluginGuiInfo.new(
+			dockState,
+			true,
+			true,
+			if size and size.width then size.width else 300,
+			if size and size.height then size.height else 600,
+			if size and size.minWidth then size.minWidth else 240,
+			if size and size.minHeight then size.minHeight else 200
+		)
 	)
 	widget.Title = title
 	return widget

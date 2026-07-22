@@ -103,6 +103,8 @@ type ConflictRecord = {
 	group: string?,
 	target: Instance,
 	entry: Instance,
+	impactOurs: cts.ImpactSide?,
+	impactTheirs: cts.ImpactSide?,
 }
 
 type GroupRecord = {
@@ -117,6 +119,21 @@ type GroupRecord = {
 
 local records: { ConflictRecord } = {}
 local groupRecords: { GroupRecord } = {}
+
+local function readImpact(entry: Instance, side: string): cts.ImpactSide?
+	local sideFolder = entry:FindFirstChild(side)
+	local value = sideFolder and sideFolder:FindFirstChild("__RbxDiffImpact")
+	if not value or not value:IsA("StringValue") then
+		return nil
+	end
+	local ok, decoded = pcall(HttpService.JSONDecode, HttpService, value.Value)
+	if not ok then
+		warn(`invalid impact metadata on {entry.Name}.{side}: {decoded}`)
+		return nil
+	end
+	return decoded :: cts.ImpactSide
+end
+
 for _, entry in container:GetChildren() do
 	local kind = entry:GetAttribute("Kind") :: string?
 	local groupKind = entry:GetAttribute("GroupKind") :: string?
@@ -134,6 +151,8 @@ for _, entry in container:GetChildren() do
 			group = entry:GetAttribute("Group") :: string?,
 			target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
 			entry = entry,
+			impactOurs = readImpact(entry, "Ours"),
+			impactTheirs = readImpact(entry, "Theirs"),
 		})
 	elseif groupKind then
 		local targetValue = entry:FindFirstChild("Target") :: ObjectValue?
@@ -173,6 +192,12 @@ for index, record in records do
 	end
 	if record.resolved then
 		world:set(entity, cts.Resolution, record.resolved)
+	end
+	if record.impactOurs then
+		world:set(entity, cts.ImpactOurs, record.impactOurs)
+	end
+	if record.impactTheirs then
+		world:set(entity, cts.ImpactTheirs, record.impactTheirs)
 	end
 	if record.group then
 		world:set(entity, cts.Group, record.group)
@@ -277,14 +302,16 @@ end
 world:set(cts.Cards, cts.Cards, cards)
 
 world:set(cts.ViewTab, cts.ViewTab, "result")
-local firstConflict = conflictEntities[1]
+local firstConflict = cards[1]
 if firstConflict then
 	world:set(cts.SelectedConflict, cts.SelectedConflict, firstConflict)
-	local target = world:get(firstConflict, cts.Target) :: Instance
-	world:set(cts.SelectedInstance, cts.SelectedInstance, target)
-	local virtualId = virtualSubjectIds[target]
-	if virtualId then
-		world:set(cts.SelectedExplorerId, cts.SelectedExplorerId, virtualId)
+	local target = world:get(firstConflict, cts.Target) :: Instance?
+	if target then
+		world:set(cts.SelectedInstance, cts.SelectedInstance, target)
+		local virtualId = virtualSubjectIds[target]
+		if virtualId then
+			world:set(cts.SelectedExplorerId, cts.SelectedExplorerId, virtualId)
+		end
 	end
 	world:set(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration, 1)
 end
@@ -305,8 +332,10 @@ for _, registerSystem in
 		require("@self/ecs/systems/explorerProjection"),
 		require("@self/ecs/systems/updateHighlights"),
 		require("@self/ecs/systems/focus"),
-		require("@self/ecs/systems/uiSidebar"),
+		require("@self/ecs/systems/uiExplorer"),
+		require("@self/ecs/systems/uiProperties"),
 		require("@self/ecs/systems/uiConflicts"),
+		require("@self/ecs/systems/uiDiff"),
 		require("@self/ecs/systems/entitiesDestroy"),
 	}
 do

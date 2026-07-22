@@ -1,7 +1,4 @@
---[[
-	Sidebar dock widget: explorer top half, properties bottom half, rendered
-	immediate-mode every heartbeat.
-]]
+-- Selected-instance properties dock widget, synchronized through the ECS world.
 
 local packages = require("../../packages")
 local Element = packages.miu.Element
@@ -12,25 +9,28 @@ local theme = require("../../library/theme")
 local types = require("../types")
 local widgets = require("./library/widgets")
 
-local ExplorerPanel = require("../../ui/ExplorerPanel")
 local PropertyPanel = require("../../ui/PropertyPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("RbxDiffMergeExplorer", "rbx-diff", Enum.InitialDockState.Left)
+	local widget = widgets.create("RbxDiffMergeProperties", "rbx-diff — properties", Enum.InitialDockState.Left, {
+		width = 340,
+		height = 500,
+		minWidth = 240,
+		minHeight = 180,
+	})
 
 	scheduler:addSystem({
-		name = "ui_sidebar",
+		name = "ui_properties",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_ui_sidebar")
-			Portal(widget, "rbx-diff-sidebar", function()
+			debug.profilebegin("rbxdiff_ui_properties")
+			Portal(widget, "rbx-diff-properties", function()
 				theme.link()
 				Element("Frame", {
-					id = "sidebar",
-					Size = UDim2.new(1, 0, 1, 0),
+					id = "properties-widget",
+					Size = UDim2.fromScale(1, 1),
 					tags = { "surface", "vs-border" },
 				}, function()
-					ExplorerPanel()
 					PropertyPanel()
 				end)
 			end)

@@ -6,7 +6,7 @@
 //! with hash-based fallback for refs into pruned (identical) subtrees.
 
 use rbx_dom_weak::{types::Ref, WeakDom};
-use rbx_types::Variant;
+use rbx_types::{ContentType, Variant};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, info_span};
@@ -819,7 +819,7 @@ fn refs_equal(
 // Variant → PropertyValue conversion
 // ============================================================================
 
-fn variant_to_property_value(v: &Variant) -> PropertyValue {
+pub(crate) fn variant_to_property_value(v: &Variant) -> PropertyValue {
     match v {
         Variant::Bool(b) => PropertyValue::Bool { value: *b },
         Variant::Int32(n) => PropertyValue::Int32 { value: *n },
@@ -848,6 +848,28 @@ fn variant_to_property_value(v: &Variant) -> PropertyValue {
             r: c.r,
             g: c.g,
             b: c.b,
+        },
+        Variant::Color3uint8(c) => PropertyValue::Color3 {
+            r: c.r as f32 / 255.0,
+            g: c.g as f32 / 255.0,
+            b: c.b as f32 / 255.0,
+        },
+        Variant::OptionalCFrame(Some(cf)) => variant_to_property_value(&Variant::CFrame(*cf)),
+        Variant::OptionalCFrame(None) => PropertyValue::Nil,
+        Variant::ContentId(content) => PropertyValue::String {
+            value: content.as_str().to_string(),
+        },
+        Variant::Content(content) => match content.value() {
+            ContentType::None => PropertyValue::Nil,
+            ContentType::Uri(uri) => PropertyValue::String {
+                value: uri.to_string(),
+            },
+            ContentType::Object(_) => PropertyValue::Other {
+                type_name: "ContentObject".to_string(),
+            },
+            _ => PropertyValue::Other {
+                type_name: "Content".to_string(),
+            },
         },
         Variant::BrickColor(bc) => PropertyValue::BrickColor { value: *bc as u16 },
         Variant::Enum(e) => PropertyValue::Enum { value: e.to_u32() },

@@ -35,6 +35,13 @@ pub(crate) struct ExplorerTrees {
     theirs_ids: HashMap<Ref, u32>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ExplorerVersion {
+    Base,
+    Ours,
+    Theirs,
+}
+
 impl ExplorerTrees {
     pub fn capture(
         base: &WeakDom,
@@ -89,6 +96,41 @@ impl ExplorerTrees {
             theirs_created,
             &mut self.result_subjects,
         );
+    }
+
+    pub(crate) fn id_for(&self, version: ExplorerVersion, referent: Ref) -> Option<u32> {
+        match version {
+            ExplorerVersion::Base => self.base_ids.get(&referent),
+            ExplorerVersion::Ours => self.ours_ids.get(&referent),
+            ExplorerVersion::Theirs => self.theirs_ids.get(&referent),
+        }
+        .copied()
+    }
+
+    /// Logical ids in a version-specific subtree, in pre-order. Trees are
+    /// captured in pre-order, so the first node whose parent is outside the
+    /// growing result marks the end of the requested subtree.
+    pub(crate) fn subtree_ids(&self, version: ExplorerVersion, root: u32) -> Vec<u32> {
+        let tree = match version {
+            ExplorerVersion::Base => &self.base,
+            ExplorerVersion::Ours => &self.ours,
+            ExplorerVersion::Theirs => &self.theirs,
+        };
+        let Some(start) = tree.nodes.iter().position(|node| node.id == root) else {
+            return Vec::new();
+        };
+
+        let mut result = vec![root];
+        let mut included = std::collections::HashSet::from([root]);
+        for node in tree.nodes.iter().skip(start + 1) {
+            if node.parent.is_some_and(|parent| included.contains(&parent)) {
+                included.insert(node.id);
+                result.push(node.id);
+            } else {
+                break;
+            }
+        }
+        result
     }
 }
 

@@ -22,18 +22,12 @@ fn part_with(name: &str, transparency: f32) -> InstanceBuilder {
 fn mesh_part(mesh_id: &str, initial_size: f32) -> InstanceBuilder {
     InstanceBuilder::new("MeshPart")
         .with_name("Mesh")
-        .with_property(
-            "MeshContent",
-            Variant::Content(Content::from_uri(mesh_id)),
-        )
+        .with_property("MeshContent", Variant::Content(Content::from_uri(mesh_id)))
         .with_property(
             "InitialSize",
             Variant::Vector3(Vector3::new(initial_size, initial_size, initial_size)),
         )
-        .with_property(
-            "Size",
-            Variant::Vector3(Vector3::new(4.0, 4.0, 4.0)),
-        )
+        .with_property("Size", Variant::Vector3(Vector3::new(4.0, 4.0, 4.0)))
 }
 
 fn mesh_dom(mesh_id: &str, initial_size: f32) -> WeakDom {
@@ -129,10 +123,28 @@ fn virtual_tree_records(dom: &WeakDom, side: &str) -> Vec<serde_json::Value> {
         .into_iter()
         .map(|chunk| match chunk.properties.get(&"Value".into()) {
             Some(Variant::String(value)) => value.clone(),
-            Some(Variant::BinaryString(value)) => String::from_utf8(value.clone().into_vec()).unwrap(),
+            Some(Variant::BinaryString(value)) => {
+                String::from_utf8(value.clone().into_vec()).unwrap()
+            }
             other => panic!("unexpected virtual-tree chunk: {other:?}"),
         })
         .collect();
+    serde_json::from_str(&encoded).unwrap()
+}
+
+fn conflict_impact(dom: &WeakDom, entry: Ref, side: &str) -> serde_json::Value {
+    let side_folder = child_named(dom, entry, side);
+    let impact = child_named(dom, side_folder, "__RbxDiffImpact");
+    let encoded = match dom
+        .get_by_ref(impact)
+        .unwrap()
+        .properties
+        .get(&"Value".into())
+    {
+        Some(Variant::String(value)) => value.clone(),
+        Some(Variant::BinaryString(value)) => String::from_utf8(value.clone().into_vec()).unwrap(),
+        other => panic!("unexpected conflict impact: {other:?}"),
+    };
     serde_json::from_str(&encoded).unwrap()
 }
 
@@ -154,7 +166,24 @@ fn conflict_state_survives_serialization() {
             Some(Variant::Tags(tags)) if tags.iter().any(|t| t == "RbxDiffConflict")
         ) && i.name == "P"
     });
-    assert!(tagged, "conflicted target should carry the RbxDiffConflict tag");
+    assert!(
+        tagged,
+        "conflicted target should carry the RbxDiffConflict tag"
+    );
+
+    for (side, expected) in [("Ours", 0.25), ("Theirs", 0.75)] {
+        let impact = conflict_impact(&dom, entries[0].entry_ref, side);
+        assert_eq!(impact["instanceCount"], 1);
+        assert_eq!(impact["propertyCount"], 1);
+        assert_eq!(impact["affectedIds"].as_array().unwrap().len(), 1);
+        assert_eq!(impact["operations"][0]["kind"], "Property");
+        assert_eq!(impact["operations"][0]["property"], "Transparency");
+        assert_eq!(impact["operations"][0]["path"], "root.A.P");
+        assert_eq!(impact["operations"][0]["before"]["type"], "float32");
+        assert_eq!(impact["operations"][0]["before"]["value"]["value"], 0.0);
+        assert_eq!(impact["operations"][0]["after"]["type"], "float32");
+        assert_eq!(impact["operations"][0]["after"]["value"]["value"], expected);
+    }
 }
 
 #[test]
@@ -192,7 +221,9 @@ fn complete_input_trees_survive_the_conflicted_file() {
     for (side, expected_count) in expected_counts {
         let records = virtual_tree_records(&round_tripped, side);
         assert_eq!(records.len(), expected_count, "{side} must be complete");
-        assert!(records.iter().all(|record| record.as_array().unwrap().len() == 4));
+        assert!(records
+            .iter()
+            .all(|record| record.as_array().unwrap().len() == 4));
     }
 
     let names = |side| {
@@ -269,7 +300,10 @@ fn finalize_refuses_unresolved() {
     let mut dom = conflicted_merge();
     let err = finalize(&mut dom).unwrap_err();
     assert!(err.to_string().contains("unresolved"), "{err}");
-    assert!(find_container(&dom).is_some(), "container untouched on error");
+    assert!(
+        find_container(&dom).is_some(),
+        "container untouched on error"
+    );
 }
 
 #[test]
@@ -303,7 +337,21 @@ fn delete_vs_edit_finalize_both_ways() {
         assert_eq!(result.conflicts[0].theirs.len(), 2);
         stamp_conflicts(&mut base, &ours, &theirs, &result);
         let container = find_container(&base).unwrap();
-        assert_eq!(list_entries(&base, container).len(), 1);
+        let entries = list_entries(&base, container);
+        assert_eq!(entries.len(), 1);
+
+        let ours_impact = conflict_impact(&base, entries[0].entry_ref, "Ours");
+        assert_eq!(ours_impact["instanceCount"], 3);
+        assert_eq!(ours_impact["propertyCount"], 0);
+        assert_eq!(ours_impact["affectedIds"].as_array().unwrap().len(), 3);
+        assert_eq!(ours_impact["operations"][0]["kind"], "Delete");
+        assert_eq!(ours_impact["operations"][0]["instanceCount"], 3);
+
+        let theirs_impact = conflict_impact(&base, entries[0].entry_ref, "Theirs");
+        assert_eq!(theirs_impact["instanceCount"], 2);
+        assert_eq!(theirs_impact["propertyCount"], 2);
+        assert_eq!(theirs_impact["affectedIds"].as_array().unwrap().len(), 2);
+        assert_eq!(theirs_impact["operations"].as_array().unwrap().len(), 2);
         base
     };
 
@@ -345,15 +393,12 @@ fn delete_vs_edit_snapshot_preserves_internal_references() {
         let rear = part_with("Rear", 0.0);
         let front_ref = front.referent();
         let rear_ref = rear.referent();
-        folder("A")
-            .with_child(front)
-            .with_child(rear)
-            .with_child(
-                InstanceBuilder::new("WeldConstraint")
-                    .with_name("Joint")
-                    .with_property("Part0", Variant::Ref(front_ref))
-                    .with_property("Part1", Variant::Ref(rear_ref)),
-            )
+        folder("A").with_child(front).with_child(rear).with_child(
+            InstanceBuilder::new("WeldConstraint")
+                .with_name("Joint")
+                .with_property("Part0", Variant::Ref(front_ref))
+                .with_property("Part1", Variant::Ref(rear_ref)),
+        )
     };
 
     let mut base = WeakDom::new(folder("root").with_child(linked_model(0.0)));
@@ -361,7 +406,10 @@ fn delete_vs_edit_snapshot_preserves_internal_references() {
     let theirs = WeakDom::new(folder("root"));
     let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
     assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
-    assert_eq!(result.conflicts[0].kind, rbx_diff::ConflictKind::DeleteVsEdit);
+    assert_eq!(
+        result.conflicts[0].kind,
+        rbx_diff::ConflictKind::DeleteVsEdit
+    );
 
     stamp_conflicts(&mut base, &ours, &theirs, &result);
 
@@ -389,8 +437,14 @@ fn delete_vs_edit_snapshot_preserves_internal_references() {
         .descendants()
         .find(|inst| inst.name == "Joint")
         .unwrap();
-    assert_eq!(joint.properties.get(&"Part0".into()), Some(&Variant::Ref(front)));
-    assert_eq!(joint.properties.get(&"Part1".into()), Some(&Variant::Ref(rear)));
+    assert_eq!(
+        joint.properties.get(&"Part0".into()),
+        Some(&Variant::Ref(front))
+    );
+    assert_eq!(
+        joint.properties.get(&"Part1".into()),
+        Some(&Variant::Ref(rear))
+    );
 }
 
 #[test]
@@ -408,7 +462,6 @@ fn stamped_file_diffs_cleanly_against_base() {
         "container should be invisible to the differ: {structural:#?}"
     );
 }
-
 
 #[test]
 fn custom_resolution_applies_the_supplied_value() {
@@ -428,7 +481,10 @@ fn custom_resolution_applies_the_supplied_value() {
     let mut dom: WeakDom = rbx_binary::from_reader(buffer.as_slice()).unwrap();
 
     let container = find_container(&dom).unwrap();
-    assert_eq!(list_entries(&dom, container)[0].resolved.as_deref(), Some("custom"));
+    assert_eq!(
+        list_entries(&dom, container)[0].resolved.as_deref(),
+        Some("custom")
+    );
 
     finalize(&mut dom).unwrap();
     assert_eq!(transparency_of(&dom, "P"), 0.5);
@@ -473,9 +529,10 @@ fn custom_resolution_handles_color3uint8_properties() {
     // Part.Color serializes as Color3uint8 — the custom value stores as a
     // Color3 attribute and finalize narrows it back to the property's type.
     let color_part = |r: u8, g: u8, b: u8| {
-        InstanceBuilder::new("Part")
-            .with_name("P")
-            .with_property("Color", Variant::Color3uint8(rbx_types::Color3uint8::new(r, g, b)))
+        InstanceBuilder::new("Part").with_name("P").with_property(
+            "Color",
+            Variant::Color3uint8(rbx_types::Color3uint8::new(r, g, b)),
+        )
     };
     let mut base = WeakDom::new(folder("root").with_child(color_part(100, 100, 100)));
     let ours = WeakDom::new(folder("root").with_child(color_part(255, 0, 0)));
@@ -495,10 +552,7 @@ fn custom_resolution_handles_color3uint8_properties() {
     let mut dom: WeakDom = rbx_binary::from_reader(buffer.as_slice()).unwrap();
 
     finalize(&mut dom).unwrap();
-    let part = dom
-        .descendants()
-        .find(|i| i.name == "P")
-        .unwrap();
+    let part = dom.descendants().find(|i| i.name == "P").unwrap();
     match part.properties.get(&"Color".into()) {
         Some(Variant::Color3uint8(c)) => {
             assert_eq!((c.r, c.g, c.b), (60, 120, 255));

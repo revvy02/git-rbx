@@ -44,6 +44,18 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	for _, record in versionTrees.base or {} do
 		baseParents[record.id] = record.parent or 0
 	end
+	local versionChildren: { [string]: { [number]: { VersionTreeNode } } } = {}
+	for side, records in versionTrees do
+		local children: { [number]: { VersionTreeNode } } = {}
+		for _, record in records do
+			if record.parent then
+				local bucket = children[record.parent] or {}
+				children[record.parent] = bucket
+				table.insert(bucket, record)
+			end
+		end
+		versionChildren[side] = children
+	end
 	local sideViews = {
 		base = cts.ExplorerBaseView,
 		ours = cts.ExplorerOursView,
@@ -190,16 +202,40 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		end
 
 		local cloneIds: { [Instance]: number } = {}
+		local function bindCloneIds(source: Instance, id: number, side: string)
+			cloneIds[source] = id
+			local childRecords = versionChildren[side] and versionChildren[side][id]
+			if not childRecords then
+				return
+			end
+			local buckets: { [string]: { Instance } } = {}
+			for _, child in visibleChildren(source) do
+				local key = sourceKey(child.Name, child.ClassName)
+				local bucket = buckets[key] or {}
+				buckets[key] = bucket
+				table.insert(bucket, child)
+			end
+			local consumed: { [string]: number } = {}
+			for _, record in childRecords do
+				local key = sourceKey(record.name, record.className)
+				local index = (consumed[key] or 0) + 1
+				consumed[key] = index
+				local child = buckets[key] and buckets[key][index]
+				if child then
+					bindCloneIds(child, record.id, side)
+				end
+			end
+		end
 		for _, conflict in conflicts do
 			local id = subjectIds[world:get(conflict, cts.Target) :: Instance]
 			if id then
 				local ours = world:get(conflict, cts.Ours) :: SideInfo?
 				local theirs = world:get(conflict, cts.Theirs) :: SideInfo?
 				if ours and ours.clone then
-					cloneIds[ours.clone] = id
+					bindCloneIds(ours.clone, id, "ours")
 				end
 				if theirs and theirs.clone then
-					cloneIds[theirs.clone] = id
+					bindCloneIds(theirs.clone, id, "theirs")
 				end
 			end
 		end

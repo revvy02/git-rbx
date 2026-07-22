@@ -4,7 +4,13 @@ local INDEX = {
 		tile = 16,
 		columns = 1,
 		icons = {
-			["lucide:eye"] = { 1, 0 },
+			["bxs:down-arrow"] = { 1, 0 },
+			["bxs:right-arrow"] = { 1, 1 },
+			["lucide:eye"] = { 1, 2 },
+			["lucide:minus"] = { 1, 3 },
+			["lucide:move-right"] = { 1, 4 },
+			["lucide:pencil"] = { 1, 5 },
+			["lucide:plus"] = { 1, 6 },
 		},
 	},
 }

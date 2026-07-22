@@ -19,6 +19,12 @@
 //!   frame. Requiring more than half of all matched parts, with no tie, is the
 //!   corresponding safety boundary: when the geometry does not establish one
 //!   dominant frame, we decline normalization rather than guess.
+//! * Differing descendant consensus boundaries require overwhelming
+//!   non-identity support across the asset on at least one branch. If ours
+//!   identifies an outer nested model while theirs identifies an inner model,
+//!   those are separate edits rather than competing asset frames; joint
+//!   normalization is declined. A genuine asset-wide move may still compose
+//!   with a nested branch edit even when a serialized wrapper sits above it.
 //! * The alignment is applied only to world-space properties:
 //!   `BasePart.CFrame` and `Model.WorldPivotData`. Local properties such as
 //!   `Attachment.CFrame` and `BasePart.PivotOffset` must remain untouched.
@@ -58,6 +64,8 @@ use crate::match_instances::{get_instance_path, Matcher};
 use crate::rigid_groups::Rigid;
 
 const MIN_SUPPORT: usize = 2;
+const ASSET_WIDE_SUPPORT_NUMERATOR: usize = 9;
+const ASSET_WIDE_SUPPORT_DENOMINATOR: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct ModelNormalization {
@@ -88,6 +96,13 @@ pub struct ModelFrameMerge {
     pub ours: ModelNormalization,
     pub theirs: ModelNormalization,
     pub decision: ModelFrameDecision,
+}
+
+struct DetectedModelNormalization {
+    normalization: ModelNormalization,
+    /// Lowest common ancestor of the parts that established the frame, before
+    /// widening it to the serialized asset root used as the conflict target.
+    base_consensus_ref: Ref,
 }
 
 fn collect_matches(
@@ -276,8 +291,37 @@ pub fn normalize_model_merge_frames(
     ours: &mut WeakDom,
     theirs: &mut WeakDom,
 ) -> Option<ModelFrameMerge> {
-    let ours_normalization = detect_model_normalization(base, ours)?;
-    let theirs_normalization = detect_model_normalization(base, theirs)?;
+    let ours_detected = detect_model_normalization(base, ours)?;
+    let theirs_detected = detect_model_normalization(base, theirs)?;
+
+    // Different nested models can each provide a strict-majority transform when
+    // their descendant sets overlap (for example, ours moves an outer model and
+    // theirs moves an inner model). Without overwhelming non-identity support
+    // across the asset, those deltas describe distinct nested edits, not two
+    // choices for one asset frame. The stronger threshold also accommodates a
+    // non-spatial serialized wrapper above the logical asset content.
+    let identity = identity_frame();
+    let ours_has_asset_frame = ours_detected.normalization.supporting_parts
+        * ASSET_WIDE_SUPPORT_DENOMINATOR
+        >= ours_detected.normalization.matched_parts * ASSET_WIDE_SUPPORT_NUMERATOR
+        && !model_frames_close(&ours_detected.normalization.side_delta, &identity);
+    let theirs_has_asset_frame = theirs_detected.normalization.supporting_parts
+        * ASSET_WIDE_SUPPORT_DENOMINATOR
+        >= theirs_detected.normalization.matched_parts * ASSET_WIDE_SUPPORT_NUMERATOR
+        && !model_frames_close(&theirs_detected.normalization.side_delta, &identity);
+    if ours_detected.base_consensus_ref != theirs_detected.base_consensus_ref
+        && !model_frames_close(
+            &ours_detected.normalization.side_delta,
+            &theirs_detected.normalization.side_delta,
+        )
+        && !ours_has_asset_frame
+        && !theirs_has_asset_frame
+    {
+        return None;
+    }
+
+    let ours_normalization = ours_detected.normalization;
+    let theirs_normalization = theirs_detected.normalization;
     let target_ref = lowest_common_ancestor(
         base,
         &[
@@ -302,7 +346,6 @@ pub fn normalize_model_merge_frames(
         Rigid::from_cframe(&theirs_normalization.side_delta).inverse(),
     );
 
-    let identity = identity_frame();
     let decision = if model_frames_close(
         &ours_normalization.side_delta,
         &theirs_normalization.side_delta,
@@ -325,15 +368,21 @@ pub fn normalize_model_merge_frames(
     })
 }
 
-fn detect_model_normalization(base: &WeakDom, side: &WeakDom) -> Option<ModelNormalization> {
+fn detect_model_normalization(
+    base: &WeakDom,
+    side: &WeakDom,
+) -> Option<DetectedModelNormalization> {
     let (side_delta, matched_parts, supporting_parts) = dominant_delta(base, side)?;
-    let base_target_ref =
-        serialized_asset_root(base, lowest_common_ancestor(base, &supporting_parts));
-    Some(ModelNormalization {
-        matched_parts,
-        supporting_parts: supporting_parts.len(),
-        side_delta: side_delta.to_cframe(),
-        base_target_ref,
+    let base_consensus_ref = lowest_common_ancestor(base, &supporting_parts);
+    let base_target_ref = serialized_asset_root(base, base_consensus_ref);
+    Some(DetectedModelNormalization {
+        normalization: ModelNormalization {
+            matched_parts,
+            supporting_parts: supporting_parts.len(),
+            side_delta: side_delta.to_cframe(),
+            base_target_ref,
+        },
+        base_consensus_ref,
     })
 }
 
@@ -346,7 +395,8 @@ pub fn normalize_model_dom_to_base(
     base: &WeakDom,
     side: &mut WeakDom,
 ) -> Option<ModelNormalization> {
-    let normalization = detect_model_normalization(base, side)?;
+    let detected = detect_model_normalization(base, side)?;
+    let normalization = detected.normalization;
     transform_world_properties(
         side,
         Rigid::from_cframe(&normalization.side_delta).inverse(),

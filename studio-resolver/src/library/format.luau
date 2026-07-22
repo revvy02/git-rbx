@@ -56,6 +56,60 @@ function format.formatValue(v: any): string
 	return t
 end
 
+-- Rust's structured diff::PropertyValue, used by the direct conflict patch.
+-- Keep this separate from formatValue: these values can represent properties
+-- Studio cannot read (WorldPivotData, serialized mesh content, removed refs).
+function format.patchValue(encoded: any): string
+	if not encoded then
+		return "?"
+	end
+	local kind = encoded.type
+	local value = encoded.value or {}
+	if kind == "nil" then
+		return "nil"
+	elseif kind == "bool" or kind == "int32" or kind == "int64" or kind == "float32" or kind == "float64" then
+		return tostring(value.value)
+	elseif kind == "string" then
+		local text = tostring(value.value):gsub("\r", "\\r"):gsub("\n", "\\n")
+		return `"{format.escapeRich(text)}"`
+	elseif kind == "binary_string" then
+		return `&lt;binary {value.len} bytes&gt;`
+	elseif kind == "ref" then
+		return `→ {format.escapeRich(tostring(value.value))}`
+	elseif kind == "vector2" then
+		return `Vector2({formatFloat32Components({ value.x, value.y })})`
+	elseif kind == "vector3" then
+		return `Vector3({formatFloat32Components({ value.x, value.y, value.z })})`
+	elseif kind == "c_frame" then
+		local numbers = { value.position[1], value.position[2], value.position[3] }
+		for _, row in value.orientation do
+			for _, component in row do
+				table.insert(numbers, component)
+			end
+		end
+		return `CFrame({formatFloat32Components(numbers)})`
+	elseif kind == "color3" then
+		return `Color3({formatFloat32Components({ value.r, value.g, value.b })})`
+	elseif kind == "brick_color" then
+		return `BrickColor({value.value})`
+	elseif kind == "enum" then
+		return `Enum({value.value})`
+	elseif kind == "u_dim" then
+		return `UDim({formatFloat32(value.scale)}, {value.offset})`
+	elseif kind == "u_dim2" then
+		return `UDim2({formatFloat32(value.x_scale)}, {value.x_offset}, {formatFloat32(value.y_scale)}, {value.y_offset})`
+	elseif kind == "number_range" then
+		return `NumberRange({formatFloat32(value.min)}, {formatFloat32(value.max)})`
+	elseif kind == "number_sequence" or kind == "color_sequence" then
+		return `{kind == "number_sequence" and "NumberSequence" or "ColorSequence"}({#value.keypoints} keypoints)`
+	elseif kind == "rect" then
+		return `Rect({formatFloat32Components({ value.min_x, value.min_y, value.max_x, value.max_y })})`
+	elseif kind == "other" then
+		return `&lt;{format.escapeRich(tostring(value.type_name))}&gt;`
+	end
+	return format.escapeRich(tostring(kind))
+end
+
 -- Encode a captured value as the plain JSON the CLI coerces by property type.
 -- Returns nil for types custom resolution doesn't support.
 function format.encodeValue(v: any): any
