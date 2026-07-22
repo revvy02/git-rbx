@@ -29,7 +29,7 @@ export type SideInfo = {
 export type Base = {
 	value: any, -- Property: value to restore
 	parent: Instance?, -- MoveTarget: parent to restore
-	parts: { [BasePart]: number }?, -- DeleteVsEdit: true transparencies
+	parts: { [BasePart]: number }?, -- clone swaps: true target transparencies
 	frameParts: { [BasePart]: CFrame }?, -- ModelFrame: canonical world transforms
 	frameModels: { [Model]: CFrame }?, -- ModelFrame: canonical pivots
 }
@@ -38,6 +38,7 @@ export type Base = {
 -- canonical merged-DOM identity across views; `source` is the concrete version
 -- this occurrence presents. Virtual rows can omit all three.
 export type ExplorerNode = {
+	id: number?, -- logical identity shared by matched nodes across version trees
 	source: Instance?,
 	subject: Instance?,
 	entity: any?,
@@ -51,7 +52,18 @@ export type ExplorerNode = {
 export type ExplorerProjection = {
 	roots: { ExplorerNode },
 	index: { [Instance]: ExplorerNode },
+	idIndex: { [number]: ExplorerNode }?,
+	selectionIndex: { [number]: ExplorerNode }?, -- exact node or nearest surviving ancestor
 }
+
+export type VersionTreeNode = {
+	id: number,
+	parent: number?,
+	name: string,
+	className: string,
+}
+
+export type VersionTrees = { [string]: { VersionTreeNode } }
 
 local cts = {
 	-- The live preview Instance an entity mirrors.
@@ -74,11 +86,15 @@ local cts = {
 	ExplorerOursView = world:entity(),
 	ExplorerTheirsView = world:entity(),
 	ExplorerResultView = world:entity(),
+	VersionTrees = world:component(), -- complete immutable base/ours/theirs manifests
+	VirtualSubjects = world:component(), -- logical id -> live result Instance when present
+	VirtualSubjectIds = world:component(), -- live result Instance -> logical id
 
 	-- Conflict entities, one per stamped container entry.
-	Kind = world:component(), -- "Property" | "MoveTarget" | "DeleteVsEdit" | "ModelFrame"
+	Kind = world:component(), -- "Property" | "PropertyBundle" | "MoveTarget" | "DeleteVsEdit" | "ModelFrame"
 	Path = world:component(), -- display path of the contested instance
 	Property = world:component(), -- Property kind: the contested property name
+	Properties = world:component(), -- PropertyBundle: atomic serialized property names
 	Target = world:component(), -- the contested live Instance
 	Entry = world:component(), -- the stamped container entry (Name = CLI --entry)
 	Order = world:component(), -- stable list position (entry-name sort)
@@ -102,6 +118,8 @@ local cts = {
 	ViewTab = world:component(), -- "base" | "ours" | "theirs" | "result"
 	SelectedConflict = world:component(), -- conflict entity
 	SelectedInstance = world:component(), -- Instance the explorer/props focus on
+	SelectedExplorerId = world:component(), -- logical selection shared by all version projections
+	ExplorerRevealGeneration = world:component(), -- bumps when Select should expand + center again
 	CompleteError = world:component(), -- last Complete failure message
 	Completing = world:entity(), -- tag: CLI batch in flight
 	Finished = world:entity(), -- tag: finalized, file written

@@ -23,6 +23,29 @@ function conflicts.cards(): { any }
 	return (world:get(cts.Cards, cts.Cards) :: { any }?) or conflicts.list()
 end
 
+-- Select a conflict without deciding or moving the camera. The logical id
+-- keeps the corresponding virtual node selected across all four Explorer
+-- projections; SelectedInstance continues to drive the property panel.
+function conflicts.select(entity: any)
+	world:set(cts.SelectedConflict, cts.SelectedConflict, entity)
+	local target = world:get(entity, cts.Target) :: Instance?
+	if not target then
+		world:remove(cts.SelectedInstance, cts.SelectedInstance)
+		world:remove(cts.SelectedExplorerId, cts.SelectedExplorerId)
+		return
+	end
+	world:set(cts.SelectedInstance, cts.SelectedInstance, target)
+	local subjectIds = (world:get(cts.VirtualSubjectIds, cts.VirtualSubjectIds) :: { [Instance]: number }?) or {}
+	local id = subjectIds[target]
+	if id then
+		world:set(cts.SelectedExplorerId, cts.SelectedExplorerId, id)
+	else
+		world:remove(cts.SelectedExplorerId, cts.SelectedExplorerId)
+	end
+	local revealGeneration = (world:get(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration) :: number?) or 0
+	world:set(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration, revealGeneration + 1)
+end
+
 -- A group's uniform member resolution, or nil when unpicked/mixed.
 function conflicts.groupResolution(entity: any): string?
 	local members = (world:get(entity, cts.Members) :: { any }?) or {}
@@ -38,13 +61,16 @@ function conflicts.groupResolution(entity: any): string?
 	return first
 end
 
+function conflicts.stageGroup(entity: any, side: string?)
+	for _, member in (world:get(entity, cts.Members) :: { any }?) or {} do
+		conflicts.stage(member, side)
+	end
+end
+
 -- Group toggle: stage every member to the side, or unpick all when the
 -- group is already uniformly on it.
 function conflicts.chooseGroup(entity: any, side: string)
-	local next = if conflicts.groupResolution(entity) == side then nil else side
-	for _, member in (world:get(entity, cts.Members) :: { any }?) or {} do
-		conflicts.stage(member, next)
-	end
+	conflicts.stageGroup(entity, if conflicts.groupResolution(entity) == side then nil else side)
 end
 
 -- Delete-vs-edit: which side deletes, from the stamped Deleted attributes.
@@ -61,12 +87,19 @@ function conflicts.deleteSide(entity: any): string?
 end
 
 -- What the 3D preview is actually rendering for this conflict right now:
--- normally the target, but a staged keep side with an edited clone renders
--- the clone instead (it carries its own true coordinates). Focus and
--- highlights both follow this.
+-- normally the target, but clone-backed decisions render the selected clone.
+-- Focus and highlights both follow the visible payload.
 function conflicts.renderedInstance(entity: any): Instance
 	local target = world:get(entity, cts.Target) :: Instance
-	if world:get(entity, cts.Kind) ~= "DeleteVsEdit" then
+	local kind = world:get(entity, cts.Kind)
+	if kind == "PropertyBundle" then
+		local side = world:get(entity, cts.Resolution) :: string?
+		local info = if side == "ours"
+			then world:get(entity, cts.Ours) :: SideInfo?
+			elseif side == "theirs" then world:get(entity, cts.Theirs) :: SideInfo?
+			else nil
+		return if info and info.clone then info.clone else target
+	elseif kind ~= "DeleteVsEdit" then
 		return target
 	end
 	local keepSide = if conflicts.deleteSide(entity) == "ours" then "theirs" else "ours"

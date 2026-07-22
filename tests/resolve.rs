@@ -3,10 +3,10 @@
 
 use rbx_diff::{
     diff_doms, finalize, find_container, list_entries, mark_entry, merge_doms, stamp_conflicts,
-    DiffConfig,
+    DiffConfig, VIRTUAL_TREES_NAME,
 };
-use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::Variant;
+use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
+use rbx_types::{Content, Variant, Vector3};
 
 fn folder(name: &str) -> InstanceBuilder {
     InstanceBuilder::new("Folder").with_name(name)
@@ -17,6 +17,47 @@ fn part_with(name: &str, transparency: f32) -> InstanceBuilder {
         .with_name(name)
         .with_property("Anchored", Variant::Bool(true))
         .with_property("Transparency", Variant::Float32(transparency))
+}
+
+fn mesh_part(mesh_id: &str, initial_size: f32) -> InstanceBuilder {
+    InstanceBuilder::new("MeshPart")
+        .with_name("Mesh")
+        .with_property(
+            "MeshContent",
+            Variant::Content(Content::from_uri(mesh_id)),
+        )
+        .with_property(
+            "InitialSize",
+            Variant::Vector3(Vector3::new(initial_size, initial_size, initial_size)),
+        )
+        .with_property(
+            "Size",
+            Variant::Vector3(Vector3::new(4.0, 4.0, 4.0)),
+        )
+}
+
+fn mesh_dom(mesh_id: &str, initial_size: f32) -> WeakDom {
+    WeakDom::new(folder("root").with_child(mesh_part(mesh_id, initial_size)))
+}
+
+fn conflicted_mesh_merge() -> WeakDom {
+    let mut base = mesh_dom("rbxassetid://1", 1.0);
+    let ours = mesh_dom("rbxassetid://2", 2.0);
+    let theirs = mesh_dom("rbxassetid://3", 3.0);
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+    assert_eq!(result.conflicts.len(), 1, "{:#?}", result.conflicts);
+    assert!(matches!(
+        &result.conflicts[0].kind,
+        rbx_diff::ConflictKind::PropertyBundle { name, properties }
+            if name == "Mesh geometry"
+                && properties.iter().any(|property| property == "MeshContent")
+                && properties.iter().any(|property| property == "InitialSize")
+    ));
+    stamp_conflicts(&mut base, &ours, &theirs, &result);
+
+    let mut bytes = Vec::new();
+    rbx_binary::to_writer(&mut bytes, &base, base.root().children()).unwrap();
+    rbx_binary::from_reader(bytes.as_slice()).unwrap()
 }
 
 fn base_dom() -> WeakDom {
@@ -63,6 +104,38 @@ fn transparency_of(dom: &WeakDom, part_name: &str) -> f32 {
     }
 }
 
+fn child_named(dom: &WeakDom, parent: Ref, name: &str) -> Ref {
+    *dom.get_by_ref(parent)
+        .unwrap()
+        .children()
+        .iter()
+        .find(|&&child| dom.get_by_ref(child).unwrap().name == name)
+        .unwrap_or_else(|| panic!("missing child {name}"))
+}
+
+fn virtual_tree_records(dom: &WeakDom, side: &str) -> Vec<serde_json::Value> {
+    let container = find_container(dom).unwrap();
+    let trees = child_named(dom, container, VIRTUAL_TREES_NAME);
+    let tree = child_named(dom, trees, side);
+    let mut chunks: Vec<_> = dom
+        .get_by_ref(tree)
+        .unwrap()
+        .children()
+        .iter()
+        .map(|&referent| dom.get_by_ref(referent).unwrap())
+        .collect();
+    chunks.sort_by(|a, b| a.name.cmp(&b.name));
+    let encoded: String = chunks
+        .into_iter()
+        .map(|chunk| match chunk.properties.get(&"Value".into()) {
+            Some(Variant::String(value)) => value.clone(),
+            Some(Variant::BinaryString(value)) => String::from_utf8(value.clone().into_vec()).unwrap(),
+            other => panic!("unexpected virtual-tree chunk: {other:?}"),
+        })
+        .collect();
+    serde_json::from_str(&encoded).unwrap()
+}
+
 #[test]
 fn conflict_state_survives_serialization() {
     let dom = conflicted_merge();
@@ -82,6 +155,57 @@ fn conflict_state_survives_serialization() {
         ) && i.name == "P"
     });
     assert!(tagged, "conflicted target should carry the RbxDiffConflict tag");
+}
+
+#[test]
+fn complete_input_trees_survive_the_conflicted_file() {
+    let mut base = WeakDom::new(
+        folder("root")
+            .with_child(folder("BaseOnly"))
+            .with_child(folder("Shared").with_child(part_with("Conflict", 0.0))),
+    );
+    let ours = WeakDom::new(
+        folder("root")
+            .with_child(folder("BaseOnly"))
+            .with_child(folder("OursOnly"))
+            .with_child(folder("Shared").with_child(part_with("Conflict", 0.25))),
+    );
+    let theirs = WeakDom::new(
+        folder("root")
+            .with_child(folder("TheirsOnly"))
+            .with_child(folder("Shared").with_child(part_with("Conflict", 0.75))),
+    );
+    let expected_counts = [
+        ("Base", base.descendants().count() - 1),
+        ("Ours", ours.descendants().count() - 1),
+        ("Theirs", theirs.descendants().count() - 1),
+    ];
+
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+    assert_eq!(result.conflicts.len(), 1, "{:#?}", result.conflicts);
+    stamp_conflicts(&mut base, &ours, &theirs, &result);
+
+    let mut bytes = Vec::new();
+    rbx_binary::to_writer(&mut bytes, &base, base.root().children()).unwrap();
+    let round_tripped: WeakDom = rbx_binary::from_reader(bytes.as_slice()).unwrap();
+
+    for (side, expected_count) in expected_counts {
+        let records = virtual_tree_records(&round_tripped, side);
+        assert_eq!(records.len(), expected_count, "{side} must be complete");
+        assert!(records.iter().all(|record| record.as_array().unwrap().len() == 4));
+    }
+
+    let names = |side| {
+        virtual_tree_records(&round_tripped, side)
+            .into_iter()
+            .map(|record| record[2].as_str().unwrap().to_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    assert!(names("Base").contains("BaseOnly"));
+    assert!(names("Ours").contains("OursOnly"));
+    assert!(!names("Ours").contains("TheirsOnly"));
+    assert!(names("Theirs").contains("TheirsOnly"));
+    assert!(!names("Theirs").contains("BaseOnly"));
 }
 
 #[test]
@@ -113,6 +237,31 @@ fn finalize_take_theirs() {
     mark_entry(&mut dom, entry, "theirs").unwrap();
     finalize(&mut dom).unwrap();
     assert_eq!(transparency_of(&dom, "P"), 0.75);
+}
+
+#[test]
+fn mesh_geometry_resolves_as_one_atomic_serialized_bundle() {
+    for (side, expected_id, expected_size) in [
+        ("ours", "rbxassetid://2", 2.0),
+        ("theirs", "rbxassetid://3", 3.0),
+    ] {
+        let mut dom = conflicted_mesh_merge();
+        let container = find_container(&dom).unwrap();
+        let entries = list_entries(&dom, container);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "PropertyBundle");
+        assert_eq!(entries[0].property.as_deref(), Some("Mesh geometry"));
+        assert!(entries[0]
+            .properties
+            .iter()
+            .any(|property| property == "InitialSize"));
+
+        mark_entry(&mut dom, entries[0].entry_ref, side).unwrap();
+        finalize(&mut dom).unwrap();
+        let expected = mesh_dom(expected_id, expected_size);
+        let residual = diff_doms(&dom, &expected);
+        assert!(residual.is_empty(), "{side}: {residual:#?}");
+    }
 }
 
 #[test]

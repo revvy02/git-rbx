@@ -17,10 +17,25 @@ use std::rc::Rc;
 use tracing::{debug, info};
 
 use crate::hash::{DeepHashCache, LazyHashCache};
-use crate::property_semantics::{get_authored_properties, stable_content_identity};
+use crate::property_semantics::{
+    get_authored_properties, pairing_compatible, strong_content_key, PairingBasis,
+};
 use crate::value_compare::non_ref_variants_equal;
 
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
+
+fn refs_compatible(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    old_ref: Ref,
+    new_ref: Ref,
+    basis: PairingBasis,
+) -> bool {
+    let (Some(old), Some(new)) = (old_dom.get_by_ref(old_ref), new_dom.get_by_ref(new_ref)) else {
+        return false;
+    };
+    pairing_compatible(old, new, basis)
+}
 
 fn tolerant_non_ref_properties_equal(
     old: &rbx_dom_weak::Instance,
@@ -210,7 +225,16 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 indices
                     .iter()
                     .copied()
-                    .filter(|&i| !old_matched[i] && old_children[i].class == new_child.class)
+                    .filter(|&i| {
+                        !old_matched[i]
+                            && refs_compatible(
+                                old_dom,
+                                new_dom,
+                                old_children[i].referent,
+                                new_child.referent,
+                                PairingBasis::AnchoredName,
+                            )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -277,6 +301,13 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 !old_matched[oi] && {
                     let old_hash = old_hashes.get(old_children[oi].referent);
                     *old_hash.as_bytes() == new_hash_bytes
+                        && refs_compatible(
+                            old_dom,
+                            new_dom,
+                            old_children[oi].referent,
+                            new_children[new_idx].referent,
+                            PairingBasis::ExactContent,
+                        )
                 }
             });
 
@@ -300,6 +331,13 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 !old_matched[oi] && {
                     let old_hash_nr = old_hashes.get_no_refs(old_children[oi].referent);
                     *old_hash_nr.as_bytes() == new_hash_nr_bytes
+                        && refs_compatible(
+                            old_dom,
+                            new_dom,
+                            old_children[oi].referent,
+                            new_children[new_idx].referent,
+                            PairingBasis::ExactContent,
+                        )
                 }
             });
 
@@ -322,14 +360,14 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             .filter(|&&old_idx| !old_matched[old_idx])
             .filter_map(|&old_idx| {
                 let instance = old_dom.get_by_ref(old_children[old_idx].referent)?;
-                stable_content_identity(instance).map(|identity| (old_idx, identity))
+                strong_content_key(instance).map(|identity| (old_idx, identity))
             })
             .collect();
         let new_identities: HashMap<usize, String> = still_remaining
             .iter()
             .filter_map(|&new_idx| {
                 let instance = new_dom.get_by_ref(new_children[new_idx].referent)?;
-                stable_content_identity(instance).map(|identity| (new_idx, identity))
+                strong_content_key(instance).map(|identity| (new_idx, identity))
             })
             .collect();
         let mut old_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -360,6 +398,15 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 continue;
             }
             let old_idx = old_indices[0];
+            if !refs_compatible(
+                old_dom,
+                new_dom,
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+                PairingBasis::Inferred,
+            ) {
+                continue;
+            }
             old_matched[old_idx] = true;
             new_matched[new_idx] = true;
             matched.push((
@@ -392,7 +439,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                     for &new_idx in &still_remaining {
                         let old_inst = old_dom.get_by_ref(old_children[old_idx].referent).unwrap();
                         let new_inst = new_dom.get_by_ref(new_children[new_idx].referent).unwrap();
-                        if tolerant_non_ref_properties_equal(old_inst, new_inst) {
+                        if pairing_compatible(old_inst, new_inst, PairingBasis::Inferred)
+                            && tolerant_non_ref_properties_equal(old_inst, new_inst)
+                        {
                             edges.push((old_idx, new_idx));
                             old_edges[old_idx] += 1;
                             new_edges[new_idx] += 1;
@@ -433,9 +482,14 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             .collect();
 
         for new_idx in still_remaining {
-            let new_identity = new_identities.get(&new_idx).map(String::as_str);
             let old_position = remaining_old.iter().position(|old_idx| {
-                old_identities.get(old_idx).map(String::as_str) == new_identity
+                refs_compatible(
+                    old_dom,
+                    new_dom,
+                    old_children[*old_idx].referent,
+                    new_children[new_idx].referent,
+                    PairingBasis::Inferred,
+                )
             });
             if let Some(old_position) = old_position {
                 let oi = remaining_old.remove(old_position);
@@ -534,6 +588,15 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
             let old_idx = old_indices[0];
             let new_idx = new_indices[0];
+            if !refs_compatible(
+                old_dom,
+                new_dom,
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+                PairingBasis::ContentPreservingRename,
+            ) {
+                continue;
+            }
             old_matched[old_idx] = true;
             new_matched[new_idx] = true;
             matched.push((
@@ -581,6 +644,15 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
             let old_idx = old_indices[0];
             let new_idx = new_indices[0];
+            if !refs_compatible(
+                old_dom,
+                new_dom,
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+                PairingBasis::ContentPreservingRename,
+            ) {
+                continue;
+            }
             old_matched[old_idx] = true;
             new_matched[new_idx] = true;
             matched.push((

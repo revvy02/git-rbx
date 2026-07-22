@@ -29,6 +29,7 @@ use rbx_types::{Attributes, Tags, Variant};
 use std::collections::HashMap;
 
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
+use crate::explorer_tree::{ExplorerTree, ExplorerTrees};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
 use crate::model_normalize::apply_model_frame;
@@ -37,6 +38,9 @@ use crate::rigid_groups::RigidGroup;
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
 pub const CONFLICT_TAG: &str = "RbxDiffConflict";
 pub const ENTRY_TAG: &str = "RbxDiffConflictEntry";
+pub const VIRTUAL_TREES_NAME: &str = "VirtualTrees";
+
+const VIRTUAL_TREE_CHUNK_BYTES: usize = 100_000;
 
 /// Stamp the conflict container into a merged DOM. `base` is the merged
 /// result (conflicted targets at base state); the branch DOMs supply the
@@ -68,7 +72,7 @@ pub fn stamp_conflicts(
                 "Attributes",
                 Variant::Attributes(
                     Attributes::new()
-                        .with("Version", Variant::Float64(1.0))
+                        .with("Version", Variant::Float64(2.0))
                         .with(
                             "ConflictCount",
                             Variant::Float64(result.conflicts.len() as f64),
@@ -77,6 +81,8 @@ pub fn stamp_conflicts(
             ),
     );
 
+    stamp_explorer_trees(base, container, &result.explorer_trees);
+
     for (index, conflict) in result.conflicts.iter().enumerate() {
         let mut attrs = Attributes::new()
             .with(
@@ -84,8 +90,16 @@ pub fn stamp_conflicts(
                 Variant::String(kind_str(&conflict.kind).to_string()),
             )
             .with("Path", Variant::String(conflict.path.clone()));
-        if let ConflictKind::Property { name } = &conflict.kind {
-            attrs = attrs.with("Property", Variant::String(name.clone()));
+        match &conflict.kind {
+            ConflictKind::Property { name } => {
+                attrs = attrs.with("Property", Variant::String(name.clone()));
+            }
+            ConflictKind::PropertyBundle { name, properties } => {
+                attrs = attrs
+                    .with("Property", Variant::String(name.clone()))
+                    .with("Properties", Variant::String(properties.join(",")));
+            }
+            _ => {}
         }
 
         let mut tags = Tags::new();
@@ -134,6 +148,99 @@ pub fn stamp_conflicts(
 
         tag_instance(base, conflict.base_ref, CONFLICT_TAG);
     }
+}
+
+/// Store the complete input hierarchies as compact data rather than physical
+/// clones. A shared ObjectValue table links logical ids to instances that
+/// exist in the partially merged result; unmatched/deleted nodes remain valid
+/// virtual rows without a concrete subject.
+fn stamp_explorer_trees(base: &mut WeakDom, container: Ref, trees: &ExplorerTrees) {
+    let virtual_trees = base.insert(
+        container,
+        InstanceBuilder::new("Folder")
+            .with_name(VIRTUAL_TREES_NAME)
+            .with_property(
+                "Attributes",
+                Variant::Attributes(Attributes::new().with("Version", Variant::Float64(1.0))),
+            ),
+    );
+
+    stamp_explorer_tree(base, virtual_trees, "Base", &trees.base);
+    stamp_explorer_tree(base, virtual_trees, "Ours", &trees.ours);
+    stamp_explorer_tree(base, virtual_trees, "Theirs", &trees.theirs);
+
+    let subjects = base.insert(
+        virtual_trees,
+        InstanceBuilder::new("Folder").with_name("Subjects"),
+    );
+    let mut result_subjects: Vec<(u32, Ref)> = trees
+        .result_subjects
+        .iter()
+        .map(|(&id, &referent)| (id, referent))
+        .collect();
+    result_subjects.sort_unstable_by_key(|(id, _)| *id);
+    for (id, referent) in result_subjects {
+        base.insert(
+            subjects,
+            InstanceBuilder::new("ObjectValue")
+                .with_name(format!("N{id}"))
+                .with_property("Value", Variant::Ref(referent)),
+        );
+    }
+}
+
+fn stamp_explorer_tree(base: &mut WeakDom, parent: Ref, name: &str, tree: &ExplorerTree) {
+    // Arrays keep a large tree compact: [logical id, parent id or 0, name,
+    // class]. Chunks avoid Studio/property string limits and are concatenated
+    // before JSONDecode by the resolver.
+    let records: Vec<(u32, u32, &str, &str)> = tree
+        .nodes
+        .iter()
+        .map(|node| {
+            (
+                node.id,
+                node.parent.unwrap_or(0),
+                node.name.as_str(),
+                node.class_name.as_str(),
+            )
+        })
+        .collect();
+    let encoded = serde_json::to_string(&records).expect("virtual explorer tree is serializable");
+    let tree_folder = base.insert(
+        parent,
+        InstanceBuilder::new("Folder")
+            .with_name(name)
+            .with_property(
+                "Attributes",
+                Variant::Attributes(
+                    Attributes::new().with("NodeCount", Variant::Float64(tree.nodes.len() as f64)),
+                ),
+            ),
+    );
+    for (index, chunk) in utf8_chunks(&encoded, VIRTUAL_TREE_CHUNK_BYTES).enumerate() {
+        base.insert(
+            tree_folder,
+            InstanceBuilder::new("StringValue")
+                .with_name(format!("Chunk_{index:06}"))
+                .with_property("Value", Variant::String(chunk.to_string())),
+        );
+    }
+}
+
+fn utf8_chunks(value: &str, max_bytes: usize) -> impl Iterator<Item = &str> {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        if start >= value.len() {
+            return None;
+        }
+        let mut end = (start + max_bytes).min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &value[start..end];
+        start = end;
+        Some(chunk)
+    })
 }
 
 fn stamp_model_frame_side(
@@ -320,6 +427,7 @@ fn find_container_parent(dom: &WeakDom) -> Ref {
 fn kind_str(kind: &ConflictKind) -> &'static str {
     match kind {
         ConflictKind::Property { .. } => "Property",
+        ConflictKind::PropertyBundle { .. } => "PropertyBundle",
         ConflictKind::DeleteVsEdit => "DeleteVsEdit",
         ConflictKind::MoveTarget => "MoveTarget",
         ConflictKind::ModelFrame { .. } => "ModelFrame",
@@ -374,6 +482,8 @@ pub struct ConflictEntry {
     pub kind: String,
     pub path: String,
     pub property: Option<String>,
+    /// Atomic serialized fields for PropertyBundle entries.
+    pub properties: Vec<String>,
     pub resolved: Option<String>,
     /// Rigid-group entry name this conflict belongs to, if grouped.
     pub group: Option<String>,
@@ -405,6 +515,15 @@ pub fn list_entries(dom: &WeakDom, container: Ref) -> Vec<ConflictEntry> {
                 kind: get_str("Kind")?,
                 path: get_str("Path")?,
                 property: get_str("Property"),
+                properties: get_str("Properties")
+                    .map(|properties| {
+                        properties
+                            .split(',')
+                            .filter(|property| !property.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 resolved: get_str("Resolved").filter(|s| !s.is_empty()),
                 group: get_str("Group"),
             })
@@ -811,6 +930,39 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
                                 inst.properties.remove(&prop.into());
                             }
                         }
+                    }
+                }
+            }
+        }
+        "PropertyBundle" => {
+            if entry.properties.is_empty() {
+                bail!("{}: property bundle has no Properties", entry.path);
+            }
+            let clone_ref = first_non_value_child(dom, side_folder).ok_or_else(|| {
+                anyhow::anyhow!("{}: missing {} clone", entry.path, side_folder_name)
+            })?;
+            let values: Vec<_> = entry
+                .properties
+                .iter()
+                .map(|property| {
+                    (
+                        property.clone(),
+                        dom.get_by_ref(clone_ref)
+                            .and_then(|instance| instance.properties.get(&property.as_str().into()))
+                            .cloned(),
+                    )
+                })
+                .collect();
+            let Some(target_instance) = dom.get_by_ref_mut(target) else {
+                bail!("{}: bundle target no longer exists", entry.path);
+            };
+            for (property, value) in values {
+                match value {
+                    Some(value) => {
+                        target_instance.properties.insert(property.into(), value);
+                    }
+                    None => {
+                        target_instance.properties.remove(&property.into());
                     }
                 }
             }

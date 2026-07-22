@@ -7,9 +7,9 @@
 
 use rbx_diff::{
     diff_doms, finalize, find_container, list_entries, mark_entry, normalize_model_dom_to_base,
+    verify_mesh_geometry,
 };
 use rbx_dom_weak::{types::Ref, WeakDom};
-use rbx_types::{CFrame, ContentType, Variant};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -63,119 +63,6 @@ fn shape_distance(a: &BTreeMap<String, usize>, b: &BTreeMap<String, usize>) -> u
         }
     }
     distance
-}
-
-fn cframe(dom: &WeakDom, referent: Ref) -> Option<CFrame> {
-    match dom.get_by_ref(referent)?.properties.get(&"CFrame".into()) {
-        Some(Variant::CFrame(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn mesh_id(dom: &WeakDom, referent: Ref) -> String {
-    let Some(instance) = dom.get_by_ref(referent) else {
-        return String::new();
-    };
-    ["MeshContent", "MeshId", "MeshID"]
-        .into_iter()
-        .find_map(|name| instance.properties.get(&name.into()))
-        .and_then(|value| match value {
-            Variant::Content(content) => match content.value() {
-                ContentType::Uri(uri) => Some(uri.clone()),
-                _ => None,
-            },
-            Variant::ContentId(content) => Some(content.as_str().to_string()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-fn vector3_components(dom: &WeakDom, referent: Ref, property: &str) -> Option<[f64; 3]> {
-    match dom.get_by_ref(referent)?.properties.get(&property.into()) {
-        Some(Variant::Vector3(value)) => {
-            Some([value.x as f64, value.y as f64, value.z as f64])
-        }
-        _ => None,
-    }
-}
-
-fn mesh_components(dom: &WeakDom, referent: Ref) -> Option<[f64; 18]> {
-    let frame = cframe(dom, referent)?;
-    let size = vector3_components(dom, referent, "Size")?;
-    let initial_size = vector3_components(dom, referent, "InitialSize")?;
-    Some([
-        frame.position.x as f64,
-        frame.position.y as f64,
-        frame.position.z as f64,
-        frame.orientation.x.x as f64,
-        frame.orientation.x.y as f64,
-        frame.orientation.x.z as f64,
-        frame.orientation.y.x as f64,
-        frame.orientation.y.y as f64,
-        frame.orientation.y.z as f64,
-        frame.orientation.z.x as f64,
-        frame.orientation.z.y as f64,
-        frame.orientation.z.z as f64,
-        size[0],
-        size[1],
-        size[2],
-        initial_size[0],
-        initial_size[1],
-        initial_size[2],
-    ])
-}
-
-/// Raw oracle independent of rbx-diff's matcher. Each structural path and
-/// content ID maps to a multiset so duplicate siblings remain order-agnostic.
-/// `InitialSize` is included because Studio uses it to scale MeshContent; a
-/// mismatched value can make a correctly sized part render gigantic.
-fn mesh_states(dom: &WeakDom) -> Option<BTreeMap<String, Vec<[f64; 18]>>> {
-    let mut result: BTreeMap<String, Vec<[f64; 18]>> = BTreeMap::new();
-    for instance in dom.descendants() {
-        if instance.class.as_str() != "MeshPart" {
-            continue;
-        }
-        let referent = instance.referent();
-        let key = format!("{}|{}", instance_path(dom, referent), mesh_id(dom, referent));
-        result
-            .entry(key)
-            .or_default()
-            .push(mesh_components(dom, referent)?);
-    }
-    for states in result.values_mut() {
-        states.sort_by(|left, right| {
-            left.iter()
-                .zip(right)
-                .map(|(left, right)| left.total_cmp(right))
-                .find(|ordering| !ordering.is_eq())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
-    Some(result)
-}
-
-fn mesh_states_match(actual: &WeakDom, expected: &WeakDom) -> bool {
-    let (Some(actual), Some(expected)) = (mesh_states(actual), mesh_states(expected)) else {
-        return false;
-    };
-    if actual.keys().ne(expected.keys()) {
-        return false;
-    }
-    for (key, actual_states) in actual {
-        let expected_states = &expected[&key];
-        if actual_states.len() != expected_states.len() {
-            return false;
-        }
-        for (actual, expected) in actual_states.iter().zip(expected_states) {
-            for component in 0..18 {
-                let tolerance = if component < 3 { 0.01 } else { 1e-4 };
-                if (actual[component] - expected[component]).abs() > tolerance {
-                    return false;
-                }
-            }
-        }
-    }
-    true
 }
 
 fn decision_string(names: &[String], mask: usize) -> String {
@@ -282,7 +169,7 @@ fn human_merge_is_reachable_from_binary_conflict_decisions() {
         normalize_model_dom_to_base(&expected, &mut candidate)
             .expect("candidate should have a dominant model frame");
         if diff_doms(&expected, &candidate).is_empty()
-            && mesh_states_match(&candidate, &expected)
+            && verify_mesh_geometry(&candidate, &expected).is_empty()
         {
             exact_matches.push(mask);
         }

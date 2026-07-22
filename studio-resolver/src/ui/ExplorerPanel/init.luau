@@ -54,8 +54,12 @@ local expanded: { [any]: boolean } = {}
 local expansionGen = 0
 local seededViews: { [any]: boolean } = {}
 local lastRevealedInstance: Instance? = nil
+local lastRevealedId: number? = nil
 local lastRevealedView: any? = nil
 local lastRevealedGeneration = -1
+local lastRevealRequest = -1
+local pendingCenterNode: ExplorerNode? = nil
+local pendingCenterView: any? = nil
 local searchText = ""
 local searchGen = 0
 
@@ -65,7 +69,17 @@ local function setExpanded(key: any, isExpanded: boolean)
 end
 
 local function expansionKey(node: ExplorerNode): any
-	return node.subject or node.source or node
+	return if node.id then `virtual:{node.id}` else node.subject or node.source or node
+end
+
+local function selectedNode(projection: ExplorerProjection): ExplorerNode?
+	local id = world:get(cts.SelectedExplorerId, cts.SelectedExplorerId) :: number?
+	local node = id and projection.selectionIndex and projection.selectionIndex[id]
+	if node then
+		return node
+	end
+	local inst = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
+	return inst and projection.index[inst]
 end
 
 local function seedExpansion(view: any, projection: ExplorerProjection)
@@ -74,8 +88,11 @@ local function seedExpansion(view: any, projection: ExplorerProjection)
 	end
 	seededViews[view] = true
 	expansionGen += 1
+	local subjectIds = (world:get(cts.VirtualSubjectIds, cts.VirtualSubjectIds) :: { [Instance]: number }?) or {}
 	for _, target in world:query(cts.Target) do
-		local node = projection.index[target :: Instance]
+		local inst = target :: Instance
+		local id = subjectIds[inst]
+		local node = (id and projection.selectionIndex and projection.selectionIndex[id]) or projection.index[inst]
 		node = node and node.parent
 		while node do
 			expanded[expansionKey(node)] = true
@@ -84,23 +101,49 @@ local function seedExpansion(view: any, projection: ExplorerProjection)
 	end
 end
 
--- Expand the selected instance's ancestor chain when the selection changes
+-- Expand the selected logical node's ancestor chain when the selection changes
 -- (e.g. clicked from the conflict list) — but only then, so a manual
 -- collapse afterwards sticks.
 local function revealSelected(view: any, projection: ExplorerProjection, explorerGeneration: number)
 	local inst = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
+	local id = world:get(cts.SelectedExplorerId, cts.SelectedExplorerId) :: number?
+	local revealRequest = (world:get(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration) :: number?) or 0
+	local viewChanged = view ~= lastRevealedView
+	local explicitReveal = revealRequest ~= lastRevealRequest
 	if
-		inst == nil
-		or (inst == lastRevealedInstance and view == lastRevealedView and explorerGeneration == lastRevealedGeneration)
+		(inst == nil and id == nil)
+		or (
+			inst == lastRevealedInstance
+			and id == lastRevealedId
+			and view == lastRevealedView
+			and explorerGeneration == lastRevealedGeneration
+			and revealRequest == lastRevealRequest
+		)
 	then
 		return
 	end
 	lastRevealedInstance = inst
+	lastRevealedId = id
 	lastRevealedView = view
 	lastRevealedGeneration = explorerGeneration
+	lastRevealRequest = revealRequest
 	expansionGen += 1
-	local node = projection.index[inst]
-	node = node and node.parent
+	local node = selectedNode(projection)
+	if not node then
+		return
+	end
+	if explicitReveal and searchText ~= "" then
+		searchText = ""
+		searchGen += 1
+	end
+	-- Center explicit conflict-list selections and carry that selection across
+	-- version tabs. Clicking an already-visible Explorer row should not make
+	-- the list jump underneath the pointer.
+	if explicitReveal or viewChanged then
+		pendingCenterNode = node
+		pendingCenterView = view
+	end
+	node = node.parent
 	while node do
 		expanded[expansionKey(node)] = true
 		node = node.parent
@@ -193,8 +236,7 @@ end
 -- nodes their own topology.
 local function ancestorSet(projection: ExplorerProjection): { [ExplorerNode]: boolean }
 	local set: { [any]: boolean } = {}
-	local selected = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
-	local node = selected and projection.index[selected]
+	local node = selectedNode(projection)
 	node = node and node.parent
 	while node do
 		set[node] = true
@@ -213,11 +255,10 @@ local rowsCache: { Row } = {}
 
 -- Rows render through VirtualList: only the visible index range builds
 -- TreeRows, so even a large search result stays cheap.
-local function renderRows(rows: { Row }, searching: boolean, projection: ExplorerProjection)
+local function renderRows(rows: { Row }, searching: boolean, projection: ExplorerProjection, view: any)
 	local onPath = ancestorSet(projection)
-	local selectedInstance = world:get(cts.SelectedInstance, cts.SelectedInstance) :: Instance?
-	local selectedNode = selectedInstance and projection.index[selectedInstance]
-	VirtualList({
+	local selected = selectedNode(projection)
+	VirtualList.push({
 		id = "rows",
 		data = rows,
 		dimensions = Dimensions.consistentSize(ROW_HEIGHT),
@@ -233,7 +274,7 @@ local function renderRows(rows: { Row }, searching: boolean, projection: Explore
 			phantom = row.phantom,
 			hasChildren = row.hasChildren,
 			expanded = row.isExpanded,
-			selected = row.node == selectedNode,
+			selected = row.node == selected,
 			onPath = onPath[row.node] == true,
 			stripe = index % 2 == 0,
 			onToggle = if row.hasChildren and not searching
@@ -241,13 +282,52 @@ local function renderRows(rows: { Row }, searching: boolean, projection: Explore
 					setExpanded(row.expansionKey, not row.isExpanded)
 				end
 				else nil,
-			onActivated = if row.source or row.subject
+			onActivated = if row.source
+					or row.subject
+					or row.node.id
 				then function()
-					world:set(cts.SelectedInstance, cts.SelectedInstance, row.source or row.subject)
+					local instance = row.source or row.subject
+					if instance then
+						world:set(cts.SelectedInstance, cts.SelectedInstance, instance)
+					else
+						world:remove(cts.SelectedInstance, cts.SelectedInstance)
+					end
+					if row.node.id then
+						world:set(cts.SelectedExplorerId, cts.SelectedExplorerId, row.node.id)
+					else
+						world:remove(cts.SelectedExplorerId, cts.SelectedExplorerId)
+					end
 				end
 				else nil,
 		})
 	end)
+
+	-- VirtualList keeps its overlay scope open until pop(). Its retained parent
+	-- owns the real ScrollingFrame, so an explicit Select can center the row
+	-- after ancestor expansion has rebuilt this frame's flattened row array.
+	if pendingCenterView == view and pendingCenterNode then
+		local centerIndex: number? = nil
+		for index, row in rows do
+			if row.node == pendingCenterNode then
+				centerIndex = index
+				break
+			end
+		end
+		local overlayNode = packages.miu.peek()
+		local outerNode = overlayNode.parent
+		local scrollNode = outerNode and outerNode.children.scroll
+		local scroll = if scrollNode then scrollNode.instance :: ScrollingFrame else nil
+		if centerIndex and scroll and scroll.AbsoluteWindowSize.Y > 0 then
+			local viewportHeight = scroll.AbsoluteWindowSize.Y
+			local canvasHeight = #rows * ROW_HEIGHT
+			local target = (centerIndex - 0.5) * ROW_HEIGHT - viewportHeight / 2
+			target = math.clamp(target, 0, math.max(0, canvasHeight - viewportHeight))
+			scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, target)
+			pendingCenterNode = nil
+			pendingCenterView = nil
+		end
+	end
+	VirtualList.pop()
 end
 
 local function normalizedSearch(): string
@@ -383,7 +463,7 @@ local function ExplorerPanel()
 			rowsCache = filterRows(rows, query)
 			debug.profileend()
 		end
-		renderRows(rowsCache, searching, projection)
+		renderRows(rowsCache, searching, projection, view)
 	end)
 end
 

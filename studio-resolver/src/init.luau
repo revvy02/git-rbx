@@ -36,6 +36,7 @@
 ]]
 
 local process = require("@rodeo/process")
+local HttpService = game:GetService("HttpService")
 
 local argparse = require("@pkg/argparse")
 
@@ -97,6 +98,7 @@ type ConflictRecord = {
 	kind: string,
 	path: string,
 	property: string?,
+	properties: { string }?,
 	resolved: string?,
 	group: string?,
 	target: Instance,
@@ -124,6 +126,10 @@ for _, entry in container:GetChildren() do
 			kind = kind,
 			path = entry:GetAttribute("Path") :: string,
 			property = entry:GetAttribute("Property") :: string?,
+			properties = (function(): { string }?
+				local encoded = entry:GetAttribute("Properties") :: string?
+				return if encoded then string.split(encoded, ",") else nil
+			end)(),
 			resolved = entry:GetAttribute("Resolved") :: string?,
 			group = entry:GetAttribute("Group") :: string?,
 			target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
@@ -162,6 +168,9 @@ for index, record in records do
 	if record.property then
 		world:set(entity, cts.Property, record.property)
 	end
+	if record.properties then
+		world:set(entity, cts.Properties, record.properties)
+	end
 	if record.resolved then
 		world:set(entity, cts.Resolution, record.resolved)
 	end
@@ -175,6 +184,59 @@ for index, record in records do
 end
 world:set(cts.Conflicts, cts.Conflicts, conflictEntities)
 world:set(cts.Container, cts.Container, container)
+
+-- Rust captures these complete hierarchies before mutating base into the
+-- partial merge. They are compact data, not cloned Roblox instances; logical
+-- ids shared across versions map back to live result subjects when available.
+local virtualTreesFolder = container:FindFirstChild("VirtualTrees")
+local virtualSubjectIds: { [Instance]: number } = {}
+if virtualTreesFolder then
+	local versionTrees: cts.VersionTrees = {}
+	for _, side in { "Base", "Ours", "Theirs" } do
+		local treeFolder = virtualTreesFolder:FindFirstChild(side)
+		if not treeFolder then
+			continue
+		end
+		local chunks = treeFolder:GetChildren()
+		table.sort(chunks, function(a, b)
+			return a.Name < b.Name
+		end)
+		local encoded = ""
+		for _, chunk in chunks do
+			if chunk:IsA("StringValue") then
+				encoded ..= chunk.Value
+			end
+		end
+		local decoded = HttpService:JSONDecode(encoded)
+		local nodes: { cts.VersionTreeNode } = table.create(#decoded)
+		for index, record in decoded do
+			nodes[index] = {
+				id = record[1],
+				parent = if record[2] == 0 then nil else record[2],
+				name = record[3],
+				className = record[4],
+			}
+		end
+		versionTrees[string.lower(side)] = nodes
+	end
+	world:set(cts.VersionTrees, cts.VersionTrees, versionTrees)
+
+	local subjects: { [number]: Instance } = {}
+	local subjectsFolder = virtualTreesFolder:FindFirstChild("Subjects")
+	if subjectsFolder then
+		for _, value in subjectsFolder:GetChildren() do
+			if value:IsA("ObjectValue") and value.Value then
+				local id = tonumber(string.sub(value.Name, 2))
+				if id then
+					subjects[id] = value.Value
+					virtualSubjectIds[value.Value] = id
+				end
+			end
+		end
+	end
+	world:set(cts.VirtualSubjects, cts.VirtualSubjects, subjects)
+end
+world:set(cts.VirtualSubjectIds, cts.VirtualSubjectIds, virtualSubjectIds)
 
 -- Rigid-group entities: metadata over their member conflicts. The Cards
 -- singleton is the display list — each group appears once, at its first
@@ -218,7 +280,13 @@ world:set(cts.ViewTab, cts.ViewTab, "result")
 local firstConflict = conflictEntities[1]
 if firstConflict then
 	world:set(cts.SelectedConflict, cts.SelectedConflict, firstConflict)
-	world:set(cts.SelectedInstance, cts.SelectedInstance, world:get(firstConflict, cts.Target))
+	local target = world:get(firstConflict, cts.Target) :: Instance
+	world:set(cts.SelectedInstance, cts.SelectedInstance, target)
+	local virtualId = virtualSubjectIds[target]
+	if virtualId then
+		world:set(cts.SelectedExplorerId, cts.SelectedExplorerId, virtualId)
+	end
+	world:set(cts.ExplorerRevealGeneration, cts.ExplorerRevealGeneration, 1)
 end
 
 print(`rbx-diff resolver: {#records} conflict(s) in {mergedFile}`)

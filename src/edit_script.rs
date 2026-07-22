@@ -316,7 +316,7 @@ pub(crate) fn apply_ops(
     ops: &[EditOp],
     matched: &HashMap<Ref, Ref>,
     moved_destinations: &HashSet<Ref>,
-) {
+) -> HashMap<Ref, Ref> {
     let new_dom = source_dom;
     // new_ref → target ref, for every instance apply creates
     let mut created: HashMap<Ref, Ref> = HashMap::new();
@@ -414,6 +414,8 @@ pub(crate) fn apply_ops(
             }
         }
     }
+
+    created
 }
 
 fn resolve_anchor(anchor: Anchor, created: &HashMap<Ref, Ref>) -> Ref {

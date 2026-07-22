@@ -2,6 +2,8 @@
 rust = "stable"
 node = "24"
 "ubi:revvy02/rodeo" = "v1.2.0-rc.4"
+"ubi:revvy02/rbx-iconify" = "v0.3.0"
+"ubi:jacktabscode/asphalt" = "v2.0.2"
 "ubi:Kampfkarren/selene" = "latest"
 "ubi:JohnnyMorganz/luau-lsp" = "latest"
 "ubi:rojo-rbx/rojo" = "latest"
@@ -11,4 +13,29 @@ _.path = ["./bin"]
 
 [tasks.build]
 description = "Build the release binary into bin/"
-run = "cargo build --release && mkdir -p bin && cp target/release/rbx-diff bin/rbx-diff"
+run = """
+cargo build --release
+mkdir -p bin
+cp target/release/rbx-diff bin/rbx-diff.new
+mv -f bin/rbx-diff.new bin/rbx-diff
+"""
+
+[tasks.icons]
+description = "Generate Studio resolver icon sheets"
+run = """
+rbx-iconify
+"""
+
+[tasks.assets]
+description = "Generate and sync assets locally for Roblox Studio"
+run = """
+rbx-iconify
+asphalt sync studio
+"""
+
+[tasks.assets-cloud]
+description = "Generate and publish assets to Roblox"
+run = """
+rbx-iconify
+asphalt sync cloud
+"""

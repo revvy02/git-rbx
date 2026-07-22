@@ -4,6 +4,7 @@ mod conflict_file;
 mod diff;
 mod dom_utils;
 mod edit_script;
+mod explorer_tree;
 mod hash;
 mod match_instances;
 mod merge;
@@ -12,11 +13,12 @@ mod move_detect;
 pub mod output;
 mod property_semantics;
 mod rigid_groups;
+mod semantic_verify;
 mod value_compare;
 
 pub use conflict_file::{
     finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_conflicts,
-    stamp_rigid_groups, ConflictEntry, CONFLICT_TAG, CONTAINER_NAME, ENTRY_TAG,
+    stamp_rigid_groups, ConflictEntry, CONFLICT_TAG, CONTAINER_NAME, ENTRY_TAG, VIRTUAL_TREES_NAME,
 };
 pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
@@ -27,6 +29,7 @@ pub use model_normalize::{
     normalize_model_merge_frames, ModelFrameDecision, ModelFrameMerge, ModelNormalization,
 };
 pub use rigid_groups::{detect_rigid_groups, RigidGroup};
+pub use semantic_verify::{verify_mesh_geometry, SemanticMismatch};
 
 use rbx_dom_weak::WeakDom;
 

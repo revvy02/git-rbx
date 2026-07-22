@@ -1,0 +1,9 @@
+scan = ["studio-resolver/src/**/*.luau"]
+
+[output]
+index = "studio-resolver/src/ui/generated/iconify.luau"
+sheets = "assets/images/iconify"
+
+[target.ui]
+tile_size = 16
+columns = 1

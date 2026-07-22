@@ -14,6 +14,8 @@ export type SideInfo = cts.SideInfo
 export type Base = cts.Base
 export type ExplorerNode = cts.ExplorerNode
 export type ExplorerProjection = cts.ExplorerProjection
+export type VersionTreeNode = cts.VersionTreeNode
+export type VersionTrees = cts.VersionTrees
 
 export type SystemInit = (world: World, cts: Cts, scheduler: Scheduler) -> ()
 

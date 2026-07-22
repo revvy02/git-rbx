@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
 use crate::hash::{hash_variant, DeepHashCache};
-use crate::property_semantics::{get_authored_properties, stable_content_identity};
+use crate::property_semantics::{get_authored_properties, pairing_compatible, PairingBasis};
 
 /// Minimum similarity score for a Pass B pairing to count as a move.
 const SIMILARITY_THRESHOLD: f32 = 0.5;
@@ -46,6 +46,12 @@ pub fn detect_moves(
 ) -> Vec<(Ref, Ref)> {
     use std::cell::RefCell;
 
+    let matcher = MoveMatcher {
+        old_dom,
+        new_dom,
+        old_deep,
+        new_deep,
+    };
     let removed_count = removed.len();
     let added_count = added.len();
     let mut moves: Vec<(Ref, Ref)> = Vec::new();
@@ -63,10 +69,9 @@ pub fn detect_moves(
 
         // Pass A: exact deep-hash over roots (pure moves)
         pair_by_exact_hash(
+            &matcher,
             &removed,
             &added,
-            old_deep,
-            new_deep,
             &can_old,
             &can_new,
             &mut on_pair,
@@ -85,12 +90,9 @@ pub fn detect_moves(
 
         // Pass B: same (name, class) similarity over roots (move + edit)
         pair_by_similarity(
-            old_dom,
-            new_dom,
+            &matcher,
             &removed,
             &added,
-            old_deep,
-            new_deep,
             &can_old,
             &can_new,
             &mut on_pair,
@@ -126,19 +128,17 @@ pub fn detect_moves(
             moves.push((o, n));
         };
         pair_by_exact_hash(
+            &matcher,
             &leftover_removed,
             &new_pool,
-            old_deep,
-            new_deep,
             &can_old,
             &can_new,
             &mut on_pair,
         );
         pair_by_exact_hash(
+            &matcher,
             &old_pool,
             &leftover_added,
-            old_deep,
-            new_deep,
             &can_old,
             &can_new,
             &mut on_pair,
@@ -155,23 +155,17 @@ pub fn detect_moves(
             moves.push((o, n));
         };
         pair_by_similarity(
-            old_dom,
-            new_dom,
+            &matcher,
             &leftover_removed,
             &new_pool,
-            old_deep,
-            new_deep,
             &can_old,
             &can_new,
             &mut on_pair,
         );
         pair_by_similarity(
-            old_dom,
-            new_dom,
+            &matcher,
             &old_pool,
             &leftover_added,
-            old_deep,
-            new_deep,
             &can_old,
             &can_new,
             &mut on_pair,
@@ -193,6 +187,16 @@ pub fn detect_moves(
     }
 
     moves
+}
+
+/// Immutable evidence shared by every global pairing pass. Keeping DOM and
+/// hash access together makes it impossible for exact and similarity paths to
+/// accidentally consult different compatibility inputs.
+struct MoveMatcher<'a> {
+    old_dom: &'a WeakDom,
+    new_dom: &'a WeakDom,
+    old_deep: &'a DeepHashCache<'a>,
+    new_deep: &'a DeepHashCache<'a>,
 }
 
 /// Claimed pairing targets for one DOM side. Tracks the claimed nodes and,
@@ -239,10 +243,9 @@ impl Claims {
 /// candidate per old-side node. Passes A and C differ only in their pools
 /// and claim predicates.
 fn pair_by_exact_hash(
+    matcher: &MoveMatcher<'_>,
     old_pool: &[Ref],
     new_pool: &[Ref],
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
     can_claim_old: impl Fn(Ref) -> bool,
     can_claim_new: impl Fn(Ref) -> bool,
     mut on_pair: impl FnMut(Ref, Ref),
@@ -250,7 +253,7 @@ fn pair_by_exact_hash(
     let mut new_by_hash: HashMap<[u8; 32], Vec<Ref>> = HashMap::new();
     for &n in new_pool {
         new_by_hash
-            .entry(*new_deep.get(n).as_bytes())
+            .entry(*matcher.new_deep.get(n).as_bytes())
             .or_default()
             .push(n);
     }
@@ -258,11 +261,19 @@ fn pair_by_exact_hash(
         if !can_claim_old(o) {
             continue;
         }
-        let hash = *old_deep.get(o).as_bytes();
+        let hash = *matcher.old_deep.get(o).as_bytes();
         let Some(bucket) = new_by_hash.get_mut(&hash) else {
             continue;
         };
-        let Some(pos) = bucket.iter().position(|&n| can_claim_new(n)) else {
+        let Some(old_instance) = matcher.old_dom.get_by_ref(o) else {
+            continue;
+        };
+        let Some(pos) = bucket.iter().position(|&n| {
+            can_claim_new(n)
+                && matcher.new_dom.get_by_ref(n).is_some_and(|new_instance| {
+                    pairing_compatible(old_instance, new_instance, PairingBasis::ExactContent)
+                })
+        }) else {
             continue;
         };
         let n = bucket.swap_remove(pos);
@@ -274,16 +285,15 @@ fn pair_by_exact_hash(
 /// a bucket, then claim greedily from the highest score down. Passes B and D
 /// differ only in their pools and claim predicates.
 fn pair_by_similarity(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    matcher: &MoveMatcher<'_>,
     old_pool: &[Ref],
     new_pool: &[Ref],
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
     can_claim_old: impl Fn(Ref) -> bool,
     can_claim_new: impl Fn(Ref) -> bool,
     mut on_pair: impl FnMut(Ref, Ref),
 ) {
+    let old_dom = matcher.old_dom;
+    let new_dom = matcher.new_dom;
     let mut old_by_key: HashMap<(String, String), Vec<Ref>> = HashMap::new();
     for &o in old_pool {
         if !can_claim_old(o) {
@@ -338,10 +348,17 @@ fn pair_by_similarity(
                 // agrees. Otherwise many generic MeshPart properties can
                 // outvote a different MeshContent and invent a destructive
                 // move between unrelated pieces of geometry.
-                if stable_content_identity(old_instance) != stable_content_identity(new_instance) {
+                if !pairing_compatible(old_instance, new_instance, PairingBasis::Inferred) {
                     continue;
                 }
-                let score = similarity(old_dom, new_dom, o, n, old_deep, new_deep);
+                let score = similarity(
+                    old_dom,
+                    new_dom,
+                    o,
+                    n,
+                    matcher.old_deep,
+                    matcher.new_deep,
+                );
                 if score >= SIMILARITY_THRESHOLD {
                     scored.push((score, o, n));
                 }

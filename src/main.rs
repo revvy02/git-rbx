@@ -361,6 +361,9 @@ fn cmd_merge(
         }
         let kind = match &conflict.kind {
             ConflictKind::Property { name } => format!("property '{}'", name),
+            ConflictKind::PropertyBundle { name, .. } => {
+                format!("property bundle '{}'", name)
+            }
             ConflictKind::DeleteVsEdit => "delete vs edit".to_string(),
             ConflictKind::MoveTarget => "conflicting move destinations".to_string(),
             ConflictKind::ModelFrame { .. } => "model frame".to_string(),

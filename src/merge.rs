@@ -13,13 +13,22 @@ use tracing::info;
 
 use crate::diff::DiffConfig;
 use crate::edit_script::{apply_ops, compute_edit_script, Anchor, EditOp, EditScript};
+use crate::explorer_tree::ExplorerTrees;
 use crate::hash::DeepHashCache;
 use crate::match_instances::get_instance_path;
+use crate::property_semantics::{
+    semantic_bundle_values_equal, semantic_property_bundle, SemanticPropertyBundle,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConflictKind {
     /// Both sides set the same property (or name) to different values.
     Property { name: String },
+    /// Both sides changed fields that form one indivisible serialized value.
+    PropertyBundle {
+        name: String,
+        properties: Vec<String>,
+    },
     /// One side removed a subtree the other side edited/moved into or out of.
     DeleteVsEdit,
     /// Both sides moved the same instance to different parents, or a move
@@ -56,6 +65,7 @@ pub struct MergeResult {
     pub ours_matched: HashMap<Ref, Ref>,
     /// Identity mapping base_ref → theirs_ref for every matched instance.
     pub theirs_matched: HashMap<Ref, Ref>,
+    pub(crate) explorer_trees: ExplorerTrees,
 }
 
 /// Three-way merge: mutate `base` into the merged result, applying every
@@ -173,6 +183,24 @@ fn merge_scripts(
             break;
         }
     }
+
+    // Serialized support fields can form one authored value. In particular,
+    // MeshContent and InitialSize must never be resolved independently: that
+    // can attach one mesh's source extent to another mesh and visibly explode
+    // its scale. Compare each branch's complete bundle state, then either
+    // dedupe it or emit one atomic decision containing all affected ops.
+    group_property_bundle_conflicts(
+        base,
+        ours_dom,
+        theirs_dom,
+        ours,
+        theirs,
+        &mut conflicted_ours,
+        &mut conflicted_theirs,
+        &mut dropped_theirs,
+        &mut conflicts,
+        &mut stats,
+    );
 
     // ---- Same-target op pairs: dedupe identical effects, conflict otherwise
     for (i, our_op) in ours.ops.iter().enumerate() {
@@ -340,20 +368,24 @@ fn merge_scripts(
     stats.ours_applied = ours_survivors.len();
     stats.theirs_applied = theirs_survivors.len();
 
-    apply_ops(
+    let mut explorer_trees =
+        ExplorerTrees::capture(base, ours_dom, theirs_dom, &ours.matched, &theirs.matched);
+
+    let ours_created = apply_ops(
         base,
         ours_dom,
         &ours_survivors,
         &ours.matched,
         &ours.moved_destinations,
     );
-    apply_ops(
+    let theirs_created = apply_ops(
         base,
         theirs_dom,
         &theirs_survivors,
         &theirs.matched,
         &theirs.moved_destinations,
     );
+    explorer_trees.bind_result(base, &ours_created, &theirs_created);
 
     info!(
         ours_applied = stats.ours_applied,
@@ -368,6 +400,113 @@ fn merge_scripts(
         stats,
         ours_matched: ours.matched.clone(),
         theirs_matched: theirs.matched.clone(),
+        explorer_trees,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn group_property_bundle_conflicts(
+    base: &WeakDom,
+    ours_dom: &WeakDom,
+    theirs_dom: &WeakDom,
+    ours: &EditScript,
+    theirs: &EditScript,
+    conflicted_ours: &mut HashSet<usize>,
+    conflicted_theirs: &mut HashSet<usize>,
+    dropped_theirs: &mut HashSet<usize>,
+    conflicts: &mut Vec<MergeConflict>,
+    stats: &mut MergeStats,
+) {
+    type BundleKey = (Ref, &'static str);
+    type BundleOps = (SemanticPropertyBundle, Vec<usize>);
+
+    let collect = |ops: &[EditOp], excluded: &HashSet<usize>| {
+        let mut groups: HashMap<BundleKey, BundleOps> = HashMap::new();
+        for (index, op) in ops.iter().enumerate() {
+            if excluded.contains(&index) {
+                continue;
+            }
+            let EditOp::SetProperty { old_ref, name, .. } = op else {
+                continue;
+            };
+            let Some(instance) = base.get_by_ref(*old_ref) else {
+                continue;
+            };
+            let Some(bundle) = semantic_property_bundle(instance.class.as_str(), name) else {
+                continue;
+            };
+            groups
+                .entry((*old_ref, bundle.name))
+                .or_insert_with(|| (bundle, Vec::new()))
+                .1
+                .push(index);
+        }
+        groups
+    };
+
+    let ours_groups = collect(&ours.ops, conflicted_ours);
+    let theirs_groups = collect(&theirs.ops, conflicted_theirs);
+    let mut common: Vec<_> = ours_groups
+        .keys()
+        .filter(|key| theirs_groups.contains_key(key))
+        .copied()
+        .collect();
+    common.sort_by(|(a_ref, a_name), (b_ref, b_name)| {
+        get_instance_path(base, *a_ref)
+            .cmp(&get_instance_path(base, *b_ref))
+            .then_with(|| a_name.cmp(b_name))
+    });
+
+    for key in common {
+        let (bundle, our_indices) = &ours_groups[&key];
+        let (_, their_indices) = &theirs_groups[&key];
+        let Some(our_ref) = ours.matched.get(&key.0) else {
+            continue;
+        };
+        let Some(their_ref) = theirs.matched.get(&key.0) else {
+            continue;
+        };
+        let (Some(our_instance), Some(their_instance)) = (
+            ours_dom.get_by_ref(*our_ref),
+            theirs_dom.get_by_ref(*their_ref),
+        ) else {
+            continue;
+        };
+
+        if semantic_bundle_values_equal(our_instance, their_instance, *bundle) {
+            for &index in their_indices {
+                dropped_theirs.insert(index);
+            }
+            stats.deduped += their_indices.len();
+            continue;
+        }
+
+        for &index in our_indices {
+            conflicted_ours.insert(index);
+        }
+        for &index in their_indices {
+            conflicted_theirs.insert(index);
+        }
+        conflicts.push(MergeConflict {
+            kind: ConflictKind::PropertyBundle {
+                name: bundle.name.to_string(),
+                properties: bundle
+                    .properties
+                    .iter()
+                    .map(|property| (*property).to_string())
+                    .collect(),
+            },
+            base_ref: key.0,
+            path: get_instance_path(base, key.0),
+            ours: our_indices
+                .iter()
+                .map(|&index| ours.ops[index].clone())
+                .collect(),
+            theirs: their_indices
+                .iter()
+                .map(|&index| theirs.ops[index].clone())
+                .collect(),
+        });
     }
 }
 

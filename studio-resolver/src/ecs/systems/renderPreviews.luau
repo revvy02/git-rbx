@@ -4,8 +4,9 @@
 	Base snapshot (what unpicking restores); the scheduled loop renders the
 	staged selection into the scene — staging Ours renders ours' version,
 	Theirs renders theirs', unpicked renders base. Property values apply to
-	the target, moves reparent it, delete-vs-edit swaps the stamped clone in
-	and out. None of this touches the disk file — the CLI at Complete is the
+	the target, moves reparent it, and decisions that require serialized-only
+	state swap stamped clones in and out. None of this touches the disk file —
+	the CLI at Complete is the
 	only writer. Staged Resolution vs Rendered drives the frame diff.
 ]]
 
@@ -40,6 +41,14 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				fn(descendant)
 			end
 		end
+	end
+
+	local function capturePartTransparencies(root: Instance): { [BasePart]: number }
+		local parts: { [BasePart]: number } = {}
+		eachPart(root, function(part)
+			parts[part] = part.Transparency
+		end)
+		return parts
 	end
 
 	local function sideInfo(entry: Instance, sideName: string): SideInfo
@@ -90,14 +99,12 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				local ok, value = format.readProperty(target, property)
 				base.value = if ok then value else nil
 			end
+		elseif kind == "PropertyBundle" or kind == "DeleteVsEdit" then
+			-- Both kinds use clone swaps. Mesh geometry includes serialized-only
+			-- InitialSize, so property writes cannot faithfully preview its bundle.
+			base.parts = capturePartTransparencies(target)
 		elseif kind == "MoveTarget" then
 			base.parent = target.Parent
-		elseif kind == "DeleteVsEdit" then
-			local parts: { [BasePart]: number } = {}
-			eachPart(target, function(part)
-				parts[part] = part.Transparency
-			end)
-			base.parts = parts
 		elseif kind == "ModelFrame" then
 			local frameParts: { [BasePart]: CFrame } = {}
 			local frameModels: { [Model]: CFrame } = {}
@@ -147,6 +154,26 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 						(target :: any)[property] = base.value
 					end)
 				end
+			end
+		elseif kind == "PropertyBundle" then
+			local selected: SideInfo? = if staged == "ours" then ours elseif staged == "theirs" then theirs else nil
+			local function placeClone(side: string, info: SideInfo)
+				local clone = info.clone
+				if clone then
+					-- Preserve independently staged placement/scale while borrowing the
+					-- clone's inseparable mesh asset + InitialSize payload.
+					if clone:IsA("BasePart") and target:IsA("BasePart") then
+						clone.CFrame = target.CFrame
+						clone.Size = target.Size
+					end
+					clone.Parent = if staged == side then target.Parent else info.folder
+				end
+			end
+			placeClone("ours", ours)
+			placeClone("theirs", theirs)
+			local hideTarget = selected ~= nil and selected.clone ~= nil
+			for part, original in base.parts :: { [BasePart]: number } do
+				part.Transparency = if hideTarget then 1 else original
 			end
 		elseif kind == "MoveTarget" then
 			local destination = if staged == "ours"

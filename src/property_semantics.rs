@@ -1,9 +1,9 @@
-//! Shared policy for authored Roblox properties and stable content identity.
+//! Shared semantic policy for Roblox properties and instance pairing.
 //!
-//! Matching, hashing, and diffing must agree about which serialized values are
-//! authored content. Stable identity is deliberately narrower: it is evidence
-//! that two duplicate siblings represent the same object even when spatial
-//! properties changed.
+//! Matching, hashing, diffing, and merging must agree about which serialized
+//! values are authored content. A content key is deliberately only *evidence*:
+//! a uniquely anchored MeshPart may legitimately change MeshContent, while an
+//! ambiguous or moved MeshPart must retain its key before we infer identity.
 
 use rbx_dom_weak::Instance;
 use rbx_reflection::{PropertyKind, PropertySerialization, Scriptability};
@@ -46,20 +46,43 @@ pub(crate) fn normalize_asset_uri(uri: &str) -> String {
 /// rbx-diff edits the serialized DOM directly, so Studio scriptability is not
 /// a reason to discard these values. Derived/volatile properties remain
 /// excluded; extend this list only for values that must survive a file merge.
-const CONTENT_PROPERTY_EXCEPTIONS: &[(&str, &[&str])] = &[
-    (
-        "PartOperation",
-        &[
+struct ClassSemantics {
+    class: &'static str,
+    authored_exceptions: &'static [&'static str],
+    content_key_properties: &'static [&'static str],
+    bundles: &'static [SemanticPropertyBundle],
+}
+
+/// Properties that represent one indivisible authored value. If both branches
+/// replace a mesh, choosing its asset from one branch and its source extent
+/// from the other produces a visually corrupt hybrid, so they resolve once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SemanticPropertyBundle {
+    pub(crate) name: &'static str,
+    pub(crate) properties: &'static [&'static str],
+}
+
+const MESH_GEOMETRY: SemanticPropertyBundle = SemanticPropertyBundle {
+    name: "Mesh geometry",
+    properties: &["MeshContent", "MeshId", "MeshID", "InitialSize"],
+};
+
+const CLASS_SEMANTICS: &[ClassSemantics] = &[
+    ClassSemantics {
+        class: "PartOperation",
+        authored_exceptions: &[
             "MeshData",
             "MeshData2",
             "ChildData",
             "ChildData2",
             "AssetId",
         ],
-    ),
-    (
-        "MeshPart",
-        &[
+        content_key_properties: &[],
+        bundles: &[],
+    },
+    ClassSemantics {
+        class: "MeshPart",
+        authored_exceptions: &[
             "MeshContent",
             "TextureContent",
             "MeshId",
@@ -70,11 +93,34 @@ const CONTENT_PROPERTY_EXCEPTIONS: &[(&str, &[&str])] = &[
             // geometry even though MeshId, Size, and CFrame all look correct.
             "InitialSize",
         ],
-    ),
-    ("SpecialMesh", &["MeshId", "TextureId"]),
-    ("Terrain", &["SmoothGrid", "Decoration"]),
-    ("Workspace", &["CollisionGroupData"]),
+        content_key_properties: &["MeshContent", "MeshId", "MeshID"],
+        bundles: &[MESH_GEOMETRY],
+    },
+    ClassSemantics {
+        class: "SpecialMesh",
+        authored_exceptions: &["MeshId", "TextureId"],
+        content_key_properties: &["MeshId", "MeshID"],
+        bundles: &[],
+    },
+    ClassSemantics {
+        class: "Terrain",
+        authored_exceptions: &["SmoothGrid", "Decoration"],
+        content_key_properties: &[],
+        bundles: &[],
+    },
+    ClassSemantics {
+        class: "Workspace",
+        authored_exceptions: &["CollisionGroupData"],
+        content_key_properties: &[],
+        bundles: &[],
+    },
 ];
+
+fn class_semantics(class_name: &str) -> Option<&'static ClassSemantics> {
+    CLASS_SEMANTICS
+        .iter()
+        .find(|semantics| semantics.class == class_name)
+}
 
 /// Get the authored property names for a class. The result is cached for the
 /// process lifetime and shared by matching, hashing, move detection, and diff.
@@ -104,10 +150,13 @@ fn build_authored_properties(class_name: &str) -> HashSet<String> {
     let mut current_class = class_name;
 
     while let Some(class_data) = database.classes.get(current_class) {
-        for (class, properties) in CONTENT_PROPERTY_EXCEPTIONS {
-            if *class == current_class {
-                result.extend(properties.iter().map(|property| (*property).to_string()));
-            }
+        if let Some(semantics) = class_semantics(current_class) {
+            result.extend(
+                semantics
+                    .authored_exceptions
+                    .iter()
+                    .map(|property| (*property).to_string()),
+            );
         }
 
         for (property_name, property_data) in &class_data.properties {
@@ -150,19 +199,14 @@ fn content_uri(value: &Variant) -> Option<&str> {
     }
 }
 
-/// A strong, placement-independent identity clue for duplicate siblings.
-/// Return `None` when a class has no such clue; callers must then use weaker
-/// matching or preserve the instances as replacements.
-pub(crate) fn stable_content_identity(instance: &Instance) -> Option<String> {
-    let identity_property = match instance.class.as_str() {
-        "MeshPart" => ["MeshContent", "MeshId", "MeshID"]
-            .into_iter()
-            .find_map(|name| instance.properties.get(&name.into())),
-        "SpecialMesh" => ["MeshId", "MeshID"]
-            .into_iter()
-            .find_map(|name| instance.properties.get(&name.into())),
-        _ => None,
-    }?;
+/// A strong, placement-independent clue for distinguishing ambiguous peers.
+/// It is not permanent identity: an anchored instance may change this value.
+pub(crate) fn strong_content_key(instance: &Instance) -> Option<String> {
+    let semantics = class_semantics(instance.class.as_str())?;
+    let identity_property = semantics
+        .content_key_properties
+        .iter()
+        .find_map(|name| instance.properties.get(&(*name).into()))?;
     let uri = content_uri(identity_property)?;
     if uri.is_empty() {
         return None;
@@ -170,9 +214,90 @@ pub(crate) fn stable_content_identity(instance: &Instance) -> Option<String> {
     Some(normalize_asset_uri(uri))
 }
 
+/// Why a caller believes two instances correspond. All matching paths pass
+/// through this policy so a new heuristic cannot accidentally weaken the
+/// content-key constraint used by other matchers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairingBasis {
+    /// Unique same-name/class siblings under an already matched parent.
+    AnchoredName,
+    /// Exact authored hashes already prove the content; class remains a guard.
+    ExactContent,
+    /// Similarity, position, or another heuristic is inferring correspondence.
+    Inferred,
+    /// A deep hash excluding only the root name proves a pure rename.
+    ContentPreservingRename,
+}
+
+pub(crate) fn pairing_compatible(old: &Instance, new: &Instance, basis: PairingBasis) -> bool {
+    if old.class != new.class {
+        return false;
+    }
+    match basis {
+        PairingBasis::AnchoredName => old.name == new.name,
+        PairingBasis::ExactContent | PairingBasis::ContentPreservingRename => true,
+        PairingBasis::Inferred => strong_content_key(old) == strong_content_key(new),
+    }
+}
+
+pub(crate) fn semantic_property_bundle(
+    class_name: &str,
+    property_name: &str,
+) -> Option<SemanticPropertyBundle> {
+    class_semantics(class_name)?
+        .bundles
+        .iter()
+        .copied()
+        .find(|bundle| bundle.properties.contains(&property_name))
+}
+
+/// Compare the complete logical value of a bundle, not just the low-level ops
+/// a branch happened to emit. Asset aliases collapse through the normalized
+/// content key; the remaining support properties use normal semantic equality.
+pub(crate) fn semantic_bundle_values_equal(
+    old: &Instance,
+    new: &Instance,
+    bundle: SemanticPropertyBundle,
+) -> bool {
+    if old.class != new.class {
+        return false;
+    }
+    let content_key_properties = class_semantics(old.class.as_str())
+        .map(|semantics| semantics.content_key_properties)
+        .unwrap_or_default();
+    if bundle
+        .properties
+        .iter()
+        .any(|property| content_key_properties.contains(property))
+        && strong_content_key(old) != strong_content_key(new)
+    {
+        return false;
+    }
+
+    bundle
+        .properties
+        .iter()
+        .filter(|property| !content_key_properties.contains(property))
+        .all(|property| {
+            let old_value = old.properties.get(&(*property).into());
+            let new_value = new.properties.get(&(*property).into());
+            match (old_value, new_value) {
+                (Some(old_value), Some(new_value)) => {
+                    crate::value_compare::non_ref_variants_equal(old_value, new_value)
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::get_authored_properties;
+    use super::{
+        get_authored_properties, pairing_compatible, semantic_property_bundle, PairingBasis,
+    };
+    use rbx_dom_weak::{InstanceBuilder, WeakDom};
+    use rbx_types::{Content, Variant};
 
     #[test]
     fn authored_property_references_survive_cache_growth_and_concurrency() {
@@ -205,5 +330,45 @@ mod tests {
         assert!(properties.contains("MeshContent"));
         assert!(properties.contains("TextureContent"));
         assert!(properties.contains("InitialSize"));
+    }
+
+    #[test]
+    fn content_keys_constrain_inference_but_not_anchored_edits() {
+        let old = WeakDom::new(
+            InstanceBuilder::new("MeshPart")
+                .with_name("Part")
+                .with_property(
+                    "MeshContent",
+                    Variant::Content(Content::from_uri("rbxassetid://1")),
+                ),
+        );
+        let new = WeakDom::new(
+            InstanceBuilder::new("MeshPart")
+                .with_name("Part")
+                .with_property(
+                    "MeshContent",
+                    Variant::Content(Content::from_uri("rbxassetid://2")),
+                ),
+        );
+
+        assert!(pairing_compatible(
+            old.root(),
+            new.root(),
+            PairingBasis::AnchoredName
+        ));
+        assert!(!pairing_compatible(
+            old.root(),
+            new.root(),
+            PairingBasis::Inferred
+        ));
+    }
+
+    #[test]
+    fn mesh_content_and_initial_size_share_one_bundle() {
+        let content = semantic_property_bundle("MeshPart", "MeshContent").unwrap();
+        let initial_size = semantic_property_bundle("MeshPart", "InitialSize").unwrap();
+        assert_eq!(content, initial_size);
+        assert_eq!(content.name, "Mesh geometry");
+        assert!(semantic_property_bundle("MeshPart", "Size").is_none());
     }
 }

@@ -43,15 +43,26 @@ local function ConflictRow(entity: any)
 		end
 	end
 
-	-- Staging a side also frames it — picking a decision and seeing the
-	-- result are one gesture. The focus lands after the preview applies (the
-	-- previews system runs before focus in the frame), so the camera fits
-	-- whatever the choice renders.
+	local function selectTarget()
+		conflicts.select(entity)
+	end
+
 	local function choose(side: string)
 		if members then
 			conflicts.chooseGroup(entity, side)
 		else
 			conflicts.choose(entity, side)
+		end
+	end
+
+	-- Viewing is deliberately explicit and non-toggling. It stages the named
+	-- side so the scene contains that version, then the next frame focuses the
+	-- content after renderPreviews has applied it.
+	local function view(side: string)
+		if members then
+			conflicts.stageGroup(entity, side)
+		else
+			conflicts.stage(entity, side)
 		end
 		requestFocus()
 	end
@@ -66,12 +77,7 @@ local function ConflictRow(entity: any)
 		tags = { "flex-col", "gap-sm", "p-md", "corner-sm", "vs-border" },
 		BackgroundColor3 = if selected then theme.surface:Lerp(theme.selection, 0.35) else theme.surface,
 		events = {
-			Activated = function()
-				world:set(cts.SelectedConflict, cts.SelectedConflict, entity)
-				if target then
-					world:set(cts.SelectedInstance, cts.SelectedInstance, target)
-				end
-			end,
+			Activated = selectTarget,
 		},
 	}, function()
 		Label("path", path, theme.statusColor(resolution), true)
@@ -129,20 +135,40 @@ local function ConflictRow(entity: any)
 			Size = UDim2.new(1, 0, 0, 22),
 			tags = { "bg-none", "flex-row", "gap-sm" },
 		}, function()
-			Button("ours", "Ours", resolution == "ours", theme.ours, function()
-				choose("ours")
-			end)
-			Button("theirs", "Theirs", resolution == "theirs", theme.theirs, function()
-				choose("theirs")
-			end)
+			Button(
+				"ours",
+				"Ours",
+				resolution == "ours",
+				theme.ours,
+				function()
+					choose("ours")
+				end,
+				if viewable
+					then function()
+						view("ours")
+					end
+					else nil
+			)
+			Button(
+				"theirs",
+				"Theirs",
+				resolution == "theirs",
+				theme.theirs,
+				function()
+					choose("theirs")
+				end,
+				if viewable
+					then function()
+						view("theirs")
+					end
+					else nil
+			)
 			if not members and conflicts.canCustom(entity) then
 				Button("custom", "Custom", resolution == "custom", theme.custom, function()
 					choose("custom")
 				end)
 			end
-			if viewable then
-				Button("view", "View", false, theme.neutralButton, requestFocus)
-			end
+			Button("select", "Select", selected, theme.selection, selectTarget)
 		end)
 	end)
 end
