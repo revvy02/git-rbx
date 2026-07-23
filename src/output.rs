@@ -228,7 +228,7 @@ fn format_cframe_value(value: &CFrameValue) -> String {
 
 fn format_cframe(position: &[f32; 3], orientation: &[[f32; 3]; 3]) -> String {
     format!(
-        "CFrame(position=({}, {}, {}), orientation=[({}, {}, {}), ({}, {}, {}), ({}, {}, {})])",
+        "CFrame({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         position[0],
         position[1],
         position[2],
@@ -360,13 +360,15 @@ mod tests {
     }
 
     #[test]
-    fn pretty_output_includes_cframe_orientation() {
+    fn pretty_output_uses_raw_cframe_components() {
         let value = PropertyValue::CFrame {
-            position: [0.0; 3],
+            position: [1.0, 2.0, 3.0],
             orientation: [[1.0, 0.00001, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         };
 
-        assert!(format_property_value(&value).contains("orientation"));
-        assert!(format_property_value(&value).contains("0.00001"));
+        assert_eq!(
+            format_property_value(&value),
+            "CFrame(1, 2, 3, 1, 0.00001, 0, 0, 1, 0, 0, 0, 1)"
+        );
     }
 }
