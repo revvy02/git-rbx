@@ -13,6 +13,7 @@ mod merge;
 mod model_normalize;
 mod move_detect;
 pub mod output;
+mod placement;
 mod property_semantics;
 mod rigid_groups;
 mod semantic_verify;
@@ -31,15 +32,17 @@ pub use edit_script::{
     InstanceIdentity, SemanticChangeSet,
 };
 pub use merge::{
-    merge_compact_doms, merge_compact_doms_with_matches, merge_doms, merge_doms_with_matches,
-    ConflictKind, MergeConflict, MergeResult, MergeStats,
+    merge_compact_doms, merge_compact_doms_with_matches,
+    merge_compact_doms_with_matches_and_pivots, merge_doms, merge_doms_with_matches, ConflictKind,
+    ConflictSide, MergeConflict, MergeResult, MergeStats,
 };
 pub use model_normalize::{
     apply_model_frame, apply_model_frame_plan, apply_model_frame_to_dom, model_frames_close,
     normalize_model_diff_frames, normalize_model_dom_to_base, normalize_model_merge_compact_frames,
-    normalize_model_merge_frames, ModelFrame, ModelFrameApplication, ModelFrameChange,
-    ModelFrameDecision, ModelFrameDiff, ModelFrameMerge, ModelNormalization,
+    normalize_model_merge_frames, ModelFrameApplication, ModelFrameDiff, ModelFrameMerge,
+    ModelNormalization,
 };
+pub use placement::{apply_pivot_ops, apply_pivot_ops_to_compact_branch, PivotOp};
 pub use rigid_groups::{detect_rigid_groups, RigidGroup};
 pub use semantic_verify::{verify_mesh_geometry, SemanticMismatch};
 
@@ -97,9 +100,10 @@ pub fn diff_model_compact_doms_with_config(
         old_dom,
         new_dom,
         &normalization.identity,
+        normalization.pivot_ops(),
         config,
     );
-    finish_model_diff(new_dom, diffs, normalization)
+    finish_model_diff(diffs, normalization)
 }
 
 fn diff_model_views_with_config(
@@ -107,46 +111,24 @@ fn diff_model_views_with_config(
     new_dom: &mut dyn diff_dom::DomViewMut,
     config: &DiffConfig,
 ) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
-    let normalization = model_normalize::normalize_model_diff_frames_view(old_dom, new_dom);
-    let changes = edit_script::compute_semantic_changes_with_identity(
+    let normalization = model_normalize::prepare_model_diff_frames_view(old_dom, new_dom);
+    let mut changes = edit_script::compute_semantic_changes_with_identity(
         old_dom,
         new_dom.as_view(),
         config,
-        normalization.as_ref().map(|state| &state.identity),
+        Some(&normalization.identity),
     );
+    changes.pivots = normalization.pivots.clone();
     let diffs = diff::semantic_changes_to_diff(old_dom, new_dom.as_view(), &changes);
-
-    if let Some(normalization) = normalization {
-        return finish_model_diff(new_dom.as_view(), diffs, normalization);
-    }
-    (diffs, None)
+    finish_model_diff(diffs, normalization)
 }
 
 fn finish_model_diff(
-    new_dom: &dyn diff_dom::DomView,
-    mut diffs: Vec<DiffEntry>,
+    diffs: Vec<DiffEntry>,
     normalization: ModelFrameDiff,
 ) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
-    if normalization.frames.is_empty() {
+    if normalization.pivots.is_empty() {
         return (diffs, None);
     }
-    let mut frames = Vec::with_capacity(normalization.frames.len());
-    for frame in &normalization.frames {
-        let class = new_dom
-            .get_by_ref(frame.side_ref)
-            .map(|instance| instance.class().to_string())
-            .unwrap_or_else(|| "Model".to_string());
-        frames.push(DiffEntry::ModelFrame {
-            old_ref: frame.base_ref.to_string(),
-            new_ref: frame.side_ref.to_string(),
-            path: frame.path.clone(),
-            class,
-            order: frame.order,
-            parent_order: frame.parent_order,
-            delta: frame.delta.into(),
-        });
-    }
-    frames.append(&mut diffs);
-    diffs = frames;
     (diffs, Some(normalization))
 }

@@ -11,11 +11,11 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    detect_rigid_groups, diff_model_compact_doms_with_config, finalize, find_container,
-    list_entries, mark_entry, mark_entry_custom, merge_compact_doms,
-    merge_compact_doms_with_matches, normalize_model_merge_compact_frames, stamp_compact_conflicts,
-    stamp_model_frame_plan, stamp_rigid_groups, ConflictKind, DiffConfig, DiffDom, MergeConflict,
-    ModelFrameDecision, CONTAINER_NAME,
+    apply_pivot_ops, apply_pivot_ops_to_compact_branch, detect_rigid_groups,
+    diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
+    mark_entry_custom, merge_compact_doms, merge_compact_doms_with_matches_and_pivots,
+    normalize_model_merge_compact_frames, stamp_compact_conflicts, stamp_model_frame_plan,
+    stamp_rigid_groups, ConflictKind, DiffConfig, DiffDom, ModelFrameApplication, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -211,7 +211,7 @@ fn cmd_diff(
     if let Some(frames) = frames {
         eprintln!(
             "Factored {} hierarchical model frame(s) ({} boundaries detected)",
-            frames.frames.len(),
+            frames.pivots.len(),
             frames.detected,
         );
     }
@@ -266,7 +266,7 @@ fn cmd_merge(
         if let Some(frames) = &frames {
             eprintln!(
                 "Factored {} hierarchical model frame(s) ({} ours / {} theirs boundaries detected)",
-                frames.frames.len(),
+                frames.affected_boundaries(),
                 frames.ours_detected,
                 frames.theirs_detected,
             );
@@ -280,46 +280,36 @@ fn cmd_merge(
 
     eprintln!("Merging...");
     let start = Instant::now();
-    let mut result = if let Some(frames) = &model_frames {
-        merge_compact_doms_with_matches(
+    let result = if let Some(frames) = &model_frames {
+        merge_compact_doms_with_matches_and_pivots(
             &mut base,
             &ours,
             &theirs,
             &config,
             &frames.ours_identity,
             &frames.theirs_identity,
+            frames.ours_pivots(),
+            frames.theirs_pivots(),
         )
     } else {
         merge_compact_doms(&mut base, &ours, &theirs, &config)
     };
-    if let Some(frames) = &model_frames {
-        for frame in &frames.frames {
-            if matches!(frame.decision, ModelFrameDecision::Conflict) {
-                result.conflicts.push(MergeConflict {
-                    kind: ConflictKind::ModelFrame {
-                        ours: frame.ours,
-                        theirs: frame.theirs,
-                        order: frame.order,
-                        parent_order: frame.parent_order,
-                    },
-                    base_ref: frame.target_ref,
-                    path: frame.path.clone(),
-                    ours: Vec::new(),
-                    theirs: Vec::new(),
-                });
-                result.stats.conflicted += 1;
-            }
-        }
-
-        // With no unresolved frame decision, materialize the selected plan in
-        // every canonical DOM before stamping. Branch-side clones therefore
-        // share the result's final placement. If any frame conflicts, defer
-        // the entire ordered plan to finalization/Studio preview.
-        if !frames.has_conflicts() {
-            frames.apply_automatic_to_base(&mut base);
-            frames.apply_automatic_to_compact_ours(&mut ours);
-            frames.apply_automatic_to_compact_theirs(&mut theirs);
-        }
+    let has_pivot_conflicts = result.conflicts.iter().any(|conflict| {
+        matches!(conflict.kind, ConflictKind::ModelFrame { .. })
+            || !conflict.ours.pivots.is_empty()
+            || !conflict.theirs.pivots.is_empty()
+    });
+    // With no unresolved pivot decision, materialize the selected plan in
+    // every canonical DOM before stamping. If any pivot conflicts, defer the
+    // entire ordered plan to finalization/Studio preview.
+    if !has_pivot_conflicts {
+        apply_pivot_ops(&mut base, &result.pivots);
+        apply_pivot_ops_to_compact_branch(&mut ours, &result.pivots, &result.ours_identity.matched);
+        apply_pivot_ops_to_compact_branch(
+            &mut theirs,
+            &result.pivots,
+            &result.theirs_identity.matched,
+        );
     }
     eprintln!(
         "Merged in {:.2?}: {} ours + {} theirs ops applied, {} deduped, {} conflicts",
@@ -337,10 +327,23 @@ fn cmd_merge(
     if !result.conflicts.is_empty() {
         groups = detect_rigid_groups(&base, &result.conflicts);
         stamp_compact_conflicts(&mut base, &ours, &theirs, &result);
-        if let Some(frames) = &model_frames {
-            if frames.has_conflicts() {
-                stamp_model_frame_plan(&mut base, &frames.automatic_applications());
-            }
+        if has_pivot_conflicts {
+            let applications: Vec<_> = result
+                .pivots
+                .iter()
+                .map(|pivot| ModelFrameApplication {
+                    target_ref: pivot.target_ref,
+                    path: model_frames
+                        .as_ref()
+                        .and_then(|frames| frames.path_for(pivot.target_ref))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| pivot.target_ref.to_string()),
+                    order: pivot.order,
+                    parent_order: pivot.parent_order,
+                    delta: pivot.delta,
+                })
+                .collect();
+            stamp_model_frame_plan(&mut base, &applications);
         }
         stamp_rigid_groups(&mut base, &groups);
     }

@@ -291,7 +291,17 @@ fn two_way_diff_factors_rotated_parent_and_child_frames() {
     let (diffs, normalization) =
         diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
     let normalization = normalization.expect("parent and child frames should be detected");
-    assert_eq!(normalization.frames.len(), 2, "{:#?}", normalization.frames);
+    assert_eq!(normalization.pivots.len(), 2, "{:#?}", normalization.pivots);
+    assert_cframe_close(
+        &normalization.pivots[0].delta,
+        &parent,
+        "root pivot stores its world-relative delta",
+    );
+    assert_cframe_close(
+        &normalization.pivots[1].delta,
+        &child,
+        "child pivot stores its parent-relative delta",
+    );
     assert_eq!(diffs.len(), 2, "{diffs:#?}");
     assert!(diffs
         .iter()

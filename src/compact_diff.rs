@@ -11,6 +11,7 @@ use crate::diff::{
 };
 use crate::diff_dom::{DiffDom, DiffNode, DomView, InstanceView, NodeId};
 use crate::edit_script::{Anchor, EditOp, InstanceIdentity, SemanticChangeSet};
+use crate::placement::PivotOp;
 use crate::value_compare::non_ref_variants_equal;
 
 struct DenseIdentity {
@@ -360,6 +361,7 @@ pub(crate) fn compute_compact_diff_with_identity(
     old_dom: &DiffDom,
     new_dom: &DiffDom,
     identity: &InstanceIdentity,
+    pivots: &[PivotOp],
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
     let dense = DenseIdentity::from_complete(old_dom, new_dom, identity);
@@ -402,6 +404,7 @@ pub(crate) fn compute_compact_diff_with_identity(
     }
     let changes = SemanticChangeSet {
         ops,
+        pivots: pivots.to_vec(),
         identity: identity.clone(),
     };
     semantic_changes_to_diff(old_dom, new_dom, &changes)

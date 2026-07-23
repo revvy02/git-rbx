@@ -37,12 +37,13 @@
 //!   canonicalization. That post-root identity map is pinned for the merge.
 //!   Otherwise nested canonicalization can make duplicate siblings newly
 //!   identical and accidentally reshuffle which instance is which.
-//! * The merge keeps an ordered, top-down plan of local frame applications.
-//!   If all frame decisions are automatic, the plan can be applied to every
-//!   canonical branch before conflict data is stamped. If any frame decision
-//!   conflicts, automatic and selected frames must all be applied together,
-//!   top-down, after ordinary conflict resolution. That ordering is required
-//!   for rotations because rigid transforms do not commute.
+//! * Each non-identity local frame becomes a primitive `PivotOp`. The merge
+//!   keeps these operations in an ordered placement phase alongside its
+//!   ordinary semantic operations. If every pivot is automatic, the plan can
+//!   be applied to every canonical branch before conflict data is stamped. If
+//!   any pivot conflicts, automatic and selected pivots must all be applied
+//!   together, top-down, after ordinary conflict resolution. That ordering is
+//!   required for rotations because rigid transforms do not commute.
 //!
 //! Two-way model-asset diffs use the same hierarchy. Each non-identity local
 //! frame becomes one explicit `model_frame` diff entry, while canonicalized
@@ -61,6 +62,10 @@ use crate::dom_utils::class_is_a;
 use crate::edit_script::{compute_instance_identity, InstanceIdentity};
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
+use crate::placement::{
+    apply_pivot_plan, transform_world_properties_below, transform_world_refs, PivotApplication,
+    PivotOp,
+};
 use crate::rigid_groups::Rigid;
 use crate::value_compare::cframes_equal;
 
@@ -78,24 +83,10 @@ pub struct ModelNormalization {
     pub base_target_ref: Ref,
 }
 
-/// One inferred rigid movement reported by a two-way model-asset diff.
-#[derive(Debug, Clone)]
-pub struct ModelFrameChange {
-    pub base_ref: Ref,
-    pub side_ref: Ref,
-    pub path: String,
-    /// Stable top-down order. Ancestors always sort first.
-    pub order: usize,
-    /// Nearest ancestor that also has a reported frame change.
-    pub parent_order: Option<usize>,
-    /// Local transform relative to `parent_order` (or world for a root).
-    pub delta: CFrame,
-}
-
 /// Canonicalization state for an ordinary two-way model-asset diff.
 #[derive(Debug, Clone)]
 pub struct ModelFrameDiff {
-    pub frames: Vec<ModelFrameChange>,
+    pub pivots: Vec<PivotOp>,
     /// Number of boundaries that independently established a frame.
     pub detected: usize,
     /// Identity captured after root alignment and before nested
@@ -103,45 +94,22 @@ pub struct ModelFrameDiff {
     pub identity: InstanceIdentity,
 }
 
-#[derive(Debug, Clone)]
-pub enum ModelFrameDecision {
-    /// Normal three-way semantics selected this local frame without conflict.
-    Automatic(CFrame),
-    /// Both branches changed this boundary's local frame differently.
-    Conflict,
+impl ModelFrameDiff {
+    pub fn pivot_ops(&self) -> &[PivotOp] {
+        &self.pivots
+    }
 }
 
-/// One independently mergeable Model boundary in the hierarchical frame plan.
-#[derive(Debug, Clone)]
-pub struct ModelFrame {
-    pub target_ref: Ref,
-    pub ours_ref: Option<Ref>,
-    pub theirs_ref: Option<Ref>,
-    pub path: String,
-    /// Stable top-down application order. Ancestors always sort first.
-    pub order: usize,
-    /// Nearest ancestor that also has a frame decision.
-    pub parent_order: Option<usize>,
-    /// Local frame taking the parent boundary's effective frame to this side.
-    pub ours: CFrame,
-    pub theirs: CFrame,
-    pub decision: ModelFrameDecision,
-}
-
-/// An automatic local frame persisted when another boundary remains conflicted.
-#[derive(Debug, Clone)]
-pub struct ModelFrameApplication {
-    pub target_ref: Ref,
-    pub path: String,
-    pub order: usize,
-    pub parent_order: Option<usize>,
-    pub delta: CFrame,
-}
+/// Backwards-compatible name for a resolved primitive placement.
+pub type ModelFrameApplication = PivotApplication;
 
 #[derive(Debug, Clone)]
 pub struct ModelFrameMerge {
-    /// Non-identity local frame decisions, in top-down order.
-    pub frames: Vec<ModelFrame>,
+    /// Primitive branch placements, in top-down order.
+    pub ours_pivots: Vec<PivotOp>,
+    pub theirs_pivots: Vec<PivotOp>,
+    paths: HashMap<Ref, String>,
+    affected_boundaries: usize,
     /// Number of boundaries that established their own frame on each side.
     pub ours_detected: usize,
     pub theirs_detected: usize,
@@ -151,93 +119,21 @@ pub struct ModelFrameMerge {
 }
 
 impl ModelFrameMerge {
-    pub fn has_conflicts(&self) -> bool {
-        self.frames
-            .iter()
-            .any(|frame| matches!(frame.decision, ModelFrameDecision::Conflict))
+    pub fn ours_pivots(&self) -> &[PivotOp] {
+        &self.ours_pivots
     }
 
-    pub fn automatic_applications(&self) -> Vec<ModelFrameApplication> {
-        self.frames
-            .iter()
-            .filter_map(|frame| match frame.decision {
-                ModelFrameDecision::Automatic(delta) => Some(ModelFrameApplication {
-                    target_ref: frame.target_ref,
-                    path: frame.path.clone(),
-                    order: frame.order,
-                    parent_order: frame.parent_order,
-                    delta,
-                }),
-                ModelFrameDecision::Conflict => None,
-            })
-            .collect()
+    pub fn theirs_pivots(&self) -> &[PivotOp] {
+        &self.theirs_pivots
     }
 
-    pub fn apply_automatic_to_base(&self, dom: &mut WeakDom) {
-        apply_model_frame_plan(dom, &self.automatic_applications());
+    pub fn affected_boundaries(&self) -> usize {
+        self.affected_boundaries
     }
 
-    pub fn apply_automatic_to_ours(&self, dom: &mut WeakDom) {
-        let frames: Vec<_> = self
-            .automatic_applications()
-            .into_iter()
-            .filter_map(|mut application| {
-                let target = self
-                    .frames
-                    .iter()
-                    .find(|frame| frame.order == application.order)?
-                    .ours_ref?;
-                application.target_ref = target;
-                Some(application)
-            })
-            .collect();
-        apply_model_frame_plan(dom, &frames);
+    pub fn path_for(&self, target_ref: Ref) -> Option<&str> {
+        self.paths.get(&target_ref).map(String::as_str)
     }
-
-    pub fn apply_automatic_to_theirs(&self, dom: &mut WeakDom) {
-        let frames: Vec<_> = self
-            .automatic_applications()
-            .into_iter()
-            .filter_map(|mut application| {
-                let target = self
-                    .frames
-                    .iter()
-                    .find(|frame| frame.order == application.order)?
-                    .theirs_ref?;
-                application.target_ref = target;
-                Some(application)
-            })
-            .collect();
-        apply_model_frame_plan(dom, &frames);
-    }
-
-    pub fn apply_automatic_to_compact_ours(&self, dom: &mut DiffDom) {
-        apply_automatic_to_branch(self, dom, true);
-    }
-
-    pub fn apply_automatic_to_compact_theirs(&self, dom: &mut DiffDom) {
-        apply_automatic_to_branch(self, dom, false);
-    }
-}
-
-fn apply_automatic_to_branch(merge: &ModelFrameMerge, dom: &mut dyn DomViewMut, ours: bool) {
-    let frames: Vec<_> = merge
-        .automatic_applications()
-        .into_iter()
-        .filter_map(|mut application| {
-            let frame = merge
-                .frames
-                .iter()
-                .find(|frame| frame.order == application.order)?;
-            application.target_ref = if ours {
-                frame.ours_ref?
-            } else {
-                frame.theirs_ref?
-            };
-            Some(application)
-        })
-        .collect();
-    apply_model_frame_plan_view(dom, &frames);
 }
 
 #[derive(Clone)]
@@ -528,50 +424,6 @@ fn detect_hierarchy(base: &dyn DomView, side: &dyn DomView) -> HierarchyDetectio
     detect_hierarchy_from_identity(base, side, &identity)
 }
 
-fn transform_world_refs(dom: &mut dyn DomViewMut, refs: Vec<(Ref, Rigid)>) {
-    for (referent, alignment) in refs {
-        // Rewriting a CFrame through an identity f64 round-trip can still
-        // change its exact f32 representation. Besides being needless, doing
-        // this across an unchanged place defeats deep-hash pruning and forces
-        // the display diff to walk the entire world.
-        if Rigid::close(&alignment, &Rigid::identity()) {
-            continue;
-        }
-        let replacement = {
-            let Some(instance) = dom.get_by_ref(referent) else {
-                continue;
-            };
-            if class_is_a(instance.class(), "BasePart") {
-                match instance.property("CFrame") {
-                    Some(Variant::CFrame(cframe)) => Some((
-                        "CFrame",
-                        Variant::CFrame(alignment.mul(Rigid::from_cframe(cframe)).to_cframe()),
-                    )),
-                    _ => None,
-                }
-            } else if class_is_a(instance.class(), "Model")
-                && !class_is_a(instance.class(), "WorldRoot")
-            {
-                match instance.property("WorldPivotData") {
-                    Some(Variant::OptionalCFrame(Some(cframe))) => Some((
-                        "WorldPivotData",
-                        Variant::OptionalCFrame(Some(
-                            alignment.mul(Rigid::from_cframe(cframe)).to_cframe(),
-                        )),
-                    )),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        };
-        if let Some((name, value)) = replacement {
-            let updated = dom.set_existing_property(referent, name, value);
-            debug_assert!(updated);
-        }
-    }
-}
-
 fn snapshot_world_properties(dom: &dyn DomView) -> Vec<(Ref, &'static str, Variant)> {
     let mut snapshot = Vec::new();
     for referent in DescendantRefs::new(dom) {
@@ -597,19 +449,6 @@ fn restore_world_properties(dom: &mut dyn DomViewMut, snapshot: Vec<(Ref, &'stat
         let updated = dom.set_existing_property(referent, property, value);
         debug_assert!(updated);
     }
-}
-
-fn transform_world_properties_below(dom: &mut dyn DomViewMut, root: Ref, alignment: Rigid) {
-    let mut pending = vec![root];
-    let mut refs = Vec::new();
-    while let Some(referent) = pending.pop() {
-        let Some(instance) = dom.get_by_ref(referent) else {
-            continue;
-        };
-        pending.extend(instance.children());
-        refs.push((referent, alignment));
-    }
-    transform_world_refs(dom, refs);
 }
 
 fn canonicalize_side(dom: &mut dyn DomViewMut, detection: &HierarchyDetection) {
@@ -765,42 +604,7 @@ pub fn apply_model_frame(dom: &mut WeakDom, target: Ref, frame: &CFrame) {
 /// Compose local frame decisions, then write each world-space property once
 /// using the effective frame of its nearest participating boundary.
 pub fn apply_model_frame_plan(dom: &mut WeakDom, frames: &[ModelFrameApplication]) {
-    apply_model_frame_plan_view(dom, frames);
-}
-
-fn apply_model_frame_plan_view(dom: &mut dyn DomViewMut, frames: &[ModelFrameApplication]) {
-    let mut ordered: Vec<_> = frames.iter().collect();
-    ordered.sort_unstable_by_key(|frame| frame.order);
-    let mut effective_by_order: HashMap<usize, Rigid> = HashMap::new();
-    let mut effective_by_target = HashMap::new();
-    for frame in ordered {
-        let parent = frame
-            .parent_order
-            .and_then(|order| effective_by_order.get(&order).copied())
-            .unwrap_or_else(Rigid::identity);
-        let effective = Rigid::from_cframe(&frame.delta).mul(parent);
-        effective_by_order.insert(frame.order, effective);
-        effective_by_target.insert(frame.target_ref, effective);
-    }
-
-    let mut pending: Vec<(Ref, Option<Rigid>)> = dom
-        .get_by_ref(dom.root_ref())
-        .into_iter()
-        .flat_map(|root| root.children())
-        .map(|referent| (referent, None))
-        .collect();
-    let mut refs = Vec::new();
-    while let Some((referent, inherited)) = pending.pop() {
-        let active = effective_by_target.get(&referent).copied().or(inherited);
-        let Some(instance) = dom.get_by_ref(referent) else {
-            continue;
-        };
-        pending.extend(instance.children().map(|child| (child, active)));
-        if let Some(effective) = active {
-            refs.push((referent, effective));
-        }
-    }
-    transform_world_refs(dom, refs);
+    apply_pivot_plan(dom, frames);
 }
 
 /// Legacy whole-DOM helper retained for callers that explicitly have one
@@ -830,7 +634,7 @@ fn identity_frame() -> CFrame {
 /// nested frames are removed.
 pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option<ModelFrameDiff> {
     let state = prepare_model_diff_frames_view(base, side);
-    (!state.frames.is_empty()).then_some(state)
+    (!state.pivots.is_empty()).then_some(state)
 }
 
 /// Establish complete identity and optionally canonicalize inferred frames.
@@ -851,7 +655,7 @@ pub(crate) fn prepare_model_diff_frames_view(
 
     let identity_frame = identity_frame();
     let mut nearest_frame = vec![None; detection.boundaries.len()];
-    let mut frames = Vec::new();
+    let mut pivots = Vec::new();
     for (order, boundary) in detection.boundaries.iter().enumerate() {
         let local = raw_local_frame(boundary, prefixes[order]).to_cframe();
         let parent_order = boundary.parent.and_then(|parent| nearest_frame[parent]);
@@ -862,7 +666,7 @@ pub(crate) fn prepare_model_diff_frames_view(
         let Some(side_ref) = boundary.side_ref else {
             restore_root_alignment(side, raw);
             return ModelFrameDiff {
-                frames: Vec::new(),
+                pivots: Vec::new(),
                 detected: detection
                     .boundaries
                     .iter()
@@ -871,10 +675,9 @@ pub(crate) fn prepare_model_diff_frames_view(
                 identity,
             };
         };
-        frames.push(ModelFrameChange {
-            base_ref: boundary.base_ref,
+        pivots.push(PivotOp {
+            target_ref: boundary.base_ref,
             side_ref,
-            path: get_instance_path(side.as_view(), side_ref),
             order,
             parent_order,
             delta: local,
@@ -882,10 +685,10 @@ pub(crate) fn prepare_model_diff_frames_view(
         nearest_frame[order] = Some(order);
     }
 
-    if frames.is_empty() {
+    if pivots.is_empty() {
         restore_root_alignment(side, raw);
         return ModelFrameDiff {
-            frames,
+            pivots,
             detected: detection
                 .boundaries
                 .iter()
@@ -905,7 +708,7 @@ pub(crate) fn prepare_model_diff_frames_view(
     canonicalize_side(side, &detection);
 
     ModelFrameDiff {
-        frames,
+        pivots,
         detected: detection
             .boundaries
             .iter()
@@ -915,16 +718,8 @@ pub(crate) fn prepare_model_diff_frames_view(
     }
 }
 
-pub(crate) fn normalize_model_diff_frames_view(
-    base: &dyn DomView,
-    side: &mut dyn DomViewMut,
-) -> Option<ModelFrameDiff> {
-    let state = prepare_model_diff_frames_view(base, side);
-    (!state.frames.is_empty()).then_some(state)
-}
-
-/// Canonicalize both branches and return independently mergeable local frame
-/// decisions for every affected boundary.
+/// Canonicalize both branches and return independently mergeable placements
+/// for every affected boundary.
 pub fn normalize_model_merge_frames(
     base: &WeakDom,
     ours: &mut WeakDom,
@@ -973,7 +768,10 @@ fn normalize_model_merge_frames_view(
         );
 
         let identity = identity_frame();
-        let mut frames = Vec::new();
+        let mut ours_pivots = Vec::new();
+        let mut theirs_pivots = Vec::new();
+        let mut paths = HashMap::new();
+        let mut affected_boundaries = 0;
         let mut nearest_frame = vec![None; ours_detection.boundaries.len()];
         for (order, (ours_boundary, theirs_boundary)) in ours_detection
             .boundaries
@@ -993,30 +791,37 @@ fn normalize_model_merge_frames_view(
                 nearest_frame[order] = parent_order;
                 continue;
             }
-            let decision = if model_frames_close(&ours_local, &theirs_local) {
-                ModelFrameDecision::Automatic(ours_local)
-            } else if model_frames_close(&ours_local, &identity) {
-                ModelFrameDecision::Automatic(theirs_local)
-            } else if model_frames_close(&theirs_local, &identity) {
-                ModelFrameDecision::Automatic(ours_local)
-            } else {
-                ModelFrameDecision::Conflict
-            };
-            frames.push(ModelFrame {
-                target_ref: ours_boundary.base_ref,
-                ours_ref: ours_boundary.side_ref,
-                theirs_ref: theirs_boundary.side_ref,
-                path: get_instance_path(base, ours_boundary.base_ref),
-                order,
-                parent_order,
-                ours: ours_local,
-                theirs: theirs_local,
-                decision,
-            });
+            affected_boundaries += 1;
+            paths.insert(
+                ours_boundary.base_ref,
+                get_instance_path(base, ours_boundary.base_ref),
+            );
+            if !model_frames_close(&ours_local, &identity) {
+                if let Some(side_ref) = ours_boundary.side_ref {
+                    ours_pivots.push(PivotOp {
+                        target_ref: ours_boundary.base_ref,
+                        side_ref,
+                        order,
+                        parent_order,
+                        delta: ours_local,
+                    });
+                }
+            }
+            if !model_frames_close(&theirs_local, &identity) {
+                if let Some(side_ref) = theirs_boundary.side_ref {
+                    theirs_pivots.push(PivotOp {
+                        target_ref: theirs_boundary.base_ref,
+                        side_ref,
+                        order,
+                        parent_order,
+                        delta: theirs_local,
+                    });
+                }
+            }
             nearest_frame[order] = Some(order);
         }
 
-        if frames.is_empty() {
+        if affected_boundaries == 0 {
             return None;
         }
 
@@ -1030,7 +835,10 @@ fn normalize_model_merge_frames_view(
         }
 
         let merge = ModelFrameMerge {
-            frames,
+            ours_pivots,
+            theirs_pivots,
+            paths,
+            affected_boundaries,
             ours_detected: ours_detection
                 .boundaries
                 .iter()

@@ -290,8 +290,8 @@ fn spatial_conflict(
         }] => spatial_cframe(value).copied(),
         _ => None,
     };
-    let ours = side_value(&conflict.ours)?;
-    let theirs = side_value(&conflict.theirs)?;
+    let ours = side_value(&conflict.ours.edits)?;
+    let theirs = side_value(&conflict.theirs.edits)?;
     let base_value = base_instance
         .properties
         .get(&name.as_str().into())

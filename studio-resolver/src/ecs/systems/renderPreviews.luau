@@ -60,7 +60,25 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			for _, child in folder:GetChildren() do
 				if child.Name == "Destination" and child:IsA("ObjectValue") then
 					info.destination = child.Value
-				else
+				elseif child.Name == "PivotPlan" then
+					local pivots: { types.FrameApplication } = {}
+					for _, pivot in child:GetChildren() do
+						local targetValue = pivot:FindFirstChild("Target")
+						local target = if targetValue and targetValue:IsA("ObjectValue") then targetValue.Value else nil
+						local order = pivot:GetAttribute("FrameOrder") :: number?
+						local parentOrder = pivot:GetAttribute("FrameParentOrder") :: number?
+						local delta = pivot:GetAttribute("Delta") :: CFrame?
+						if target and order and delta then
+							table.insert(pivots, {
+								target = target,
+								order = order,
+								parentOrder = parentOrder,
+								delta = delta,
+							})
+						end
+					end
+					info.pivots = pivots
+				elseif child.Name ~= "__RbxDiffImpact" then
 					info.clone = child
 				end
 			end
@@ -100,9 +118,16 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 
 	for _, entity in conflictList do
 		local entry = world:get(entity, cts.Entry) :: Instance
-		world:set(entity, cts.Ours, sideInfo(entry, "Ours"))
-		world:set(entity, cts.Theirs, sideInfo(entry, "Theirs"))
+		local ours = sideInfo(entry, "Ours")
+		local theirs = sideInfo(entry, "Theirs")
+		world:set(entity, cts.Ours, ours)
+		world:set(entity, cts.Theirs, theirs)
 		world:set(entity, cts.Rendered, "__init")
+		for _, info in { ours, theirs } do
+			for _, application in info.pivots or {} do
+				captureFrameTarget(application.target)
+			end
+		end
 
 		local target = world:get(entity, cts.Target) :: Instance
 		local kind = world:get(entity, cts.Kind)
@@ -232,19 +257,22 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	local function applyFramePlan()
 		local applications: { types.FrameApplication } = table.clone(automaticFramePlan)
 		for _, entity in conflictList do
-			if world:get(entity, cts.Kind) == "ModelFrame" then
-				local staged = world:get(entity, cts.Resolution) :: string?
-				local info = if staged == "ours"
-					then world:get(entity, cts.Ours) :: SideInfo
-					elseif staged == "theirs" then world:get(entity, cts.Theirs) :: SideInfo
-					else nil
-				if info and info.delta then
+			local staged = world:get(entity, cts.Resolution) :: string?
+			local info = if staged == "ours"
+				then world:get(entity, cts.Ours) :: SideInfo
+				elseif staged == "theirs" then world:get(entity, cts.Theirs) :: SideInfo
+				else nil
+			if info then
+				if world:get(entity, cts.Kind) == "ModelFrame" and info.delta then
 					table.insert(applications, {
 						target = world:get(entity, cts.Target) :: Instance,
 						order = (world:get(entity, cts.FrameOrder) :: number?) or math.huge,
 						parentOrder = world:get(entity, cts.FrameParentOrder) :: number?,
 						delta = info.delta,
 					})
+				end
+				for _, pivot in info.pivots or {} do
+					table.insert(applications, pivot)
 				end
 			end
 		end

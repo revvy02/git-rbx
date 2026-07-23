@@ -423,13 +423,7 @@ pub(crate) fn raw_property_changes(
 
         match old_value {
             Some(old_value) => {
-                if !variants_equal(
-                    old_dom,
-                    new_dom,
-                    old_value,
-                    new_value,
-                    ref_mapping,
-                ) {
+                if !variants_equal(old_dom, new_dom, old_value, new_value, ref_mapping) {
                     changes.push(RawPropertyChange {
                         name: name.to_string(),
                         old: Some(old_value.clone()),
@@ -498,6 +492,22 @@ pub(crate) fn semantic_changes_to_diff(
     new_dom: &dyn DomView,
     changes: &SemanticChangeSet,
 ) -> Vec<DiffEntry> {
+    let mut result = Vec::with_capacity(changes.pivots.len() + changes.ops.len());
+    for pivot in &changes.pivots {
+        let Some(instance) = new_dom.get_by_ref(pivot.side_ref) else {
+            continue;
+        };
+        result.push(DiffEntry::ModelFrame {
+            old_ref: pivot.target_ref.to_string(),
+            new_ref: pivot.side_ref.to_string(),
+            path: get_instance_path(new_dom, pivot.side_ref),
+            class: instance.class().to_string(),
+            order: pivot.order,
+            parent_order: pivot.parent_order,
+            delta: pivot.delta.into(),
+        });
+    }
+
     let mut modifications: HashMap<Ref, Vec<PropertyChange>> = HashMap::new();
 
     for op in &changes.ops {
@@ -555,7 +565,6 @@ pub(crate) fn semantic_changes_to_diff(
         }
         None
     };
-    let mut result = Vec::new();
     let mut deferred: HashMap<Ref, Vec<DiffEntry>> = HashMap::new();
     let mut emitted_modifications = HashSet::new();
     let push = |entry: DiffEntry,

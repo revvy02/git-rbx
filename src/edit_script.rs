@@ -1,10 +1,13 @@
 //! Semantic change sets: storage-independent differences between two DOMs,
 //! plus materialization helpers that apply them to a mutable result.
 //!
-//! This is the layer the future merge combiner consumes. Basis ops are
+//! This is the layer the merge combiner consumes. Ordinary basis ops are
 //! AddSubtree / RemoveSubtree / SetName / SetProperty; Move is the derived
-//! identity op (a paired remove+add). Ops address existing instances by their
-//! ref in the OLD dom and subtree payloads by their ref in the NEW dom.
+//! identity op (a paired remove+add). Hierarchical [`PivotOp`]s are another
+//! primitive, kept in an ordered placement phase because they transform the
+//! coordinate system in which ordinary edits were planned. Ops address
+//! existing instances by their ref in the OLD dom and subtree payloads by
+//! their ref in the NEW dom.
 //!
 //! Merge planning walks the complete identity tree so Ref-valued properties
 //! can always be remapped at materialization time. Compact display diffing
@@ -21,6 +24,7 @@ use crate::diff_dom::DomView;
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::Matcher;
 use crate::move_detect::detect_moves;
+use crate::placement::{apply_pivot_ops, PivotOp};
 
 /// Where a parent lives when an op needs one: an instance that exists in the
 /// old DOM, or one that an AddSubtree op creates (addressed by its new-DOM ref).
@@ -61,7 +65,10 @@ pub enum EditOp {
 /// lets the two-way diff and three-way merge planners consume compact DOMs
 /// without pulling editing concerns into matching and comparison.
 pub struct SemanticChangeSet {
+    /// Structural and property operations in canonical coordinates.
     pub ops: Vec<EditOp>,
+    /// Parent-relative placements, applied after `ops` in top-down order.
+    pub pivots: Vec<PivotOp>,
     pub identity: InstanceIdentity,
 }
 
@@ -256,7 +263,11 @@ pub(crate) fn compute_semantic_changes_with_identity(
         matched = identity.matched.len(),
         "edit script built"
     );
-    SemanticChangeSet { ops, identity }
+    SemanticChangeSet {
+        ops,
+        pivots: Vec::new(),
+        identity,
+    }
 }
 
 struct BuildCtx<'a> {
@@ -423,6 +434,7 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
 /// for AddSubtree ops.
 pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditScript) {
     apply_ops(target, new_dom, &script.ops, &script.identity);
+    apply_pivot_ops(target, &script.pivots);
 }
 
 /// Apply a subset of ops (all computed against `target`'s original state, with

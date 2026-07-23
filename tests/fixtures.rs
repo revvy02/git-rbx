@@ -183,7 +183,7 @@ fn police_station_and_nested_moves_collapse_to_three_frames() {
     let (diffs, frames) =
         diff_model_compact_doms_with_config(&base, &mut side, &DiffConfig::default());
     let frames = frames.expect("the fixture contains three hierarchical model moves");
-    assert_eq!(frames.frames.len(), 3, "{:#?}", frames.frames);
+    assert_eq!(frames.pivots.len(), 3, "{:#?}", frames.pivots);
     assert_eq!(counts(&diffs), (0, 1, 5, 0), "{diffs:#?}");
 
     let residual_cframes: Vec<_> = diffs

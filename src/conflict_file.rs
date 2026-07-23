@@ -42,6 +42,7 @@ use crate::explorer_tree::{ExplorerTree, ExplorerTrees, ExplorerVersion};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
 use crate::model_normalize::{apply_model_frame_plan, ModelFrameApplication};
+use crate::placement::PivotOp;
 use crate::rigid_groups::{Rigid, RigidGroup};
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
@@ -176,7 +177,8 @@ fn stamp_conflicts_from_views(
                 base,
                 entry,
                 "Ours",
-                &conflict.ours,
+                &conflict.ours.edits,
+                &conflict.ours.pivots,
                 conflict.base_ref,
                 ours_dom,
                 &result.ours_identity.matched,
@@ -188,7 +190,8 @@ fn stamp_conflicts_from_views(
                 base,
                 entry,
                 "Theirs",
-                &conflict.theirs,
+                &conflict.theirs.edits,
+                &conflict.theirs.pivots,
                 conflict.base_ref,
                 theirs_dom,
                 &result.theirs_identity.matched,
@@ -359,6 +362,7 @@ fn stamp_side(
     entry: Ref,
     side_name: &str,
     side_ops: &[EditOp],
+    side_pivots: &[PivotOp],
     base_ref: Ref,
     branch_dom: &dyn DomView,
     base_to_branch: &HashMap<Ref, Ref>,
@@ -383,9 +387,10 @@ fn stamp_side(
         _ => {}
     }
     // An edit inside a delete-vs-edit conflict needs the whole edited subtree
-    if side_ops
-        .iter()
-        .any(|op| !matches!(op, EditOp::RemoveSubtree { .. } | EditOp::Move { .. }))
+    if !side_pivots.is_empty()
+        || side_ops
+            .iter()
+            .any(|op| !matches!(op, EditOp::RemoveSubtree { .. } | EditOp::Move { .. }))
     {
         deep_clone = true;
     }
@@ -397,7 +402,15 @@ fn stamp_side(
             .with_property("Attributes", Variant::Attributes(side_attrs)),
     );
 
-    let impact = impact_for_ops(base, branch_dom, side_ops, base_to_branch, trees, version);
+    let impact = impact_for_ops_and_pivots(
+        base,
+        branch_dom,
+        side_ops,
+        side_pivots,
+        base_to_branch,
+        trees,
+        version,
+    );
     stamp_impact(base, side_folder, &impact);
 
     // Move destination for finalize, when it maps to a live base instance
@@ -417,12 +430,53 @@ fn stamp_side(
 
     // Clone this side's version of the instance (skip for pure deletes/moves)
     let is_delete = matches!(side_ops.first(), Some(EditOp::RemoveSubtree { .. }));
-    let is_move_only = side_ops.iter().all(|op| matches!(op, EditOp::Move { .. }));
+    let is_move_only =
+        !side_ops.is_empty() && side_ops.iter().all(|op| matches!(op, EditOp::Move { .. }));
     if !is_delete && !is_move_only {
         if let Some(&branch_ref) = base_to_branch.get(&base_ref) {
-            let builder = clone_from_branch(branch_dom, branch_ref, branch_to_base, deep_clone);
+            let (builder, branch_to_clone) =
+                clone_from_branch(branch_dom, branch_ref, branch_to_base, deep_clone);
             base.insert(side_folder, builder);
+            stamp_conditional_pivots(base, side_folder, side_pivots, &branch_to_clone);
         }
+    }
+}
+
+fn stamp_conditional_pivots(
+    base: &mut WeakDom,
+    side_folder: Ref,
+    pivots: &[PivotOp],
+    branch_to_clone: &HashMap<Ref, Ref>,
+) {
+    if pivots.is_empty() {
+        return;
+    }
+    let plan = base.insert(
+        side_folder,
+        InstanceBuilder::new("Folder").with_name("PivotPlan"),
+    );
+    for (index, pivot) in pivots.iter().enumerate() {
+        let Some(&target) = branch_to_clone.get(&pivot.side_ref) else {
+            continue;
+        };
+        let mut attrs = Attributes::new()
+            .with("FrameOrder", Variant::Float64(pivot.order as f64))
+            .with("Delta", Variant::CFrame(pivot.delta));
+        if let Some(parent_order) = pivot.parent_order {
+            attrs = attrs.with("FrameParentOrder", Variant::Float64(parent_order as f64));
+        }
+        let entry = base.insert(
+            plan,
+            InstanceBuilder::new("Folder")
+                .with_name(format!("Pivot_{}", index + 1))
+                .with_property("Attributes", Variant::Attributes(attrs)),
+        );
+        base.insert(
+            entry,
+            InstanceBuilder::new("ObjectValue")
+                .with_name("Target")
+                .with_property("Value", Variant::Ref(target)),
+        );
     }
 }
 
@@ -617,6 +671,28 @@ fn impact_for_ops(
     }
 }
 
+fn impact_for_ops_and_pivots(
+    base: &WeakDom,
+    branch: &dyn DomView,
+    ops: &[EditOp],
+    pivots: &[PivotOp],
+    base_to_branch: &HashMap<Ref, Ref>,
+    trees: &ExplorerTrees,
+    version: ExplorerVersion,
+) -> ImpactSide {
+    let mut impact = impact_for_ops(base, branch, ops, base_to_branch, trees, version);
+    for pivot in pivots {
+        let pivot_impact = model_frame_impact(base, pivot.target_ref, trees, &pivot.delta);
+        impact.operations.extend(pivot_impact.operations);
+        impact.affected_ids.extend(pivot_impact.affected_ids);
+        impact.property_count += pivot_impact.property_count;
+    }
+    impact.affected_ids.sort_unstable();
+    impact.affected_ids.dedup();
+    impact.instance_count = impact.affected_ids.len();
+    impact
+}
+
 fn model_frame_impact(
     base: &WeakDom,
     target: Ref,
@@ -687,16 +763,17 @@ fn clone_from_branch(
     branch_ref: Ref,
     branch_to_base: &HashMap<Ref, Ref>,
     deep: bool,
-) -> InstanceBuilder {
+) -> (InstanceBuilder, HashMap<Ref, Ref>) {
     let mut branch_to_clone = HashMap::new();
     allocate_clone_refs(branch_dom, branch_ref, deep, &mut branch_to_clone);
-    build_branch_clone(
+    let builder = build_branch_clone(
         branch_dom,
         branch_ref,
         branch_to_base,
         &branch_to_clone,
         deep,
-    )
+    );
+    (builder, branch_to_clone)
 }
 
 fn allocate_clone_refs(
@@ -1242,6 +1319,52 @@ fn read_frame_actions(
         });
     }
 
+    // Structural conflicts may carry a pivot on their surviving side (for
+    // example, delete-vs-pivot). The clone is kept canonical; selecting that
+    // side contributes these conditional operations to the same ordered plan.
+    for entry in entries {
+        let side = entry.resolved.as_deref().unwrap();
+        let side_folder_name = if side == "ours" { "Ours" } else { "Theirs" };
+        let Some(side_folder) = child_by_name(dom, entry.entry_ref, side_folder_name) else {
+            continue;
+        };
+        let Some(plan) = child_by_name(dom, side_folder, "PivotPlan") else {
+            continue;
+        };
+        let children = dom
+            .get_by_ref(plan)
+            .map(|instance| instance.children().to_vec())
+            .unwrap_or_default();
+        for pivot in children {
+            let Some(instance) = dom.get_by_ref(pivot) else {
+                continue;
+            };
+            let Some(Variant::Attributes(attrs)) = instance.properties.get(&"Attributes".into())
+            else {
+                continue;
+            };
+            let order = numeric_attr(attrs, "FrameOrder").ok_or_else(|| {
+                anyhow::anyhow!("{}: conditional pivot has no FrameOrder", instance.name)
+            })? as usize;
+            let delta = match attrs.get("Delta") {
+                Some(Variant::CFrame(delta)) => *delta,
+                _ => bail!("{}: conditional pivot has no Delta", instance.name),
+            };
+            let target = child_object_value(dom, pivot, "Target").ok_or_else(|| {
+                anyhow::anyhow!("{}: conditional pivot has no Target", instance.name)
+            })?;
+            actions.push(ModelFrameApplication {
+                target_ref: target,
+                path: entry.path.clone(),
+                order,
+                parent_order: numeric_attr(attrs, "FrameParentOrder")
+                    .filter(|value| *value >= 0.0)
+                    .map(|value| value as usize),
+                delta,
+            });
+        }
+    }
+
     Ok(actions)
 }
 
@@ -1473,7 +1596,11 @@ fn first_non_value_child(dom: &WeakDom, side_folder: Ref) -> Option<Ref> {
         .copied()
         .find(|&c| {
             dom.get_by_ref(c)
-                .map(|i| i.class.as_str() != "ObjectValue" && i.name != "__RbxDiffImpact")
+                .map(|i| {
+                    i.class.as_str() != "ObjectValue"
+                        && i.name != "__RbxDiffImpact"
+                        && i.name != "PivotPlan"
+                })
                 .unwrap_or(false)
         })
 }

@@ -23,6 +23,7 @@ export type SideInfo = {
 	destination: Instance?, -- the parent this side moves the target to
 	destinationPath: string?,
 	delta: CFrame?, -- ModelFrame: canonical/base content -> this side's world frame
+	pivots: { FrameApplication }?, -- conditional placements selected with this side
 }
 
 -- Canonical direct patch emitted by Rust for one side of a decision.

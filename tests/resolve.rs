@@ -333,8 +333,8 @@ fn delete_vs_edit_finalize_both_ways() {
         let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
         assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
         assert_eq!(result.conflicts[0].path, "root.A");
-        assert_eq!(result.conflicts[0].ours.len(), 1);
-        assert_eq!(result.conflicts[0].theirs.len(), 2);
+        assert_eq!(result.conflicts[0].ours.edits.len(), 1);
+        assert_eq!(result.conflicts[0].theirs.edits.len(), 2);
         stamp_conflicts(&mut base, &ours, &theirs, &result);
         let container = find_container(&base).unwrap();
         let entries = list_entries(&base, container);

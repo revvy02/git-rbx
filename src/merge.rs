@@ -20,6 +20,8 @@ use crate::edit_script::{
 use crate::explorer_tree::ExplorerTrees;
 use crate::hash::DeepHashCache;
 use crate::match_instances::get_instance_path;
+use crate::model_normalize::model_frames_close;
+use crate::placement::PivotOp;
 use crate::property_semantics::{
     semantic_bundle_values_equal, semantic_property_bundle, SemanticPropertyBundle,
 };
@@ -38,16 +40,48 @@ pub enum ConflictKind {
     /// Both sides moved the same instance to different parents, or a move
     /// destination can't be proven equal across branches.
     MoveTarget,
-    /// Both branches placed an otherwise canonical model asset in different
-    /// world frames. The deltas take canonical/base content to each side.
+    /// Both branches placed an otherwise canonical hierarchy boundary
+    /// differently. A root delta is world-relative; a nested delta is
+    /// relative to the nearest participating ancestor placement.
     ModelFrame {
         ours: CFrame,
         theirs: CFrame,
         /// Stable top-down order among hierarchical frame boundaries.
         order: usize,
-        /// Nearest ancestor that also has a frame decision.
+        /// Nearest ancestor that also has a placement decision.
         parent_order: Option<usize>,
     },
+}
+
+#[derive(Debug)]
+pub struct ConflictSide {
+    pub edits: Vec<EditOp>,
+    pub pivots: Vec<PivotOp>,
+}
+
+impl ConflictSide {
+    fn edits(edits: Vec<EditOp>) -> Self {
+        Self {
+            edits,
+            pivots: Vec::new(),
+        }
+    }
+
+    fn pivots(pivots: Vec<PivotOp>) -> Self {
+        Self {
+            edits: Vec::new(),
+            pivots,
+        }
+    }
+
+    /// Number of primitive semantic operations represented by this choice.
+    pub fn len(&self) -> usize {
+        self.edits.len() + self.pivots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty() && self.pivots.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -57,8 +91,8 @@ pub struct MergeConflict {
     pub base_ref: Ref,
     /// Path of the contested instance in the base DOM.
     pub path: String,
-    pub ours: Vec<EditOp>,
-    pub theirs: Vec<EditOp>,
+    pub ours: ConflictSide,
+    pub theirs: ConflictSide,
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +106,9 @@ pub struct MergeStats {
 pub struct MergeResult {
     pub conflicts: Vec<MergeConflict>,
     pub stats: MergeStats,
+    /// Non-conflicting primitive placements. These are materialized after
+    /// ordinary canonical-coordinate edits, in top-down order.
+    pub pivots: Vec<PivotOp>,
     pub ours_identity: InstanceIdentity,
     pub theirs_identity: InstanceIdentity,
     pub(crate) explorer_trees: Option<ExplorerTrees>,
@@ -172,6 +209,35 @@ pub fn merge_compact_doms_with_matches(
     )
 }
 
+/// Three-way merge with identities and primitive placements captured by
+/// hierarchical normalization.
+pub fn merge_compact_doms_with_matches_and_pivots(
+    base: &mut WeakDom,
+    ours: &DiffDom,
+    theirs: &DiffDom,
+    config: &DiffConfig,
+    ours_identity: &InstanceIdentity,
+    theirs_identity: &InstanceIdentity,
+    ours_pivots: &[PivotOp],
+    theirs_pivots: &[PivotOp],
+) -> MergeResult {
+    let mut ours_script =
+        compute_semantic_changes_with_identity(base, ours, config, Some(ours_identity));
+    let mut theirs_script =
+        compute_semantic_changes_with_identity(base, theirs, config, Some(theirs_identity));
+    ours_script.pivots.extend_from_slice(ours_pivots);
+    theirs_script.pivots.extend_from_slice(theirs_pivots);
+    merge_scripts(
+        base,
+        ours,
+        theirs,
+        &ours_script,
+        &theirs_script,
+        config,
+        false,
+    )
+}
+
 fn merge_scripts(
     base: &mut WeakDom,
     ours_dom: &dyn DomView,
@@ -223,7 +289,7 @@ fn merge_scripts(
             }
             conflicted_ours[i] = true;
             if let Some(&conflict_index) = ours_edits_vs_theirs_delete.get(&removed_root) {
-                conflicts[conflict_index].ours.push(op.clone());
+                conflicts[conflict_index].ours.edits.push(op.clone());
             } else {
                 let their_op = find_remove(&theirs.ops, removed_root, &mut conflicted_theirs);
                 let conflict_index = conflicts.len();
@@ -231,8 +297,8 @@ fn merge_scripts(
                     kind: ConflictKind::DeleteVsEdit,
                     base_ref: removed_root,
                     path: get_instance_path(base, removed_root),
-                    ours: vec![op.clone()],
-                    theirs: their_op,
+                    ours: ConflictSide::edits(vec![op.clone()]),
+                    theirs: ConflictSide::edits(their_op),
                 });
                 ours_edits_vs_theirs_delete.insert(removed_root, conflict_index);
             }
@@ -254,7 +320,7 @@ fn merge_scripts(
             }
             conflicted_theirs[i] = true;
             if let Some(&conflict_index) = theirs_edits_vs_ours_delete.get(&removed_root) {
-                conflicts[conflict_index].theirs.push(op.clone());
+                conflicts[conflict_index].theirs.edits.push(op.clone());
             } else {
                 let our_op = find_remove(&ours.ops, removed_root, &mut conflicted_ours);
                 let conflict_index = conflicts.len();
@@ -262,14 +328,27 @@ fn merge_scripts(
                     kind: ConflictKind::DeleteVsEdit,
                     base_ref: removed_root,
                     path: get_instance_path(base, removed_root),
-                    ours: our_op,
-                    theirs: vec![op.clone()],
+                    ours: ConflictSide::edits(our_op),
+                    theirs: ConflictSide::edits(vec![op.clone()]),
                 });
                 theirs_edits_vs_ours_delete.insert(removed_root, conflict_index);
             }
             break;
         }
     }
+    let pivots = merge_pivots(
+        base,
+        ours,
+        theirs,
+        &ours_removed,
+        &theirs_removed,
+        &mut conflicted_ours,
+        &mut conflicted_theirs,
+        &mut ours_edits_vs_theirs_delete,
+        &mut theirs_edits_vs_ours_delete,
+        &mut conflicts,
+        &mut stats,
+    );
 
     // Serialized support fields can form one authored value. In particular,
     // MeshContent and InitialSize must never be resolved independently: that
@@ -344,8 +423,8 @@ fn merge_scripts(
                             kind: ConflictKind::Property { name: an.clone() },
                             base_ref: *a,
                             path: get_instance_path(base, *a),
-                            ours: vec![our_op.clone()],
-                            theirs: vec![their_op.clone()],
+                            ours: ConflictSide::edits(vec![our_op.clone()]),
+                            theirs: ConflictSide::edits(vec![their_op.clone()]),
                         });
                     }
                 }
@@ -371,8 +450,8 @@ fn merge_scripts(
                             },
                             base_ref: *a,
                             path: get_instance_path(base, *a),
-                            ours: vec![our_op.clone()],
-                            theirs: vec![their_op.clone()],
+                            ours: ConflictSide::edits(vec![our_op.clone()]),
+                            theirs: ConflictSide::edits(vec![their_op.clone()]),
                         });
                     }
                 }
@@ -402,8 +481,8 @@ fn merge_scripts(
                             kind: ConflictKind::MoveTarget,
                             base_ref: *a,
                             path: get_instance_path(base, *a),
-                            ours: vec![our_op.clone()],
-                            theirs: vec![their_op.clone()],
+                            ours: ConflictSide::edits(vec![our_op.clone()]),
+                            theirs: ConflictSide::edits(vec![their_op.clone()]),
                         });
                     }
                 }
@@ -417,8 +496,8 @@ fn merge_scripts(
                         kind: ConflictKind::DeleteVsEdit,
                         base_ref: *a,
                         path: get_instance_path(base, *a),
-                        ours: vec![our_op.clone()],
-                        theirs: vec![their_op.clone()],
+                        ours: ConflictSide::edits(vec![our_op.clone()]),
+                        theirs: ConflictSide::edits(vec![their_op.clone()]),
                     });
                 }
                 _ => {}
@@ -478,13 +557,16 @@ fn merge_scripts(
     stats.conflicted = conflicts.len();
 
     // ---- Apply survivors: ours first, then theirs (targets are disjoint now)
-    stats.ours_applied = conflicted_ours.iter().filter(|excluded| !**excluded).count();
+    stats.ours_applied += conflicted_ours
+        .iter()
+        .filter(|excluded| !**excluded)
+        .count();
     let theirs_excluded: Vec<bool> = conflicted_theirs
         .iter()
         .zip(&dropped_theirs)
         .map(|(conflicted, dropped)| *conflicted || *dropped)
         .collect();
-    stats.theirs_applied = theirs_excluded
+    stats.theirs_applied += theirs_excluded
         .iter()
         .filter(|excluded| !**excluded)
         .count();
@@ -499,13 +581,8 @@ fn merge_scripts(
         )
     });
 
-    let ours_created = apply_ops_filtered(
-        base,
-        ours_dom,
-        &ours.ops,
-        &ours.identity,
-        &conflicted_ours,
-    );
+    let ours_created =
+        apply_ops_filtered(base, ours_dom, &ours.ops, &ours.identity, &conflicted_ours);
     let theirs_created = apply_ops_filtered(
         base,
         theirs_dom,
@@ -528,10 +605,112 @@ fn merge_scripts(
     MergeResult {
         conflicts,
         stats,
+        pivots,
         ours_identity: ours.identity.clone(),
         theirs_identity: theirs.identity.clone(),
         explorer_trees,
     }
+}
+
+fn merge_pivots(
+    base: &WeakDom,
+    ours: &EditScript,
+    theirs: &EditScript,
+    ours_removed: &HashSet<Ref>,
+    theirs_removed: &HashSet<Ref>,
+    conflicted_ours: &mut [bool],
+    conflicted_theirs: &mut [bool],
+    ours_edits_vs_theirs_delete: &mut HashMap<Ref, usize>,
+    theirs_edits_vs_ours_delete: &mut HashMap<Ref, usize>,
+    conflicts: &mut Vec<MergeConflict>,
+    stats: &mut MergeStats,
+) -> Vec<PivotOp> {
+    let theirs_by_target: HashMap<Ref, &PivotOp> = theirs
+        .pivots
+        .iter()
+        .map(|pivot| (pivot.target_ref, pivot))
+        .collect();
+    debug_assert_eq!(theirs_by_target.len(), theirs.pivots.len());
+
+    let mut consumed_theirs = HashSet::new();
+    let mut merged = Vec::with_capacity(ours.pivots.len() + theirs.pivots.len());
+    for ours_pivot in &ours.pivots {
+        if let Some(removed_root) = ancestor_in(base, ours_pivot.target_ref, theirs_removed) {
+            if let Some(&conflict_index) = ours_edits_vs_theirs_delete.get(&removed_root) {
+                conflicts[conflict_index]
+                    .ours
+                    .pivots
+                    .push(ours_pivot.clone());
+            } else {
+                let their_op = find_remove(&theirs.ops, removed_root, conflicted_theirs);
+                let conflict_index = conflicts.len();
+                conflicts.push(MergeConflict {
+                    kind: ConflictKind::DeleteVsEdit,
+                    base_ref: removed_root,
+                    path: get_instance_path(base, removed_root),
+                    ours: ConflictSide::pivots(vec![ours_pivot.clone()]),
+                    theirs: ConflictSide::edits(their_op),
+                });
+                ours_edits_vs_theirs_delete.insert(removed_root, conflict_index);
+            }
+            continue;
+        }
+        let Some(theirs_pivot) = theirs_by_target.get(&ours_pivot.target_ref) else {
+            merged.push(ours_pivot.clone());
+            stats.ours_applied += 1;
+            continue;
+        };
+        consumed_theirs.insert(ours_pivot.target_ref);
+        debug_assert_eq!(ours_pivot.order, theirs_pivot.order);
+        debug_assert_eq!(ours_pivot.parent_order, theirs_pivot.parent_order);
+        if model_frames_close(&ours_pivot.delta, &theirs_pivot.delta) {
+            merged.push(ours_pivot.clone());
+            stats.ours_applied += 1;
+            stats.deduped += 1;
+        } else {
+            conflicts.push(MergeConflict {
+                kind: ConflictKind::ModelFrame {
+                    ours: ours_pivot.delta,
+                    theirs: theirs_pivot.delta,
+                    order: ours_pivot.order,
+                    parent_order: ours_pivot.parent_order,
+                },
+                base_ref: ours_pivot.target_ref,
+                path: get_instance_path(base, ours_pivot.target_ref),
+                ours: ConflictSide::pivots(vec![ours_pivot.clone()]),
+                theirs: ConflictSide::pivots(vec![(*theirs_pivot).clone()]),
+            });
+        }
+    }
+    for theirs_pivot in &theirs.pivots {
+        if consumed_theirs.contains(&theirs_pivot.target_ref) {
+            continue;
+        }
+        if let Some(removed_root) = ancestor_in(base, theirs_pivot.target_ref, ours_removed) {
+            if let Some(&conflict_index) = theirs_edits_vs_ours_delete.get(&removed_root) {
+                conflicts[conflict_index]
+                    .theirs
+                    .pivots
+                    .push(theirs_pivot.clone());
+            } else {
+                let our_op = find_remove(&ours.ops, removed_root, conflicted_ours);
+                let conflict_index = conflicts.len();
+                conflicts.push(MergeConflict {
+                    kind: ConflictKind::DeleteVsEdit,
+                    base_ref: removed_root,
+                    path: get_instance_path(base, removed_root),
+                    ours: ConflictSide::edits(our_op),
+                    theirs: ConflictSide::pivots(vec![theirs_pivot.clone()]),
+                });
+                theirs_edits_vs_ours_delete.insert(removed_root, conflict_index);
+            }
+            continue;
+        }
+        merged.push(theirs_pivot.clone());
+        stats.theirs_applied += 1;
+    }
+    merged.sort_unstable_by_key(|pivot| pivot.order);
+    merged
 }
 
 fn conflict_kind_key(kind: &ConflictKind) -> (u8, &str) {
@@ -638,14 +817,18 @@ fn group_property_bundle_conflicts(
             },
             base_ref: key.0,
             path: get_instance_path(base, key.0),
-            ours: our_indices
-                .iter()
-                .map(|&index| ours.ops[index].clone())
-                .collect(),
-            theirs: their_indices
-                .iter()
-                .map(|&index| theirs.ops[index].clone())
-                .collect(),
+            ours: ConflictSide::edits(
+                our_indices
+                    .iter()
+                    .map(|&index| ours.ops[index].clone())
+                    .collect(),
+            ),
+            theirs: ConflictSide::edits(
+                their_indices
+                    .iter()
+                    .map(|&index| theirs.ops[index].clone())
+                    .collect(),
+            ),
         });
     }
 }

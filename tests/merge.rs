@@ -51,8 +51,8 @@ fn conflict_signature(result: &MergeResult) -> Vec<(String, ConflictKind, usize,
             (
                 conflict.path.clone(),
                 conflict.kind.clone(),
-                conflict.ours.len(),
-                conflict.theirs.len(),
+                conflict.ours.edits.len(),
+                conflict.theirs.edits.len(),
             )
         })
         .collect()
@@ -223,8 +223,12 @@ fn multiple_edits_under_one_deleted_subtree_are_one_conflict() {
     let conflict = &result.conflicts[0];
     assert_eq!(conflict.kind, ConflictKind::DeleteVsEdit);
     assert_eq!(conflict.path, "root.A");
-    assert_eq!(conflict.ours.len(), 1, "one subtree deletion");
-    assert_eq!(conflict.theirs.len(), 2, "both descendant edits retained");
+    assert_eq!(conflict.ours.edits.len(), 1, "one subtree deletion");
+    assert_eq!(
+        conflict.theirs.edits.len(),
+        2,
+        "both descendant edits retained"
+    );
 }
 
 #[test]

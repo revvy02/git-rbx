@@ -1046,7 +1046,7 @@ mod tests {
         let compact = semantic_changes_to_diff(&compact_old, &compact_new, &compact_changes);
         let identity = compute_instance_identity(&compact_old, &compact_new, &config);
         let dense =
-            compute_compact_diff_with_identity(&compact_old, &compact_new, &identity, &config);
+            compute_compact_diff_with_identity(&compact_old, &compact_new, &identity, &[], &config);
 
         assert_eq!(
             serde_json::to_value(&compact).unwrap(),
