@@ -271,6 +271,32 @@ fn both_add_identical_content_dedupes() {
 }
 
 #[test]
+fn identical_additions_dedupe_one_to_one() {
+    let mut base = base_dom();
+    let ours = WeakDom::new(
+        folder("root")
+            .with_child(folder("A").with_child(part("P")))
+            .with_child(folder("B").with_child(part("Q"))),
+    );
+    let theirs = WeakDom::new(
+        folder("root")
+            .with_child(folder("A").with_child(part("P")))
+            .with_child(folder("B").with_child(part("Q")).with_child(part("Q"))),
+    );
+
+    let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+    assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+    assert_eq!(result.stats.deduped, 1);
+
+    let expected = WeakDom::new(
+        folder("root")
+            .with_child(folder("A").with_child(part("P")))
+            .with_child(folder("B").with_child(part("Q")).with_child(part("Q"))),
+    );
+    assert_merged_equals(&base, &expected);
+}
+
+#[test]
 fn both_add_different_content_composes() {
     let mut base = base_dom();
     let ours = WeakDom::new(

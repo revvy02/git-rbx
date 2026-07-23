@@ -434,11 +434,36 @@ pub(crate) fn apply_ops(
     ops: &[EditOp],
     identity: &InstanceIdentity,
 ) -> HashMap<Ref, Ref> {
+    apply_ops_where(target, source_dom, ops, identity, |_| true)
+}
+
+/// Apply only operations whose dense exclusion slot is false.
+pub(crate) fn apply_ops_filtered(
+    target: &mut WeakDom,
+    source_dom: &dyn DomView,
+    ops: &[EditOp],
+    identity: &InstanceIdentity,
+    excluded: &[bool],
+) -> HashMap<Ref, Ref> {
+    assert_eq!(ops.len(), excluded.len());
+    apply_ops_where(target, source_dom, ops, identity, |index| !excluded[index])
+}
+
+fn apply_ops_where(
+    target: &mut WeakDom,
+    source_dom: &dyn DomView,
+    ops: &[EditOp],
+    identity: &InstanceIdentity,
+    include: impl Fn(usize) -> bool + Copy,
+) -> HashMap<Ref, Ref> {
     let new_dom = source_dom;
     // new_ref → target ref, for every instance apply creates
     let mut created: HashMap<Ref, Ref> = HashMap::new();
     // 1. Adds — clone subtrees out of the new DOM
-    for op in ops {
+    for (index, op) in ops.iter().enumerate() {
+        if !include(index) {
+            continue;
+        }
         if let EditOp::AddSubtree { parent, new_ref } = op {
             let parent_ref = resolve_anchor(*parent, &created);
             let builder = build_subtree(new_dom, *new_ref, &identity.moved_new);
@@ -455,7 +480,10 @@ pub(crate) fn apply_ops(
     }
 
     // 2. Moves — emitted in new-side depth order by the builder
-    for op in ops {
+    for (index, op) in ops.iter().enumerate() {
+        if !include(index) {
+            continue;
+        }
         if let EditOp::Move {
             old_ref,
             new_parent,
@@ -466,14 +494,20 @@ pub(crate) fn apply_ops(
     }
 
     // 3. Removes
-    for op in ops {
+    for (index, op) in ops.iter().enumerate() {
+        if !include(index) {
+            continue;
+        }
         if let EditOp::RemoveSubtree { old_ref } = op {
             target.destroy(*old_ref);
         }
     }
 
     // 4. Names and properties
-    for op in ops {
+    for (index, op) in ops.iter().enumerate() {
+        if !include(index) {
+            continue;
+        }
         match op {
             EditOp::SetName { old_ref, name } => {
                 if let Some(inst) = target.get_by_ref_mut(*old_ref) {

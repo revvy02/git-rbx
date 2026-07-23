@@ -14,8 +14,8 @@ use tracing::info;
 use crate::diff::DiffConfig;
 use crate::diff_dom::{DiffDom, DomView};
 use crate::edit_script::{
-    apply_ops, compute_edit_script, compute_semantic_changes_with_identity, Anchor, EditOp,
-    EditScript, InstanceIdentity,
+    apply_ops_filtered, compute_edit_script, compute_semantic_changes_with_identity, Anchor,
+    EditOp, EditScript, InstanceIdentity,
 };
 use crate::explorer_tree::ExplorerTrees;
 use crate::hash::DeepHashCache;
@@ -74,7 +74,7 @@ pub struct MergeResult {
     pub stats: MergeStats,
     pub ours_identity: InstanceIdentity,
     pub theirs_identity: InstanceIdentity,
-    pub(crate) explorer_trees: ExplorerTrees,
+    pub(crate) explorer_trees: Option<ExplorerTrees>,
 }
 
 /// Three-way merge: mutate `base` into the merged result, applying every
@@ -88,7 +88,15 @@ pub fn merge_doms(
 ) -> MergeResult {
     let ours_script = compute_edit_script(base, ours, config);
     let theirs_script = compute_edit_script(base, theirs, config);
-    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+    merge_scripts(
+        base,
+        ours,
+        theirs,
+        &ours_script,
+        &theirs_script,
+        config,
+        false,
+    )
 }
 
 /// Three-way merge with compact immutable branch inputs.
@@ -103,7 +111,15 @@ pub fn merge_compact_doms(
 ) -> MergeResult {
     let ours_script = compute_semantic_changes_with_identity(base, ours, config, None);
     let theirs_script = compute_semantic_changes_with_identity(base, theirs, config, None);
-    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+    merge_scripts(
+        base,
+        ours,
+        theirs,
+        &ours_script,
+        &theirs_script,
+        config,
+        false,
+    )
 }
 
 /// Three-way merge using instance identities captured before a
@@ -121,7 +137,15 @@ pub fn merge_doms_with_matches(
         compute_semantic_changes_with_identity(base, ours, config, Some(ours_identity));
     let theirs_script =
         compute_semantic_changes_with_identity(base, theirs, config, Some(theirs_identity));
-    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+    merge_scripts(
+        base,
+        ours,
+        theirs,
+        &ours_script,
+        &theirs_script,
+        config,
+        true,
+    )
 }
 
 /// Compact-branch variant of [`merge_doms_with_matches`].
@@ -137,7 +161,15 @@ pub fn merge_compact_doms_with_matches(
         compute_semantic_changes_with_identity(base, ours, config, Some(ours_identity));
     let theirs_script =
         compute_semantic_changes_with_identity(base, theirs, config, Some(theirs_identity));
-    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+    merge_scripts(
+        base,
+        ours,
+        theirs,
+        &ours_script,
+        &theirs_script,
+        config,
+        true,
+    )
 }
 
 fn merge_scripts(
@@ -147,6 +179,7 @@ fn merge_scripts(
     ours: &EditScript,
     theirs: &EditScript,
     config: &DiffConfig,
+    capture_explorer: bool,
 ) -> MergeResult {
     let mut conflicts: Vec<MergeConflict> = Vec::new();
     let mut stats = MergeStats::default();
@@ -155,10 +188,10 @@ fn merge_scripts(
     let theirs_removed: HashSet<Ref> = removed_roots(&theirs.ops);
 
     // Base refs whose ops conflicted — their ops are withheld on both sides
-    let mut conflicted_ours: HashSet<usize> = HashSet::new();
-    let mut conflicted_theirs: HashSet<usize> = HashSet::new();
+    let mut conflicted_ours = vec![false; ours.ops.len()];
+    let mut conflicted_theirs = vec![false; theirs.ops.len()];
     // Theirs op indices subsumed or deduped by an ours op
-    let mut dropped_theirs: HashSet<usize> = HashSet::new();
+    let mut dropped_theirs = vec![false; theirs.ops.len()];
 
     // A subtree deletion is one semantic choice even when the surviving side
     // changed many descendants. Group those edits by deleted root so the
@@ -173,7 +206,7 @@ fn merge_scripts(
     // ---- Delete-vs-edit: an op on one side targeting inside the other side's
     // removed subtree (removes of removes compose instead)
     for (i, op) in ours.ops.iter().enumerate() {
-        for target in op_base_targets(op) {
+        for target in op_base_targets(op).into_iter().flatten() {
             let Some(removed_root) = ancestor_in(base, target, &theirs_removed) else {
                 continue;
             };
@@ -185,10 +218,10 @@ fn merge_scripts(
                     continue;
                 }
                 stats.deduped += 1;
-                conflicted_ours.insert(i); // withhold; outer remove covers it
+                conflicted_ours[i] = true; // withhold; outer remove covers it
                 break;
             }
-            conflicted_ours.insert(i);
+            conflicted_ours[i] = true;
             if let Some(&conflict_index) = ours_edits_vs_theirs_delete.get(&removed_root) {
                 conflicts[conflict_index].ours.push(op.clone());
             } else {
@@ -207,7 +240,7 @@ fn merge_scripts(
         }
     }
     for (i, op) in theirs.ops.iter().enumerate() {
-        for target in op_base_targets(op) {
+        for target in op_base_targets(op).into_iter().flatten() {
             let Some(removed_root) = ancestor_in(base, target, &ours_removed) else {
                 continue;
             };
@@ -216,10 +249,10 @@ fn merge_scripts(
                     continue;
                 }
                 stats.deduped += 1;
-                dropped_theirs.insert(i);
+                dropped_theirs[i] = true;
                 break;
             }
-            conflicted_theirs.insert(i);
+            conflicted_theirs[i] = true;
             if let Some(&conflict_index) = theirs_edits_vs_ours_delete.get(&removed_root) {
                 conflicts[conflict_index].theirs.push(op.clone());
             } else {
@@ -256,15 +289,31 @@ fn merge_scripts(
         &mut stats,
     );
 
-    // ---- Same-target op pairs: dedupe identical effects, conflict otherwise
+    // ---- Same-target op pairs: dedupe identical effects, conflict otherwise.
+    // Indexing by the base instance avoids comparing every ours op with every
+    // theirs op; the remaining per-target groups are normally only one or two
+    // entries wide.
+    let mut theirs_by_target: HashMap<Ref, Vec<usize>> = HashMap::new();
+    for (index, op) in theirs.ops.iter().enumerate() {
+        if let Some(target) = op_primary_target(op) {
+            theirs_by_target.entry(target).or_default().push(index);
+        }
+    }
     for (i, our_op) in ours.ops.iter().enumerate() {
-        if conflicted_ours.contains(&i) {
+        if conflicted_ours[i] {
             continue;
         }
-        for (j, their_op) in theirs.ops.iter().enumerate() {
-            if conflicted_theirs.contains(&j) || dropped_theirs.contains(&j) {
+        let Some(target) = op_primary_target(our_op) else {
+            continue;
+        };
+        let Some(their_indices) = theirs_by_target.get(&target) else {
+            continue;
+        };
+        for &j in their_indices {
+            if conflicted_theirs[j] || dropped_theirs[j] {
                 continue;
             }
+            let their_op = &theirs.ops[j];
             match (our_op, their_op) {
                 (
                     EditOp::SetProperty {
@@ -286,11 +335,11 @@ fn merge_scripts(
                         &ours.identity.reverse_matched,
                         &theirs.identity.reverse_matched,
                     ) {
-                        dropped_theirs.insert(j);
+                        dropped_theirs[j] = true;
                         stats.deduped += 1;
                     } else {
-                        conflicted_ours.insert(i);
-                        conflicted_theirs.insert(j);
+                        conflicted_ours[i] = true;
+                        conflicted_theirs[j] = true;
                         conflicts.push(MergeConflict {
                             kind: ConflictKind::Property { name: an.clone() },
                             base_ref: *a,
@@ -311,11 +360,11 @@ fn merge_scripts(
                     },
                 ) if a == b => {
                     if an == bn {
-                        dropped_theirs.insert(j);
+                        dropped_theirs[j] = true;
                         stats.deduped += 1;
                     } else {
-                        conflicted_ours.insert(i);
-                        conflicted_theirs.insert(j);
+                        conflicted_ours[i] = true;
+                        conflicted_theirs[j] = true;
                         conflicts.push(MergeConflict {
                             kind: ConflictKind::Property {
                                 name: "Name".to_string(),
@@ -330,7 +379,7 @@ fn merge_scripts(
                 (EditOp::RemoveSubtree { old_ref: a }, EditOp::RemoveSubtree { old_ref: b })
                     if a == b =>
                 {
-                    dropped_theirs.insert(j);
+                    dropped_theirs[j] = true;
                     stats.deduped += 1;
                 }
                 (
@@ -344,11 +393,11 @@ fn merge_scripts(
                     },
                 ) if a == b => {
                     if anchors_equal(*ap, *bp) {
-                        dropped_theirs.insert(j);
+                        dropped_theirs[j] = true;
                         stats.deduped += 1;
                     } else {
-                        conflicted_ours.insert(i);
-                        conflicted_theirs.insert(j);
+                        conflicted_ours[i] = true;
+                        conflicted_theirs[j] = true;
                         conflicts.push(MergeConflict {
                             kind: ConflictKind::MoveTarget,
                             base_ref: *a,
@@ -362,8 +411,8 @@ fn merge_scripts(
                 | (EditOp::RemoveSubtree { old_ref: b }, EditOp::Move { old_ref: a, .. })
                     if a == b =>
                 {
-                    conflicted_ours.insert(i);
-                    conflicted_theirs.insert(j);
+                    conflicted_ours[i] = true;
+                    conflicted_theirs[j] = true;
                     conflicts.push(MergeConflict {
                         kind: ConflictKind::DeleteVsEdit,
                         base_ref: *a,
@@ -377,9 +426,29 @@ fn merge_scripts(
         }
     }
 
-    // ---- Both sides added identical content under the same parent: dedupe
+    // ---- Both sides added identical content under the same parent: dedupe.
+    // Hash-indexed queues make this a one-to-one join instead of a nested
+    // scan that could accidentally let one ours addition consume several
+    // identical theirs additions.
+    let mut theirs_adds: HashMap<(Ref, blake3::Hash), Vec<usize>> = HashMap::new();
+    for (index, op) in theirs.ops.iter().enumerate() {
+        if conflicted_theirs[index] || dropped_theirs[index] {
+            continue;
+        }
+        let EditOp::AddSubtree {
+            parent: Anchor::Old(parent),
+            new_ref,
+        } = op
+        else {
+            continue;
+        };
+        theirs_adds
+            .entry((*parent, theirs_deep.get(*new_ref)))
+            .or_default()
+            .push(index);
+    }
     for (i, our_op) in ours.ops.iter().enumerate() {
-        if conflicted_ours.contains(&i) {
+        if conflicted_ours[i] {
             continue;
         }
         let EditOp::AddSubtree {
@@ -389,22 +458,13 @@ fn merge_scripts(
         else {
             continue;
         };
-        for (j, their_op) in theirs.ops.iter().enumerate() {
-            if conflicted_theirs.contains(&j) || dropped_theirs.contains(&j) {
-                continue;
-            }
-            let EditOp::AddSubtree {
-                parent: Anchor::Old(their_parent),
-                new_ref: their_new,
-            } = their_op
-            else {
-                continue;
-            };
-            if our_parent == their_parent && ours_deep.get(*our_new) == theirs_deep.get(*their_new)
-            {
-                dropped_theirs.insert(j);
-                stats.deduped += 1;
-            }
+        let key = (*our_parent, ours_deep.get(*our_new));
+        let Some(their_indices) = theirs_adds.get_mut(&key) else {
+            continue;
+        };
+        if let Some(j) = their_indices.pop() {
+            dropped_theirs[j] = true;
+            stats.deduped += 1;
         }
     }
 
@@ -418,35 +478,44 @@ fn merge_scripts(
     stats.conflicted = conflicts.len();
 
     // ---- Apply survivors: ours first, then theirs (targets are disjoint now)
-    let ours_survivors: Vec<EditOp> = ours
-        .ops
+    stats.ours_applied = conflicted_ours.iter().filter(|excluded| !**excluded).count();
+    let theirs_excluded: Vec<bool> = conflicted_theirs
         .iter()
-        .enumerate()
-        .filter(|(i, _)| !conflicted_ours.contains(i))
-        .map(|(_, op)| op.clone())
+        .zip(&dropped_theirs)
+        .map(|(conflicted, dropped)| *conflicted || *dropped)
         .collect();
-    let theirs_survivors: Vec<EditOp> = theirs
-        .ops
+    stats.theirs_applied = theirs_excluded
         .iter()
-        .enumerate()
-        .filter(|(i, _)| !conflicted_theirs.contains(i) && !dropped_theirs.contains(i))
-        .map(|(_, op)| op.clone())
-        .collect();
+        .filter(|excluded| !**excluded)
+        .count();
 
-    stats.ours_applied = ours_survivors.len();
-    stats.theirs_applied = theirs_survivors.len();
+    let mut explorer_trees = (capture_explorer || !conflicts.is_empty()).then(|| {
+        ExplorerTrees::capture(
+            base,
+            ours_dom,
+            theirs_dom,
+            &ours.identity.matched,
+            &theirs.identity.matched,
+        )
+    });
 
-    let mut explorer_trees = ExplorerTrees::capture(
+    let ours_created = apply_ops_filtered(
         base,
         ours_dom,
-        theirs_dom,
-        &ours.identity.matched,
-        &theirs.identity.matched,
+        &ours.ops,
+        &ours.identity,
+        &conflicted_ours,
     );
-
-    let ours_created = apply_ops(base, ours_dom, &ours_survivors, &ours.identity);
-    let theirs_created = apply_ops(base, theirs_dom, &theirs_survivors, &theirs.identity);
-    explorer_trees.bind_result(base, &ours_created, &theirs_created);
+    let theirs_created = apply_ops_filtered(
+        base,
+        theirs_dom,
+        &theirs.ops,
+        &theirs.identity,
+        &theirs_excluded,
+    );
+    if let Some(explorer_trees) = &mut explorer_trees {
+        explorer_trees.bind_result(base, &ours_created, &theirs_created);
+    }
 
     info!(
         ours_applied = stats.ours_applied,
@@ -482,19 +551,19 @@ fn group_property_bundle_conflicts(
     theirs_dom: &dyn DomView,
     ours: &EditScript,
     theirs: &EditScript,
-    conflicted_ours: &mut HashSet<usize>,
-    conflicted_theirs: &mut HashSet<usize>,
-    dropped_theirs: &mut HashSet<usize>,
+    conflicted_ours: &mut [bool],
+    conflicted_theirs: &mut [bool],
+    dropped_theirs: &mut [bool],
     conflicts: &mut Vec<MergeConflict>,
     stats: &mut MergeStats,
 ) {
     type BundleKey = (Ref, &'static str);
     type BundleOps = (SemanticPropertyBundle, Vec<usize>);
 
-    let collect = |ops: &[EditOp], excluded: &HashSet<usize>| {
+    let collect = |ops: &[EditOp], excluded: &[bool]| {
         let mut groups: HashMap<BundleKey, BundleOps> = HashMap::new();
         for (index, op) in ops.iter().enumerate() {
-            if excluded.contains(&index) {
+            if excluded[index] {
                 continue;
             }
             let EditOp::SetProperty { old_ref, name, .. } = op else {
@@ -546,17 +615,17 @@ fn group_property_bundle_conflicts(
 
         if semantic_bundle_values_equal(&our_instance, &their_instance, *bundle) {
             for &index in their_indices {
-                dropped_theirs.insert(index);
+                dropped_theirs[index] = true;
             }
             stats.deduped += their_indices.len();
             continue;
         }
 
         for &index in our_indices {
-            conflicted_ours.insert(index);
+            conflicted_ours[index] = true;
         }
         for &index in their_indices {
-            conflicted_theirs.insert(index);
+            conflicted_theirs[index] = true;
         }
         conflicts.push(MergeConflict {
             kind: ConflictKind::PropertyBundle {
@@ -584,23 +653,33 @@ fn group_property_bundle_conflicts(
 /// The base-DOM instances an op touches: the primary target, plus the
 /// destination parent for moves and adds (a move into a subtree the other
 /// side removed is just as conflicting as an edit inside it).
-fn op_base_targets(op: &EditOp) -> Vec<Ref> {
+fn op_primary_target(op: &EditOp) -> Option<Ref> {
+    match op {
+        EditOp::RemoveSubtree { old_ref }
+        | EditOp::Move { old_ref, .. }
+        | EditOp::SetName { old_ref, .. }
+        | EditOp::SetProperty { old_ref, .. } => Some(*old_ref),
+        EditOp::AddSubtree { .. } => None,
+    }
+}
+
+fn op_base_targets(op: &EditOp) -> [Option<Ref>; 2] {
     match op {
         EditOp::RemoveSubtree { old_ref }
         | EditOp::SetName { old_ref, .. }
-        | EditOp::SetProperty { old_ref, .. } => vec![*old_ref],
+        | EditOp::SetProperty { old_ref, .. } => [Some(*old_ref), None],
         EditOp::Move {
             old_ref,
             new_parent,
         } => match new_parent {
-            Anchor::Old(parent) => vec![*old_ref, *parent],
-            Anchor::Added(_) => vec![*old_ref],
+            Anchor::Old(parent) => [Some(*old_ref), Some(*parent)],
+            Anchor::Added(_) => [Some(*old_ref), None],
         },
         EditOp::AddSubtree {
             parent: Anchor::Old(parent),
             ..
-        } => vec![*parent],
-        EditOp::AddSubtree { .. } => Vec::new(),
+        } => [Some(*parent), None],
+        EditOp::AddSubtree { .. } => [None, None],
     }
 }
 
@@ -626,10 +705,10 @@ fn ancestor_in(base: &WeakDom, target: Ref, roots: &HashSet<Ref>) -> Option<Ref>
     None
 }
 
-fn find_remove(ops: &[EditOp], root: Ref, conflicted: &mut HashSet<usize>) -> Vec<EditOp> {
+fn find_remove(ops: &[EditOp], root: Ref, conflicted: &mut [bool]) -> Vec<EditOp> {
     for (i, op) in ops.iter().enumerate() {
         if matches!(op, EditOp::RemoveSubtree { old_ref } if *old_ref == root) {
-            conflicted.insert(i);
+            conflicted[i] = true;
             return vec![op.clone()];
         }
     }

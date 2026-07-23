@@ -82,6 +82,10 @@ fn stamp_conflicts_from_views(
     if result.conflicts.is_empty() {
         return;
     }
+    let explorer_trees = result
+        .explorer_trees
+        .as_ref()
+        .expect("conflicted merge must retain resolver explorer trees");
 
     let container_parent = find_container_parent(base);
     let container = base.insert(
@@ -101,7 +105,7 @@ fn stamp_conflicts_from_views(
             ),
     );
 
-    stamp_explorer_trees(base, container, &result.explorer_trees);
+    stamp_explorer_trees(base, container, explorer_trees);
 
     for (index, conflict) in result.conflicts.iter().enumerate() {
         let mut attrs = Attributes::new()
@@ -163,10 +167,8 @@ fn stamp_conflicts_from_views(
                     .properties
                     .insert("Attributes".into(), Variant::Attributes(attrs));
             }
-            let ours_impact =
-                model_frame_impact(base, conflict.base_ref, &result.explorer_trees, ours);
-            let theirs_impact =
-                model_frame_impact(base, conflict.base_ref, &result.explorer_trees, theirs);
+            let ours_impact = model_frame_impact(base, conflict.base_ref, explorer_trees, ours);
+            let theirs_impact = model_frame_impact(base, conflict.base_ref, explorer_trees, theirs);
             stamp_model_frame_side(base, entry, "Ours", ours, &ours_impact);
             stamp_model_frame_side(base, entry, "Theirs", theirs, &theirs_impact);
         } else {
@@ -179,7 +181,7 @@ fn stamp_conflicts_from_views(
                 ours_dom,
                 &result.ours_identity.matched,
                 &result.ours_identity.reverse_matched,
-                &result.explorer_trees,
+                explorer_trees,
                 ExplorerVersion::Ours,
             );
             stamp_side(
@@ -191,7 +193,7 @@ fn stamp_conflicts_from_views(
                 theirs_dom,
                 &result.theirs_identity.matched,
                 &result.theirs_identity.reverse_matched,
-                &result.explorer_trees,
+                explorer_trees,
                 ExplorerVersion::Theirs,
             );
         }
