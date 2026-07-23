@@ -25,19 +25,6 @@ use crate::value_compare::non_ref_variants_equal;
 
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
 
-fn refs_compatible(
-    old_dom: &dyn DomView,
-    new_dom: &dyn DomView,
-    old_ref: Ref,
-    new_ref: Ref,
-    basis: PairingBasis,
-) -> bool {
-    let (Some(old), Some(new)) = (old_dom.get_by_ref(old_ref), new_dom.get_by_ref(new_ref)) else {
-        return false;
-    };
-    pairing_compatible(&old, &new, basis)
-}
-
 fn tolerant_non_ref_properties_equal(old: InstanceView<'_>, new: InstanceView<'_>) -> bool {
     let authored = get_authored_properties(old.class());
 
@@ -200,8 +187,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         .filter_map(|r| {
             old_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
-                name: inst.name().to_string(),
-                class: inst.class().to_string(),
+                instance: inst,
             })
         })
         .collect();
@@ -212,8 +198,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         .filter_map(|r| {
             new_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
-                name: inst.name().to_string(),
-                class: inst.class().to_string(),
+                instance: inst,
             })
         })
         .collect();
@@ -283,12 +268,12 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     // Build name → indices map for O(1) lookup instead of O(n) scan
     let mut name_index: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, child) in old_children.iter().enumerate() {
-        name_index.entry(child.name.as_str()).or_default().push(i);
+        name_index.entry(child.name()).or_default().push(i);
     }
     let mut new_name_class_counts: HashMap<(&str, &str), usize> = HashMap::new();
     for child in &new_children {
         *new_name_class_counts
-            .entry((child.name.as_str(), child.class.as_str()))
+            .entry((child.name(), child.class()))
             .or_default() += 1;
     }
 
@@ -303,25 +288,23 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     // steal the sole old sibling before content-aware matching runs.
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if new_name_class_counts
-            .get(&(new_child.name.as_str(), new_child.class.as_str()))
+            .get(&(new_child.name(), new_child.class()))
             .copied()
             != Some(1)
         {
             continue;
         }
         let candidates: Vec<usize> = name_index
-            .get(new_child.name.as_str())
+            .get(new_child.name())
             .map(|indices| {
                 indices
                     .iter()
                     .copied()
                     .filter(|&i| {
                         !old_matched[i]
-                            && refs_compatible(
-                                old_dom,
-                                new_dom,
-                                old_children[i].referent,
-                                new_child.referent,
+                            && pairing_compatible(
+                                &old_children[i].instance,
+                                &new_child.instance,
                                 PairingBasis::AnchoredName,
                             )
                     })
@@ -344,16 +327,16 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
             let has_candidates = name_index
-                .get(new_child.name.as_str())
+                .get(new_child.name())
                 .map(|indices| {
                     indices
                         .iter()
-                        .any(|&i| !old_matched[i] && old_children[i].class == new_child.class)
+                        .any(|&i| !old_matched[i] && old_children[i].class() == new_child.class())
                 })
                 .unwrap_or(false);
             if has_candidates {
                 name_groups
-                    .entry((new_child.name.as_str(), new_child.class.as_str()))
+                    .entry((new_child.name(), new_child.class()))
                     .or_default()
                     .push(new_idx);
             }
@@ -370,7 +353,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 indices
                     .iter()
                     .copied()
-                    .filter(|&i| !old_matched[i] && old_children[i].class == *class)
+                    .filter(|&i| !old_matched[i] && old_children[i].class() == *class)
                     .collect()
             })
             .unwrap_or_default();
@@ -384,18 +367,16 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         // Pass 1: Full hash match (all properties including Refs)
         let mut remaining_new: Vec<usize> = Vec::new();
         for &new_idx in new_indices {
-            let new_hash = new_hashes.get(new_children[new_idx].referent);
+            let new_hash = new_hashes.get_instance(new_children[new_idx].instance);
             let new_hash_bytes = *new_hash.as_bytes();
 
             let exact = old_candidates.iter().find(|&&oi| {
                 !old_matched[oi] && {
-                    let old_hash = old_hashes.get(old_children[oi].referent);
+                    let old_hash = old_hashes.get_instance(old_children[oi].instance);
                     *old_hash.as_bytes() == new_hash_bytes
-                        && refs_compatible(
-                            old_dom,
-                            new_dom,
-                            old_children[oi].referent,
-                            new_children[new_idx].referent,
+                        && pairing_compatible(
+                            &old_children[oi].instance,
+                            &new_children[new_idx].instance,
                             PairingBasis::ExactContent,
                         )
                 }
@@ -414,18 +395,16 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         // Pass 2: No-refs hash match (stable when only Ref properties changed)
         let mut still_remaining: Vec<usize> = Vec::new();
         for new_idx in remaining_new {
-            let new_hash_nr = new_hashes.get_no_refs(new_children[new_idx].referent);
+            let new_hash_nr = new_hashes.get_instance_no_refs(new_children[new_idx].instance);
             let new_hash_nr_bytes = *new_hash_nr.as_bytes();
 
             let nr_match = old_candidates.iter().find(|&&oi| {
                 !old_matched[oi] && {
-                    let old_hash_nr = old_hashes.get_no_refs(old_children[oi].referent);
+                    let old_hash_nr = old_hashes.get_instance_no_refs(old_children[oi].instance);
                     *old_hash_nr.as_bytes() == new_hash_nr_bytes
-                        && refs_compatible(
-                            old_dom,
-                            new_dom,
-                            old_children[oi].referent,
-                            new_children[new_idx].referent,
+                        && pairing_compatible(
+                            &old_children[oi].instance,
+                            &new_children[new_idx].instance,
                             PairingBasis::ExactContent,
                         )
                 }
@@ -449,15 +428,15 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             .iter()
             .filter(|&&old_idx| !old_matched[old_idx])
             .filter_map(|&old_idx| {
-                let instance = old_dom.get_by_ref(old_children[old_idx].referent)?;
-                strong_content_key(&instance).map(|identity| (old_idx, identity))
+                strong_content_key(&old_children[old_idx].instance)
+                    .map(|identity| (old_idx, identity))
             })
             .collect();
         let new_identities: HashMap<usize, String> = still_remaining
             .iter()
             .filter_map(|&new_idx| {
-                let instance = new_dom.get_by_ref(new_children[new_idx].referent)?;
-                strong_content_key(&instance).map(|identity| (new_idx, identity))
+                strong_content_key(&new_children[new_idx].instance)
+                    .map(|identity| (new_idx, identity))
             })
             .collect();
         let mut old_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -488,11 +467,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 continue;
             }
             let old_idx = old_indices[0];
-            if !refs_compatible(
-                old_dom,
-                new_dom,
-                old_children[old_idx].referent,
-                new_children[new_idx].referent,
+            if !pairing_compatible(
+                &old_children[old_idx].instance,
+                &new_children[new_idx].instance,
                 PairingBasis::Inferred,
             ) {
                 continue;
@@ -527,8 +504,8 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 let mut new_edges = vec![0usize; new_count];
                 for &old_idx in &remaining_old {
                     for &new_idx in &still_remaining {
-                        let old_inst = old_dom.get_by_ref(old_children[old_idx].referent).unwrap();
-                        let new_inst = new_dom.get_by_ref(new_children[new_idx].referent).unwrap();
+                        let old_inst = old_children[old_idx].instance;
+                        let new_inst = new_children[new_idx].instance;
                         if pairing_compatible(&old_inst, &new_inst, PairingBasis::Inferred)
                             && tolerant_non_ref_properties_equal(old_inst, new_inst)
                         {
@@ -573,11 +550,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
 
         for new_idx in still_remaining {
             let old_position = remaining_old.iter().position(|old_idx| {
-                refs_compatible(
-                    old_dom,
-                    new_dom,
-                    old_children[*old_idx].referent,
-                    new_children[new_idx].referent,
+                pairing_compatible(
+                    &old_children[*old_idx].instance,
+                    &new_children[new_idx].instance,
                     PairingBasis::Inferred,
                 )
             });
@@ -617,10 +592,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     let mut class_groups_old: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, child) in old_children.iter().enumerate() {
         if !old_matched[i] {
-            class_groups_old
-                .entry(child.class.as_str())
-                .or_default()
-                .push(i);
+            class_groups_old.entry(child.class()).or_default().push(i);
         }
     }
 
@@ -628,7 +600,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
             class_groups_new
-                .entry(new_child.class.as_str())
+                .entry(new_child.class())
                 .or_default()
                 .push(new_idx);
         }
@@ -653,7 +625,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             old_by_hash
                 .entry(
                     *old_deep
-                        .get_without_name(old_children[old_idx].referent)
+                        .get_instance_without_name(old_children[old_idx].instance)
                         .as_bytes(),
                 )
                 .or_default()
@@ -663,7 +635,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             new_by_hash
                 .entry(
                     *new_deep
-                        .get_without_name(new_children[new_idx].referent)
+                        .get_instance_without_name(new_children[new_idx].instance)
                         .as_bytes(),
                 )
                 .or_default()
@@ -678,11 +650,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
             let old_idx = old_indices[0];
             let new_idx = new_indices[0];
-            if !refs_compatible(
-                old_dom,
-                new_dom,
-                old_children[old_idx].referent,
-                new_children[new_idx].referent,
+            if !pairing_compatible(
+                &old_children[old_idx].instance,
+                &new_children[new_idx].instance,
                 PairingBasis::ContentPreservingRename,
             ) {
                 continue;
@@ -706,7 +676,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             old_by_hash
                 .entry(
                     *old_deep
-                        .get_without_name_no_refs(old_children[old_idx].referent)
+                        .get_instance_without_name_no_refs(old_children[old_idx].instance)
                         .as_bytes(),
                 )
                 .or_default()
@@ -719,7 +689,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             new_by_hash
                 .entry(
                     *new_deep
-                        .get_without_name_no_refs(new_children[new_idx].referent)
+                        .get_instance_without_name_no_refs(new_children[new_idx].instance)
                         .as_bytes(),
                 )
                 .or_default()
@@ -734,11 +704,9 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
             let old_idx = old_indices[0];
             let new_idx = new_indices[0];
-            if !refs_compatible(
-                old_dom,
-                new_dom,
-                old_children[old_idx].referent,
-                new_children[new_idx].referent,
+            if !pairing_compatible(
+                &old_children[old_idx].instance,
+                &new_children[new_idx].instance,
                 PairingBasis::ContentPreservingRename,
             ) {
                 continue;
@@ -818,10 +786,19 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     }
 }
 
-struct ChildInfo {
+struct ChildInfo<'a> {
     referent: Ref,
-    name: String,
-    class: String,
+    instance: InstanceView<'a>,
+}
+
+impl ChildInfo<'_> {
+    fn name(&self) -> &str {
+        self.instance.name()
+    }
+
+    fn class(&self) -> &str {
+        self.instance.class()
+    }
 }
 
 /// Get the full path of an instance (e.g., "Workspace.Map.Building1")

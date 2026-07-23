@@ -517,7 +517,6 @@ impl<'a> DiffNode<'a> {
         &self.dom.nodes[self.id.index()]
     }
 
-    #[cfg(test)]
     pub(crate) fn id(self) -> NodeId {
         self.id
     }
@@ -575,6 +574,20 @@ pub(crate) enum InstanceView<'a> {
 }
 
 impl<'a> InstanceView<'a> {
+    pub(crate) fn referent(self) -> Ref {
+        match self {
+            Self::Weak(instance) => instance.referent(),
+            Self::Compact(instance) => instance.source_ref(),
+        }
+    }
+
+    pub(crate) fn dense_index(self) -> Option<usize> {
+        match self {
+            Self::Weak(_) => None,
+            Self::Compact(instance) => Some(instance.id().index()),
+        }
+    }
+
     pub(crate) fn parent(self) -> Ref {
         match self {
             Self::Weak(instance) => instance.parent(),
@@ -706,6 +719,10 @@ impl ExactSizeIterator for ChildRefIter<'_> {}
 pub(crate) trait DomView {
     fn root_ref(&self) -> Ref;
     fn get_by_ref(&self, referent: Ref) -> Option<InstanceView<'_>>;
+
+    fn dense_len(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Narrow mutation contract needed by model-frame canonicalization.
@@ -754,6 +771,10 @@ impl DomView for DiffDom {
     fn get_by_ref(&self, referent: Ref) -> Option<InstanceView<'_>> {
         self.id_from_source_ref(referent)
             .map(|id| InstanceView::Compact(self.node(id)))
+    }
+
+    fn dense_len(&self) -> Option<usize> {
+        Some(self.len())
     }
 }
 

@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
-use crate::diff_dom::DomView;
+use crate::diff_dom::{DomView, InstanceView};
 use crate::property_semantics::{get_authored_properties, normalize_asset_uri};
 
 macro_rules! n_hash {
@@ -88,15 +88,69 @@ const NO_REFS_HASH: HashPolicy = HashPolicy {
     include_refs: false,
 };
 
+enum HashStorage {
+    Sparse(HashMap<Ref, Hash>),
+    Dense {
+        values: Vec<Option<Hash>>,
+        populated: usize,
+    },
+}
+
+impl HashStorage {
+    fn new(dom: &dyn DomView) -> Self {
+        match dom.dense_len() {
+            Some(len) => Self::Dense {
+                values: vec![None; len],
+                populated: 0,
+            },
+            None => Self::Sparse(HashMap::new()),
+        }
+    }
+
+    fn get(&self, instance: InstanceView<'_>) -> Option<Hash> {
+        match self {
+            Self::Sparse(values) => values.get(&instance.referent()).copied(),
+            Self::Dense { values, .. } => {
+                values[instance
+                    .dense_index()
+                    .expect("dense cache received a sparse instance")]
+            }
+        }
+    }
+
+    fn insert(&mut self, instance: InstanceView<'_>, hash: Hash) {
+        match self {
+            Self::Sparse(values) => {
+                values.insert(instance.referent(), hash);
+            }
+            Self::Dense { values, populated } => {
+                let slot = &mut values[instance
+                    .dense_index()
+                    .expect("dense cache received a sparse instance")];
+                if slot.is_none() {
+                    *populated += 1;
+                }
+                *slot = Some(hash);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Sparse(values) => values.len(),
+            Self::Dense { populated, .. } => *populated,
+        }
+    }
+}
+
 /// Hash one instance's class and authored properties under a policy. Deep
 /// hashing builds on the same prefix before adding child hashes.
 fn hash_instance(
     dom: &dyn DomView,
-    referent: Ref,
+    inst: InstanceView<'_>,
     ignore_properties: Option<&HashSet<String>>,
     policy: HashPolicy,
 ) -> Hasher {
-    let inst = dom.get_by_ref(referent).unwrap();
     let authored = get_authored_properties(inst.class());
     let mut hasher = Hasher::new();
 
@@ -127,8 +181,8 @@ fn hash_instance(
 /// - `get_no_refs()`: Hash excluding Ref properties (stable when only Refs change)
 pub struct LazyHashCache<'a> {
     dom: &'a dyn DomView,
-    cache: RefCell<HashMap<Ref, Hash>>,
-    cache_no_refs: RefCell<HashMap<Ref, Hash>>,
+    cache: RefCell<HashStorage>,
+    cache_no_refs: RefCell<HashStorage>,
 }
 
 impl<'a> LazyHashCache<'a> {
@@ -140,20 +194,30 @@ impl<'a> LazyHashCache<'a> {
     pub(crate) fn new_view(dom: &'a dyn DomView) -> Self {
         Self {
             dom,
-            cache: RefCell::new(HashMap::new()),
-            cache_no_refs: RefCell::new(HashMap::new()),
+            cache: RefCell::new(HashStorage::new(dom)),
+            cache_no_refs: RefCell::new(HashStorage::new(dom)),
         }
     }
 
     /// Get hash for an instance, computing it if needed.
     pub fn get(&self, referent: Ref) -> Hash {
-        self.get_with_policy(referent, FULL_HASH)
+        let instance = self.dom.get_by_ref(referent).unwrap();
+        self.get_instance_with_policy(instance, FULL_HASH)
     }
 
     /// Get hash excluding Ref properties, computing it if needed.
     /// Stable when only Ref properties (like PrimaryPart) change.
     pub fn get_no_refs(&self, referent: Ref) -> Hash {
-        self.get_with_policy(referent, NO_REFS_HASH)
+        let instance = self.dom.get_by_ref(referent).unwrap();
+        self.get_instance_with_policy(instance, NO_REFS_HASH)
+    }
+
+    pub(crate) fn get_instance(&self, instance: InstanceView<'_>) -> Hash {
+        self.get_instance_with_policy(instance, FULL_HASH)
+    }
+
+    pub(crate) fn get_instance_no_refs(&self, instance: InstanceView<'_>) -> Hash {
+        self.get_instance_with_policy(instance, NO_REFS_HASH)
     }
 
     /// Log cache stats.
@@ -166,21 +230,21 @@ impl<'a> LazyHashCache<'a> {
         );
     }
 
-    fn get_with_policy(&self, referent: Ref, policy: HashPolicy) -> Hash {
+    fn get_instance_with_policy(&self, instance: InstanceView<'_>, policy: HashPolicy) -> Hash {
         let cached = if policy.include_refs {
-            self.cache.borrow().get(&referent).copied()
+            self.cache.borrow().get(instance)
         } else {
-            self.cache_no_refs.borrow().get(&referent).copied()
+            self.cache_no_refs.borrow().get(instance)
         };
         if let Some(hash) = cached {
             return hash;
         }
 
-        let hash = hash_instance(self.dom, referent, None, policy).finalize();
+        let hash = hash_instance(self.dom, instance, None, policy).finalize();
         if policy.include_refs {
-            self.cache.borrow_mut().insert(referent, hash);
+            self.cache.borrow_mut().insert(instance, hash);
         } else {
-            self.cache_no_refs.borrow_mut().insert(referent, hash);
+            self.cache_no_refs.borrow_mut().insert(instance, hash);
         }
         hash
     }
@@ -195,8 +259,8 @@ impl<'a> LazyHashCache<'a> {
 pub struct DeepHashCache<'a> {
     dom: &'a dyn DomView,
     ignore_properties: &'a HashSet<String>,
-    cache: RefCell<HashMap<Ref, Hash>>,
-    cache_no_refs: RefCell<HashMap<Ref, Hash>>,
+    cache: RefCell<HashStorage>,
+    cache_no_refs: RefCell<HashStorage>,
 }
 
 impl<'a> DeepHashCache<'a> {
@@ -204,22 +268,20 @@ impl<'a> DeepHashCache<'a> {
         Self {
             dom,
             ignore_properties,
-            cache: RefCell::new(HashMap::new()),
-            cache_no_refs: RefCell::new(HashMap::new()),
+            cache: RefCell::new(HashStorage::new(dom)),
+            cache_no_refs: RefCell::new(HashStorage::new(dom)),
         }
     }
 
     /// Get deep hash for an instance, computing bottom-up if needed.
     pub fn get(&self, referent: Ref) -> Hash {
-        self.get_with_policy(referent, FULL_HASH)
+        let instance = self.dom.get_by_ref(referent).unwrap();
+        self.get_instance_with_policy(instance, FULL_HASH)
     }
 
-    /// Hash a subtree while ignoring only the root instance's name. Children
-    /// retain their names, so equal hashes are strong evidence of a rename
-    /// rather than two unrelated same-class containers.
-    pub fn get_without_name(&self, referent: Ref) -> Hash {
+    pub(crate) fn get_instance_without_name(&self, instance: InstanceView<'_>) -> Hash {
         self.compute(
-            referent,
+            instance,
             HashPolicy {
                 include_name: false,
                 include_refs: true,
@@ -227,11 +289,9 @@ impl<'a> DeepHashCache<'a> {
         )
     }
 
-    /// Root-name-independent deep hash that also excludes Ref properties.
-    /// This preserves rename identity when only references were retargeted.
-    pub fn get_without_name_no_refs(&self, referent: Ref) -> Hash {
+    pub(crate) fn get_instance_without_name_no_refs(&self, instance: InstanceView<'_>) -> Hash {
         self.compute(
-            referent,
+            instance,
             HashPolicy {
                 include_name: false,
                 include_refs: false,
@@ -239,32 +299,32 @@ impl<'a> DeepHashCache<'a> {
         )
     }
 
-    fn get_with_policy(&self, referent: Ref, policy: HashPolicy) -> Hash {
+    fn get_instance_with_policy(&self, instance: InstanceView<'_>, policy: HashPolicy) -> Hash {
         let cached = if policy.include_refs {
-            self.cache.borrow().get(&referent).copied()
+            self.cache.borrow().get(instance)
         } else {
-            self.cache_no_refs.borrow().get(&referent).copied()
+            self.cache_no_refs.borrow().get(instance)
         };
         if let Some(hash) = cached {
             return hash;
         }
 
-        let hash = self.compute(referent, policy);
+        let hash = self.compute(instance, policy);
         if policy.include_refs {
-            self.cache.borrow_mut().insert(referent, hash);
+            self.cache.borrow_mut().insert(instance, hash);
         } else {
-            self.cache_no_refs.borrow_mut().insert(referent, hash);
+            self.cache_no_refs.borrow_mut().insert(instance, hash);
         }
         hash
     }
 
-    fn compute(&self, referent: Ref, policy: HashPolicy) -> Hash {
-        let inst = self.dom.get_by_ref(referent).unwrap();
-        let mut hasher = hash_instance(self.dom, referent, Some(self.ignore_properties), policy);
+    fn compute(&self, inst: InstanceView<'_>, policy: HashPolicy) -> Hash {
+        let mut hasher = hash_instance(self.dom, inst, Some(self.ignore_properties), policy);
 
         for child_ref in inst.children() {
-            let child_hash = self.get_with_policy(
-                child_ref,
+            let child = self.dom.get_by_ref(child_ref).unwrap();
+            let child_hash = self.get_instance_with_policy(
+                child,
                 HashPolicy {
                     include_name: true,
                     include_refs: policy.include_refs,
