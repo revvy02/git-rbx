@@ -72,10 +72,8 @@ pub struct MergeStats {
 pub struct MergeResult {
     pub conflicts: Vec<MergeConflict>,
     pub stats: MergeStats,
-    /// Identity mapping base_ref → ours_ref for every matched instance.
-    pub ours_matched: HashMap<Ref, Ref>,
-    /// Identity mapping base_ref → theirs_ref for every matched instance.
-    pub theirs_matched: HashMap<Ref, Ref>,
+    pub ours_identity: InstanceIdentity,
+    pub theirs_identity: InstanceIdentity,
     pub(crate) explorer_trees: ExplorerTrees,
 }
 
@@ -152,10 +150,6 @@ fn merge_scripts(
 ) -> MergeResult {
     let mut conflicts: Vec<MergeConflict> = Vec::new();
     let mut stats = MergeStats::default();
-
-    // Reverse identity maps (branch ref → base ref) for cross-branch equality
-    let ours_to_base: HashMap<Ref, Ref> = ours.matched.iter().map(|(b, o)| (*o, *b)).collect();
-    let theirs_to_base: HashMap<Ref, Ref> = theirs.matched.iter().map(|(b, t)| (*t, *b)).collect();
 
     let ours_removed: HashSet<Ref> = removed_roots(&ours.ops);
     let theirs_removed: HashSet<Ref> = removed_roots(&theirs.ops);
@@ -286,7 +280,12 @@ fn merge_scripts(
                         ..
                     },
                 ) if a == b && an == bn => {
-                    if values_equal(av, bv, &ours_to_base, &theirs_to_base) {
+                    if values_equal(
+                        av,
+                        bv,
+                        &ours.identity.reverse_matched,
+                        &theirs.identity.reverse_matched,
+                    ) {
                         dropped_theirs.insert(j);
                         stats.deduped += 1;
                     } else {
@@ -344,7 +343,7 @@ fn merge_scripts(
                         new_parent: bp,
                     },
                 ) if a == b => {
-                    if anchors_equal(*ap, *bp, &ours_to_base, &theirs_to_base) {
+                    if anchors_equal(*ap, *bp) {
                         dropped_theirs.insert(j);
                         stats.deduped += 1;
                     } else {
@@ -437,23 +436,16 @@ fn merge_scripts(
     stats.ours_applied = ours_survivors.len();
     stats.theirs_applied = theirs_survivors.len();
 
-    let mut explorer_trees =
-        ExplorerTrees::capture(base, ours_dom, theirs_dom, &ours.matched, &theirs.matched);
-
-    let ours_created = apply_ops(
+    let mut explorer_trees = ExplorerTrees::capture(
         base,
         ours_dom,
-        &ours_survivors,
-        &ours.matched,
-        &ours.moved_destinations,
-    );
-    let theirs_created = apply_ops(
-        base,
         theirs_dom,
-        &theirs_survivors,
-        &theirs.matched,
-        &theirs.moved_destinations,
+        &ours.identity.matched,
+        &theirs.identity.matched,
     );
+
+    let ours_created = apply_ops(base, ours_dom, &ours_survivors, &ours.identity);
+    let theirs_created = apply_ops(base, theirs_dom, &theirs_survivors, &theirs.identity);
     explorer_trees.bind_result(base, &ours_created, &theirs_created);
 
     info!(
@@ -467,8 +459,8 @@ fn merge_scripts(
     MergeResult {
         conflicts,
         stats,
-        ours_matched: ours.matched.as_ref().clone(),
-        theirs_matched: theirs.matched.as_ref().clone(),
+        ours_identity: ours.identity.clone(),
+        theirs_identity: theirs.identity.clone(),
         explorer_trees,
     }
 }
@@ -539,10 +531,10 @@ fn group_property_bundle_conflicts(
     for key in common {
         let (bundle, our_indices) = &ours_groups[&key];
         let (_, their_indices) = &theirs_groups[&key];
-        let Some(our_ref) = ours.matched.get(&key.0) else {
+        let Some(our_ref) = ours.identity.matched.get(&key.0) else {
             continue;
         };
-        let Some(their_ref) = theirs.matched.get(&key.0) else {
+        let Some(their_ref) = theirs.identity.matched.get(&key.0) else {
             continue;
         };
         let (Some(our_instance), Some(their_instance)) = (
@@ -670,12 +662,7 @@ fn values_equal(
 
 /// Move destinations compare equal only when both map to the same base
 /// instance. Added-subtree anchors can't be equated across branches.
-fn anchors_equal(
-    a: Anchor,
-    b: Anchor,
-    _ours_to_base: &HashMap<Ref, Ref>,
-    _theirs_to_base: &HashMap<Ref, Ref>,
-) -> bool {
+fn anchors_equal(a: Anchor, b: Anchor) -> bool {
     match (a, b) {
         (Anchor::Old(ra), Anchor::Old(rb)) => ra == rb,
         _ => false,

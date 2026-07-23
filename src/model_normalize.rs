@@ -691,10 +691,7 @@ fn raw_local_frame(boundary: &Boundary, root_prefix: Rigid) -> Rigid {
 }
 
 fn script_identity(script: EditScript) -> InstanceIdentity {
-    InstanceIdentity {
-        matched: script.matched,
-        moves: script.moves,
-    }
+    script.identity
 }
 
 /// Apply a frame to every world-space property in one boundary subtree.

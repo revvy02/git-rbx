@@ -3,7 +3,7 @@
 use rbx_dom_weak::types::Ref;
 use rbx_types::Variant;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::diff::{
     attr_value_eq, is_default_value, is_studio_artifact, raw_property_changes,
@@ -227,8 +227,6 @@ struct CompactDiffContext<'a> {
     dense: &'a DenseIdentity,
     changed: &'a [bool],
     config: &'a DiffConfig,
-    moved_old: &'a HashSet<Ref>,
-    moved_new: &'a HashSet<Ref>,
 }
 
 fn compact_change_pass(
@@ -249,7 +247,7 @@ fn compact_change_pass(
             continue;
         }
         let old_ref = context.old_dom.node(old_child).source_ref();
-        if context.moved_old.contains(&old_ref) {
+        if context.identity.moved_old.contains(&old_ref) {
             continue;
         }
         let instance = context.old_dom.node(old_child);
@@ -271,7 +269,7 @@ fn compact_change_pass(
             continue;
         }
         let new_ref = context.new_dom.node(new_child).source_ref();
-        if context.moved_new.contains(&new_ref) {
+        if context.identity.moved_new.contains(&new_ref) {
             continue;
         }
         let instance = context.new_dom.node(new_child);
@@ -366,8 +364,6 @@ pub(crate) fn compute_compact_diff_with_identity(
 ) -> Vec<DiffEntry> {
     let dense = DenseIdentity::from_complete(old_dom, new_dom, identity);
     let changed = compact_changed_subtrees(old_dom, new_dom, identity, &dense, config);
-    let moved_old: HashSet<Ref> = identity.moves.iter().map(|(old, _)| *old).collect();
-    let moved_new: HashSet<Ref> = identity.moves.iter().map(|(_, new)| *new).collect();
     let context = CompactDiffContext {
         old_dom,
         new_dom,
@@ -375,16 +371,9 @@ pub(crate) fn compute_compact_diff_with_identity(
         dense: &dense,
         changed: &changed,
         config,
-        moved_old: &moved_old,
-        moved_new: &moved_new,
     };
 
-    let reverse_matched: HashMap<Ref, Ref> = identity
-        .matched
-        .iter()
-        .map(|(old, new)| (*new, *old))
-        .collect();
-    let mut moves_by_depth = identity.moves.clone();
+    let mut moves_by_depth = identity.moves.as_ref().clone();
     moves_by_depth.sort_by_key(|(_, new_ref)| new_side_depth(new_dom, *new_ref));
     let mut ops = Vec::new();
     for &(old_ref, new_ref) in &moves_by_depth {
@@ -394,12 +383,12 @@ pub(crate) fn compute_compact_diff_with_identity(
             .unwrap_or_else(Ref::none);
         ops.push(EditOp::Move {
             old_ref,
-            new_parent: anchor_for(new_parent, &reverse_matched),
+            new_parent: anchor_for(new_parent, &identity.reverse_matched),
         });
     }
 
     compact_change_pass(&context, old_dom.root_id(), new_dom.root_id(), &mut ops);
-    for &(old_ref, new_ref) in &identity.moves {
+    for &(old_ref, new_ref) in identity.moves.iter() {
         emit_compact_instance_changes(&context, old_ref, new_ref, &mut ops);
         let (Some(old_id), Some(new_id)) = (
             old_dom.id_from_source_ref(old_ref),
@@ -413,9 +402,7 @@ pub(crate) fn compute_compact_diff_with_identity(
     }
     let changes = SemanticChangeSet {
         ops,
-        matched: identity.matched.clone(),
-        moved_destinations: moved_new.clone(),
-        moves: identity.moves.clone(),
+        identity: identity.clone(),
     };
     semantic_changes_to_diff(old_dom, new_dom, &changes)
 }

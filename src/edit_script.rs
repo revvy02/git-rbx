@@ -62,26 +62,48 @@ pub enum EditOp {
 /// without pulling editing concerns into matching and comparison.
 pub struct SemanticChangeSet {
     pub ops: Vec<EditOp>,
+    pub identity: InstanceIdentity,
+}
+
+/// Complete bidirectional identity between two DOMs.
+///
+/// Every derived view is built once and shared by diff projection, merge
+/// planning, materialization, and conflict stamping. Keeping forward and
+/// reverse mappings together prevents each consumer from rebuilding the same
+/// place-wide hash table.
+#[derive(Debug, Clone)]
+pub struct InstanceIdentity {
     /// Identity mapping (old_ref → new_ref) for every matched instance,
     /// including moved pairs and instances inside unchanged subtrees.
     pub matched: Arc<HashMap<Ref, Ref>>,
+    /// Reverse identity mapping (new_ref → old_ref).
+    pub reverse_matched: Arc<HashMap<Ref, Ref>>,
+    /// Paired moved roots in identity-detection order.
+    pub moves: Arc<Vec<(Ref, Ref)>>,
+    /// Old-DOM roots supplied by Move operations.
+    pub moved_old: Arc<HashSet<Ref>>,
     /// New-DOM refs that are Move destinations. A destination can sit inside
     /// an added subtree (moved into a new group); cloning that subtree must
     /// skip these positions — the Move op supplies the real instance.
-    pub moved_destinations: HashSet<Ref>,
-    /// Paired moved roots in identity-detection order.
-    pub moves: Vec<(Ref, Ref)>,
+    pub moved_new: Arc<HashSet<Ref>>,
 }
 
 /// Backwards-compatible name for the applicable semantic change set.
 pub type EditScript = SemanticChangeSet;
 
-/// Complete cross-DOM identity captured before a representation-only
-/// canonicalization, including the exact roots recognized as moves.
-#[derive(Debug, Clone)]
-pub struct InstanceIdentity {
-    pub matched: Arc<HashMap<Ref, Ref>>,
-    pub moves: Vec<(Ref, Ref)>,
+impl InstanceIdentity {
+    fn new(matched: HashMap<Ref, Ref>, moves: Vec<(Ref, Ref)>) -> Self {
+        let reverse_matched = matched.iter().map(|(old, new)| (*new, *old)).collect();
+        let moved_old = moves.iter().map(|(old, _)| *old).collect();
+        let moved_new = moves.iter().map(|(_, new)| *new).collect();
+        Self {
+            matched: Arc::new(matched),
+            reverse_matched: Arc::new(reverse_matched),
+            moves: Arc::new(moves),
+            moved_old: Arc::new(moved_old),
+            moved_new: Arc::new(moved_new),
+        }
+    }
 }
 
 /// Compute the edit script transforming `old_dom` into `new_dom`.
@@ -163,10 +185,7 @@ fn discover_identity_once(
             &mut Vec::new(),
         );
     }
-    InstanceIdentity {
-        matched: Arc::new(matched),
-        moves,
-    }
+    InstanceIdentity::new(matched, moves)
 }
 
 fn discover_identity(
@@ -207,10 +226,7 @@ fn discover_identity(
             &mut Vec::new(),
         );
     }
-    InstanceIdentity {
-        matched: Arc::new(matched),
-        moves,
-    }
+    InstanceIdentity::new(matched, moves)
 }
 
 /// Compute an edit script while preserving identity established before a
@@ -237,25 +253,21 @@ pub(crate) fn compute_semantic_changes_with_identity(
         matcher = matcher.with_complete_identity(&pinned.matched);
     }
 
-    let (matched, moves) = if let Some(pinned) = pinned {
+    let identity = if let Some(pinned) = pinned {
         // This is a complete identity map captured before representation-only
         // canonicalization. Derive moves from parent identity directly rather
         // than asking content hashes to rediscover them after transforms.
-        (Arc::clone(&pinned.matched), pinned.moves.clone())
+        pinned.clone()
     } else {
-        let identity = discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep);
-        (identity.matched, identity.moves)
+        discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep)
     };
-    let moved_old: HashSet<Ref> = moves.iter().map(|(old, _)| *old).collect();
-    let moved_new: HashSet<Ref> = moves.iter().map(|(_, new)| *new).collect();
 
     let mut ops = Vec::new();
-    let reverse_matched: HashMap<Ref, Ref> =
-        matched.iter().map(|(old, new)| (*new, *old)).collect();
 
     // Move ops first in new-side depth order (parents settle before children),
     // so applying in script order can never transfer into an unsettled spot.
-    let mut moves_by_depth: Vec<(usize, &(Ref, Ref))> = moves
+    let mut moves_by_depth: Vec<(usize, &(Ref, Ref))> = identity
+        .moves
         .iter()
         .map(|pair| (new_side_depth(new_dom, pair.1), pair))
         .collect();
@@ -267,7 +279,7 @@ pub(crate) fn compute_semantic_changes_with_identity(
             .unwrap_or_else(Ref::none);
         ops.push(EditOp::Move {
             old_ref: *old_root,
-            new_parent: anchor_for(new_parent, &reverse_matched),
+            new_parent: anchor_for(new_parent, &identity.reverse_matched),
         });
     }
 
@@ -275,27 +287,22 @@ pub(crate) fn compute_semantic_changes_with_identity(
     let ctx = BuildCtx {
         matcher: &matcher,
         config,
-        matched: matched.as_ref(),
-        moved_old: &moved_old,
-        moved_new: &moved_new,
+        matched: &identity.matched,
+        moved_old: &identity.moved_old,
+        moved_new: &identity.moved_new,
     };
     emit_ops(&ctx, old_dom.root_ref(), new_dom.root_ref(), &mut ops);
-    for (old_root, new_root) in &moves {
+    for (old_root, new_root) in identity.moves.iter() {
         emit_instance_edits(&ctx, *old_root, *new_root, &mut ops);
         emit_ops(&ctx, *old_root, *new_root, &mut ops);
     }
 
     info!(
         ops = ops.len(),
-        matched = matched.len(),
+        matched = identity.matched.len(),
         "edit script built"
     );
-    SemanticChangeSet {
-        ops,
-        matched,
-        moved_destinations: moved_new,
-        moves,
-    }
+    SemanticChangeSet { ops, identity }
 }
 
 struct BuildCtx<'a> {
@@ -456,13 +463,7 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
 /// into (a DOM diff-equal to) the new DOM. `new_dom` supplies subtree payloads
 /// for AddSubtree ops.
 pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditScript) {
-    apply_ops(
-        target,
-        new_dom,
-        &script.ops,
-        &script.matched,
-        &script.moved_destinations,
-    );
+    apply_ops(target, new_dom, &script.ops, &script.identity);
 }
 
 /// Apply a subset of ops (all computed against `target`'s original state, with
@@ -472,27 +473,23 @@ pub(crate) fn apply_ops(
     target: &mut WeakDom,
     source_dom: &dyn DomView,
     ops: &[EditOp],
-    matched: &HashMap<Ref, Ref>,
-    moved_destinations: &HashSet<Ref>,
+    identity: &InstanceIdentity,
 ) -> HashMap<Ref, Ref> {
     let new_dom = source_dom;
     // new_ref → target ref, for every instance apply creates
     let mut created: HashMap<Ref, Ref> = HashMap::new();
-    // new_ref → old (target) ref for matched instances
-    let reverse: HashMap<Ref, Ref> = matched.iter().map(|(o, n)| (*n, *o)).collect();
-
     // 1. Adds — clone subtrees out of the new DOM
     for op in ops {
         if let EditOp::AddSubtree { parent, new_ref } = op {
             let parent_ref = resolve_anchor(*parent, &created);
-            let builder = build_subtree(new_dom, *new_ref, moved_destinations);
+            let builder = build_subtree(new_dom, *new_ref, &identity.moved_new);
             let created_root = target.insert(parent_ref, builder);
             record_created(
                 new_dom,
                 *new_ref,
                 target,
                 created_root,
-                moved_destinations,
+                &identity.moved_new,
                 &mut created,
             );
         }
@@ -540,7 +537,8 @@ pub(crate) fn apply_ops(
                             inst.properties.remove(&name.as_str().into());
                         }
                         Some(v) => {
-                            let v = remap_ref_value(v.clone(), &reverse, &created);
+                            let v =
+                                remap_ref_value(v.clone(), &identity.reverse_matched, &created);
                             inst.properties.insert(name.as_str().into(), v);
                         }
                     }
@@ -566,7 +564,7 @@ pub(crate) fn apply_ops(
             })
             .collect();
         for (name, new_target_ref) in ref_props {
-            let remapped = remap_ref(new_target_ref, &reverse, &created);
+            let remapped = remap_ref(new_target_ref, &identity.reverse_matched, &created);
             if let Some(inst) = target.get_by_ref_mut(target_ref) {
                 inst.properties
                     .insert(name.as_str().into(), Variant::Ref(remapped));

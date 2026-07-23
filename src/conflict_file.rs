@@ -83,14 +83,6 @@ fn stamp_conflicts_from_views(
         return;
     }
 
-    let ours_to_base: HashMap<Ref, Ref> =
-        result.ours_matched.iter().map(|(b, o)| (*o, *b)).collect();
-    let theirs_to_base: HashMap<Ref, Ref> = result
-        .theirs_matched
-        .iter()
-        .map(|(b, t)| (*t, *b))
-        .collect();
-
     let container_parent = find_container_parent(base);
     let container = base.insert(
         container_parent,
@@ -185,8 +177,8 @@ fn stamp_conflicts_from_views(
                 &conflict.ours,
                 conflict.base_ref,
                 ours_dom,
-                &result.ours_matched,
-                &ours_to_base,
+                &result.ours_identity.matched,
+                &result.ours_identity.reverse_matched,
                 &result.explorer_trees,
                 ExplorerVersion::Ours,
             );
@@ -197,8 +189,8 @@ fn stamp_conflicts_from_views(
                 &conflict.theirs,
                 conflict.base_ref,
                 theirs_dom,
-                &result.theirs_matched,
-                &theirs_to_base,
+                &result.theirs_identity.matched,
+                &result.theirs_identity.reverse_matched,
                 &result.explorer_trees,
                 ExplorerVersion::Theirs,
             );

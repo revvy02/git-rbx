@@ -498,7 +498,6 @@ pub(crate) fn semantic_changes_to_diff(
     new_dom: &dyn DomView,
     changes: &SemanticChangeSet,
 ) -> Vec<DiffEntry> {
-    let moved_old: HashSet<Ref> = changes.moves.iter().map(|(old, _)| *old).collect();
     let mut modifications: HashMap<Ref, Vec<PropertyChange>> = HashMap::new();
 
     for op in &changes.ops {
@@ -550,7 +549,7 @@ pub(crate) fn semantic_changes_to_diff(
     let moved_ancestor = |mut referent: Ref| {
         while let Some(instance) = old_dom.get_by_ref(referent) {
             referent = instance.parent();
-            if moved_old.contains(&referent) {
+            if changes.identity.moved_old.contains(&referent) {
                 return Some(referent);
             }
         }
@@ -593,7 +592,7 @@ pub(crate) fn semantic_changes_to_diff(
                 };
                 let owner = match parent {
                     Anchor::Old(parent) => {
-                        if moved_old.contains(parent) {
+                        if changes.identity.moved_old.contains(parent) {
                             Some(*parent)
                         } else {
                             moved_ancestor(*parent)
@@ -613,10 +612,12 @@ pub(crate) fn semantic_changes_to_diff(
                 );
             }
             EditOp::SetName { old_ref, .. } | EditOp::SetProperty { old_ref, .. } => {
-                if !emitted_modifications.insert(*old_ref) || moved_old.contains(old_ref) {
+                if !emitted_modifications.insert(*old_ref)
+                    || changes.identity.moved_old.contains(old_ref)
+                {
                     continue;
                 }
-                let Some(&new_ref) = changes.matched.get(old_ref) else {
+                let Some(&new_ref) = changes.identity.matched.get(old_ref) else {
                     continue;
                 };
                 let Some(instance) = new_dom.get_by_ref(new_ref) else {
@@ -643,7 +644,7 @@ pub(crate) fn semantic_changes_to_diff(
         }
     }
 
-    for (old_ref, new_ref) in &changes.moves {
+    for (old_ref, new_ref) in changes.identity.moves.iter() {
         let Some(instance) = new_dom.get_by_ref(*new_ref) else {
             continue;
         };

@@ -213,31 +213,28 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     // Canonicalizing CFrames can make several same-named siblings newly
     // identical. Preserve the pre-canonical identity rather than allowing a
     // later hash or positional pass to permute those siblings.
-    let old_indices: HashMap<Ref, usize> = old_children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| (child.referent, index))
-        .collect();
-    let new_indices: HashMap<Ref, usize> = new_children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| (child.referent, index))
-        .collect();
-    for &(old_ref, new_ref) in matcher
-        .pinned_children
-        .get(&(old_parent, new_parent))
-        .into_iter()
-        .flatten()
-    {
-        let (Some(&old_index), Some(&new_index)) =
-            (old_indices.get(&old_ref), new_indices.get(&new_ref))
-        else {
-            continue;
-        };
-        if !old_matched[old_index] && !new_matched[new_index] {
-            old_matched[old_index] = true;
-            new_matched[new_index] = true;
-            matched.push((old_ref, new_ref));
+    if let Some(pinned) = matcher.pinned_children.get(&(old_parent, new_parent)) {
+        let old_indices: HashMap<Ref, usize> = old_children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| (child.referent, index))
+            .collect();
+        let new_indices: HashMap<Ref, usize> = new_children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| (child.referent, index))
+            .collect();
+        for &(old_ref, new_ref) in pinned {
+            let (Some(&old_index), Some(&new_index)) =
+                (old_indices.get(&old_ref), new_indices.get(&new_ref))
+            else {
+                continue;
+            };
+            if !old_matched[old_index] && !new_matched[new_index] {
+                old_matched[old_index] = true;
+                new_matched[new_index] = true;
+                matched.push((old_ref, new_ref));
+            }
         }
     }
 
