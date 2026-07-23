@@ -4,7 +4,9 @@
 //! are `#[ignore]`d because debug-mode decoding is slow — run them with
 //! `cargo test --release -- --ignored`.
 
-use rbx_diff::{diff_doms, diff_model_doms_with_config, DiffConfig, DiffEntry};
+use rbx_diff::{
+    diff_doms, diff_model_compact_doms_with_config, DiffConfig, DiffDom, DiffEntry,
+};
 use rbx_dom_weak::WeakDom;
 use std::fs::File;
 use std::io::BufReader;
@@ -159,13 +161,16 @@ fn police_station_and_nested_moves_collapse_to_three_frames() {
     let Some(base) = load("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
         return;
     };
-    let Some(mut side) = load(
+    let base = DiffDom::from_weak_dom_owned(base);
+    let Some(side) = load(
         "tests-new/models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl",
     ) else {
         return;
     };
+    let mut side = DiffDom::from_weak_dom_owned(side);
 
-    let (diffs, frames) = diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    let (diffs, frames) =
+        diff_model_compact_doms_with_config(&base, &mut side, &DiffConfig::default());
     let frames = frames.expect("the fixture contains three hierarchical model moves");
     assert_eq!(frames.frames.len(), 3, "{:#?}", frames.frames);
     assert_eq!(counts(&diffs), (0, 1, 5, 0), "{diffs:#?}");

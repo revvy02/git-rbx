@@ -11,10 +11,10 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    detect_rigid_groups, diff_model_doms_with_config, finalize, find_container, list_entries,
-    mark_entry, mark_entry_custom, merge_doms, merge_doms_with_matches,
+    detect_rigid_groups, diff_model_compact_doms_with_config, finalize, find_container,
+    list_entries, mark_entry, mark_entry_custom, merge_doms, merge_doms_with_matches,
     normalize_model_merge_frames, stamp_conflicts, stamp_model_frame_plan, stamp_rigid_groups,
-    ConflictKind, DiffConfig, MergeConflict, ModelFrameDecision, CONTAINER_NAME,
+    ConflictKind, DiffConfig, DiffDom, MergeConflict, ModelFrameDecision, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -186,7 +186,8 @@ fn cmd_diff(
     eprintln!("Loading {}...", old_file);
     let old_dom = {
         let _span = info_span!("load_old_file", file = %old_file).entered();
-        load_file(old_file)?
+        let loaded = load_file(old_file)?;
+        DiffDom::from_weak_dom_owned(loaded)
     };
     let old_load_time = load_start.elapsed();
 
@@ -194,7 +195,7 @@ fn cmd_diff(
     eprintln!("Loading {}...", new_file);
     let mut new_dom = {
         let _span = info_span!("load_new_file", file = %new_file).entered();
-        load_file(new_file)?
+        DiffDom::from_weak_dom_owned(load_file(new_file)?)
     };
     let new_load_time = load_start.elapsed();
 
@@ -206,7 +207,7 @@ fn cmd_diff(
     // reports every inferred movement explicitly. It is therefore safe and
     // useful for place files too: authored placement remains visible as one
     // ModelFrame entry instead of thousands of descendant CFrame changes.
-    let (diffs, frames) = diff_model_doms_with_config(&old_dom, &mut new_dom, &config);
+    let (diffs, frames) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
     if let Some(frames) = frames {
         eprintln!(
             "Factored {} hierarchical model frame(s) ({} boundaries detected)",

@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, info_span};
 
+use crate::diff_dom::{DomView, InstanceView};
 use crate::edit_script::InstanceIdentity;
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
@@ -245,8 +246,8 @@ pub fn compute_diff(
 /// Compute a diff while preserving identity captured before a
 /// representation-only canonicalization.
 pub(crate) fn compute_diff_with_identity(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_hashes: &LazyHashCache,
     new_hashes: &LazyHashCache,
     config: &DiffConfig,
@@ -346,7 +347,7 @@ pub(crate) fn compute_diff_with_identity(
                 new_ref: format!("{}", *new_root),
                 old_path: get_instance_path(old_dom, *old_root),
                 path: get_instance_path(new_dom, *new_root),
-                class: inst.class.to_string(),
+                class: inst.class().to_string(),
                 property_changes,
             });
         }
@@ -430,7 +431,7 @@ fn diff_pass(
             diffs.push(DiffEntry::Removed {
                 old_ref: format!("{}", *removed_ref),
                 path: get_instance_path(old_dom, *removed_ref),
-                class: inst.class.to_string(),
+                class: inst.class().to_string(),
             });
         }
     }
@@ -447,7 +448,7 @@ fn diff_pass(
             diffs.push(DiffEntry::Added {
                 new_ref: format!("{}", *added_ref),
                 path: get_instance_path(new_dom, *added_ref),
-                class: inst.class.to_string(),
+                class: inst.class().to_string(),
             });
         }
     }
@@ -476,7 +477,7 @@ fn diff_pass(
                     old_ref: format!("{}", *old_child_ref),
                     new_ref: format!("{}", *new_child_ref),
                     path: get_instance_path(new_dom, *new_child_ref),
-                    class: inst.class.to_string(),
+                    class: inst.class().to_string(),
                     property_changes,
                 });
             }
@@ -634,8 +635,8 @@ fn expand_container_changes(
 /// non-reflected, non-serializable, and default-valued properties to avoid
 /// false positives from serialization differences.
 pub(crate) fn raw_property_changes(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_ref: Ref,
     new_ref: Ref,
     config: &DiffConfig,
@@ -647,7 +648,7 @@ pub(crate) fn raw_property_changes(
     let new_inst = new_dom.get_by_ref(new_ref).unwrap();
 
     let database = rbx_reflection_database::get().unwrap();
-    let class_name = new_inst.class.as_str();
+    let class_name = new_inst.class();
     let defaults = database
         .classes
         .get(class_name)
@@ -657,20 +658,20 @@ pub(crate) fn raw_property_changes(
     let mut visited = HashSet::new();
 
     // Check properties in new instance
-    for (name, new_value) in &new_inst.properties {
-        if config.ignore_properties.contains(name.as_str()) {
+    for (name, new_value) in new_inst.properties() {
+        if config.ignore_properties.contains(name) {
             continue;
         }
         if !should_compare_property(class_name, name) {
             continue;
         }
-        visited.insert(name.clone());
+        visited.insert(name.to_string());
 
-        let old_value = old_inst.properties.get(name);
+        let old_value = old_inst.property(name);
 
         // Container properties expand into per-key granular changes
-        if name.as_str() == "Attributes" || name.as_str() == "Tags" {
-            expand_container_changes(&mut changes, name.as_str(), old_value, Some(new_value));
+        if name == "Attributes" || name == "Tags" {
+            expand_container_changes(&mut changes, name, old_value, Some(new_value));
             continue;
         }
 
@@ -711,17 +712,17 @@ pub(crate) fn raw_property_changes(
     }
 
     // Check for removed properties
-    for (name, old_value) in &old_inst.properties {
-        if config.ignore_properties.contains(name.as_str()) {
+    for (name, old_value) in old_inst.properties() {
+        if config.ignore_properties.contains(name) {
             continue;
         }
-        if !should_compare_property(old_inst.class.as_str(), name) {
+        if !should_compare_property(old_inst.class(), name) {
             continue;
         }
         if !visited.contains(name) {
             // Container property removed entirely: granular removals per key
-            if name.as_str() == "Attributes" || name.as_str() == "Tags" {
-                expand_container_changes(&mut changes, name.as_str(), Some(old_value), None);
+            if name == "Attributes" || name == "Tags" {
+                expand_container_changes(&mut changes, name, Some(old_value), None);
                 continue;
             }
             // Property only in old — skip if it's just a default value
@@ -747,8 +748,8 @@ pub(crate) fn raw_property_changes(
 /// Detects name changes (inst.name is separate from inst.properties) and
 /// converts raw variants into display-oriented PropertyValues.
 fn diff_properties(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_ref: Ref,
     new_ref: Ref,
     config: &DiffConfig,
@@ -761,14 +762,14 @@ fn diff_properties(
 
     let mut changes = Vec::new();
 
-    if old_inst.name != new_inst.name {
+    if old_inst.name() != new_inst.name() {
         changes.push(PropertyChange {
             name: "Name".to_string(),
             old_value: Some(PropertyValue::String {
-                value: old_inst.name.clone(),
+                value: old_inst.name().to_string(),
             }),
             new_value: Some(PropertyValue::String {
-                value: new_inst.name.clone(),
+                value: new_inst.name().to_string(),
             }),
         });
     }
@@ -814,22 +815,22 @@ fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
 /// DataModel-class root too, and top-level model content (Parts, Models, ...)
 /// must still diff normally.
 pub(crate) fn is_studio_artifact(
-    dom: &WeakDom,
+    dom: &dyn DomView,
     parent_ref: Ref,
-    inst: &rbx_dom_weak::Instance,
+    inst: InstanceView<'_>,
 ) -> bool {
     let parent = match dom.get_by_ref(parent_ref) {
         Some(p) => p,
         None => return false,
     };
     // The rbx-diff conflict container is tool metadata, never content
-    if inst.name == crate::conflict_file::CONTAINER_NAME {
+    if inst.name() == crate::conflict_file::CONTAINER_NAME {
         return true;
     }
-    if parent_ref != dom.root_ref() || parent.class.as_str() != "DataModel" {
+    if parent_ref != dom.root_ref() || parent.class() != "DataModel" {
         return false;
     }
-    let class_name = inst.class.as_str();
+    let class_name = inst.class();
     if class_name == "Instance" {
         return true; // Studio's FilteredSelection objects
     }
@@ -858,8 +859,8 @@ fn is_default_value(
 /// Compare two variants for equality. Ref values use the global identity map;
 /// other values use the shared strict floating-point policy above.
 fn variants_equal(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     a: &Variant,
     b: &Variant,
     ref_mapping: &HashMap<Ref, Ref>,
@@ -884,8 +885,8 @@ fn variants_equal(
 /// Uses the ref mapping first (covers matched instances that may have changed content),
 /// falls back to deep hash comparison for refs into pruned (identical) subtrees.
 fn refs_equal(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_target: Ref,
     new_target: Ref,
     ref_mapping: &HashMap<Ref, Ref>,

@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::diff::{is_studio_artifact, raw_property_changes, DiffConfig};
+use crate::diff_dom::DomView;
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::Matcher;
 use crate::move_detect::detect_moves;
@@ -83,12 +84,12 @@ pub fn compute_edit_script(
 /// Frame normalization needs this mapping before it rewrites representation;
 /// avoiding the edit-emission pass matters for large place-file diffs.
 pub(crate) fn compute_instance_identity(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     config: &DiffConfig,
 ) -> InstanceIdentity {
-    let old_hashes = LazyHashCache::new(old_dom);
-    let new_hashes = LazyHashCache::new(new_dom);
+    let old_hashes = LazyHashCache::new_view(old_dom);
+    let new_hashes = LazyHashCache::new_view(new_dom);
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
     let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
     let matcher = Matcher::new(
@@ -99,13 +100,54 @@ pub(crate) fn compute_instance_identity(
         &old_deep,
         &new_deep,
     );
-    discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep)
+    discover_identity_once(&matcher, old_dom, new_dom, &old_deep, &new_deep)
+}
+
+fn discover_identity_once(
+    matcher: &Matcher<'_>,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
+) -> InstanceIdentity {
+    let mut matched = HashMap::new();
+    let mut removed_roots = Vec::new();
+    let mut added_roots = Vec::new();
+    build_full_mapping_once(
+        matcher,
+        old_dom.root_ref(),
+        new_dom.root_ref(),
+        &mut matched,
+        &mut removed_roots,
+        &mut added_roots,
+    );
+
+    let moves = detect_moves(
+        old_dom,
+        new_dom,
+        removed_roots,
+        added_roots,
+        old_deep,
+        new_deep,
+    );
+    for (old_root, new_root) in &moves {
+        matched.insert(*old_root, *new_root);
+        build_full_mapping_once(
+            matcher,
+            *old_root,
+            *new_root,
+            &mut matched,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+    }
+    InstanceIdentity { matched, moves }
 }
 
 fn discover_identity(
     matcher: &Matcher<'_>,
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_deep: &DeepHashCache,
     new_deep: &DeepHashCache,
 ) -> InstanceIdentity {
@@ -259,7 +301,33 @@ fn build_full_mapping(
     }
 }
 
-fn new_side_depth(new_dom: &WeakDom, mut referent: Ref) -> usize {
+/// One-shot variant used by frame discovery. Unlike `build_full_mapping`, it
+/// does not populate the matcher's parent-pair cache.
+fn build_full_mapping_once(
+    matcher: &Matcher<'_>,
+    old_ref: Ref,
+    new_ref: Ref,
+    mapping: &mut HashMap<Ref, Ref>,
+    removed_roots: &mut Vec<Ref>,
+    added_roots: &mut Vec<Ref>,
+) {
+    let result = matcher.match_children_once(old_ref, new_ref);
+    removed_roots.extend_from_slice(&result.removed);
+    added_roots.extend_from_slice(&result.added);
+    for (old_child, new_child) in result.matched {
+        mapping.insert(old_child, new_child);
+        build_full_mapping_once(
+            matcher,
+            old_child,
+            new_child,
+            mapping,
+            removed_roots,
+            added_roots,
+        );
+    }
+}
+
+fn new_side_depth(new_dom: &dyn DomView, mut referent: Ref) -> usize {
     let mut depth = 0;
     while let Some(inst) = new_dom.get_by_ref(referent) {
         referent = inst.parent();
@@ -327,10 +395,10 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
     let old_inst = old_dom.get_by_ref(old_ref).unwrap();
     let new_inst = new_dom.get_by_ref(new_ref).unwrap();
 
-    if old_inst.name != new_inst.name {
+    if old_inst.name() != new_inst.name() {
         ops.push(EditOp::SetName {
             old_ref,
-            name: new_inst.name.clone(),
+            name: new_inst.name().to_string(),
         });
     }
 

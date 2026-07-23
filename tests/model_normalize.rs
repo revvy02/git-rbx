@@ -1,6 +1,7 @@
 use rbx_diff::{
+    diff_doms, diff_model_compact_doms_with_config, diff_model_compact_old_with_config,
     diff_model_doms_with_config, merge_doms, normalize_model_dom_to_base,
-    normalize_model_merge_frames, ConflictKind, DiffConfig, DiffEntry, ModelFrameDecision,
+    normalize_model_merge_frames, ConflictKind, DiffConfig, DiffDom, DiffEntry, ModelFrameDecision,
 };
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Matrix3, Variant, Vector3};
@@ -240,6 +241,57 @@ fn two_way_diff_collapses_nested_movement_into_one_frame_entry() {
         }
         other => panic!("expected one model frame, got {other:#?}"),
     }
+}
+
+#[test]
+fn compact_old_side_preserves_hierarchical_diff_semantics() {
+    let base = nested_majority_asset(0.0);
+    let compact_base = DiffDom::from_weak_dom(&base);
+    let mut weak_side = nested_majority_asset(100.0);
+    let mut compact_side = nested_majority_asset(100.0);
+    let mut all_compact_side = DiffDom::from_weak_dom_owned(nested_majority_asset(100.0));
+
+    let (weak_diffs, weak_frames) =
+        diff_model_doms_with_config(&base, &mut weak_side, &DiffConfig::default());
+    let (compact_diffs, compact_frames) = diff_model_compact_old_with_config(
+        &compact_base,
+        &mut compact_side,
+        &DiffConfig::default(),
+    );
+    let (all_compact_diffs, all_compact_frames) = diff_model_compact_doms_with_config(
+        &compact_base,
+        &mut all_compact_side,
+        &DiffConfig::default(),
+    );
+
+    let without_source_refs = |diffs: &[DiffEntry]| {
+        let mut value = serde_json::to_value(diffs).unwrap();
+        for entry in value.as_array_mut().unwrap() {
+            let entry = entry.as_object_mut().unwrap();
+            entry.remove("old_ref");
+            entry.remove("new_ref");
+        }
+        value
+    };
+    assert_eq!(
+        without_source_refs(&compact_diffs),
+        without_source_refs(&weak_diffs)
+    );
+    assert_eq!(
+        without_source_refs(&all_compact_diffs),
+        without_source_refs(&weak_diffs)
+    );
+    assert_eq!(
+        compact_frames.as_ref().map(|frames| frames.frames.len()),
+        weak_frames.as_ref().map(|frames| frames.frames.len())
+    );
+    assert_eq!(
+        all_compact_frames
+            .as_ref()
+            .map(|frames| frames.frames.len()),
+        weak_frames.as_ref().map(|frames| frames.frames.len())
+    );
+    assert!(diff_doms(&weak_side, &compact_side).is_empty());
 }
 
 #[test]

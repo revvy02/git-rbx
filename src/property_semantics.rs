@@ -11,6 +11,42 @@ use rbx_types::{ContentType, Variant};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
+use crate::diff_dom::InstanceView;
+
+pub(crate) trait InstanceRead {
+    fn name(&self) -> &str;
+    fn class(&self) -> &str;
+    fn property(&self, name: &str) -> Option<&Variant>;
+}
+
+impl InstanceRead for Instance {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn class(&self) -> &str {
+        self.class.as_str()
+    }
+
+    fn property(&self, name: &str) -> Option<&Variant> {
+        self.properties.get(&name.into())
+    }
+}
+
+impl InstanceRead for InstanceView<'_> {
+    fn name(&self) -> &str {
+        (*self).name()
+    }
+
+    fn class(&self) -> &str {
+        (*self).class()
+    }
+
+    fn property(&self, name: &str) -> Option<&Variant> {
+        (*self).property(name)
+    }
+}
+
 /// Studio rewrites equivalent asset URL spellings on save. Canonicalize them
 /// before using content IDs for equality, hashing, or identity.
 pub(crate) fn normalize_asset_uri(uri: &str) -> String {
@@ -201,12 +237,12 @@ fn content_uri(value: &Variant) -> Option<&str> {
 
 /// A strong, placement-independent clue for distinguishing ambiguous peers.
 /// It is not permanent identity: an anchored instance may change this value.
-pub(crate) fn strong_content_key(instance: &Instance) -> Option<String> {
-    let semantics = class_semantics(instance.class.as_str())?;
+pub(crate) fn strong_content_key(instance: &(impl InstanceRead + ?Sized)) -> Option<String> {
+    let semantics = class_semantics(instance.class())?;
     let identity_property = semantics
         .content_key_properties
         .iter()
-        .find_map(|name| instance.properties.get(&(*name).into()))?;
+        .find_map(|name| instance.property(name))?;
     let uri = content_uri(identity_property)?;
     if uri.is_empty() {
         return None;
@@ -229,12 +265,16 @@ pub(crate) enum PairingBasis {
     ContentPreservingRename,
 }
 
-pub(crate) fn pairing_compatible(old: &Instance, new: &Instance, basis: PairingBasis) -> bool {
-    if old.class != new.class {
+pub(crate) fn pairing_compatible(
+    old: &(impl InstanceRead + ?Sized),
+    new: &(impl InstanceRead + ?Sized),
+    basis: PairingBasis,
+) -> bool {
+    if old.class() != new.class() {
         return false;
     }
     match basis {
-        PairingBasis::AnchoredName => old.name == new.name,
+        PairingBasis::AnchoredName => old.name() == new.name(),
         PairingBasis::ExactContent | PairingBasis::ContentPreservingRename => true,
         PairingBasis::Inferred => strong_content_key(old) == strong_content_key(new),
     }
@@ -255,14 +295,14 @@ pub(crate) fn semantic_property_bundle(
 /// a branch happened to emit. Asset aliases collapse through the normalized
 /// content key; the remaining support properties use normal semantic equality.
 pub(crate) fn semantic_bundle_values_equal(
-    old: &Instance,
-    new: &Instance,
+    old: &(impl InstanceRead + ?Sized),
+    new: &(impl InstanceRead + ?Sized),
     bundle: SemanticPropertyBundle,
 ) -> bool {
-    if old.class != new.class {
+    if old.class() != new.class() {
         return false;
     }
-    let content_key_properties = class_semantics(old.class.as_str())
+    let content_key_properties = class_semantics(old.class())
         .map(|semantics| semantics.content_key_properties)
         .unwrap_or_default();
     if bundle
@@ -279,8 +319,8 @@ pub(crate) fn semantic_bundle_values_equal(
         .iter()
         .filter(|property| !content_key_properties.contains(property))
         .all(|property| {
-            let old_value = old.properties.get(&(*property).into());
-            let new_value = new.properties.get(&(*property).into());
+            let old_value = old.property(property);
+            let new_value = new.property(property);
             match (old_value, new_value) {
                 (Some(old_value), Some(new_value)) => {
                     crate::value_compare::non_ref_variants_equal(old_value, new_value)

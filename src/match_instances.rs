@@ -10,12 +10,13 @@
 //!    - Pass 5: Positional fallback only within the same identity class
 //! 3. Content-preserving class fallback for remaining unmatched renames
 
-use rbx_dom_weak::{types::Ref, WeakDom};
+use rbx_dom_weak::types::Ref;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use tracing::{debug, info};
 
+use crate::diff_dom::{DomView, InstanceView};
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::property_semantics::{
     get_authored_properties, pairing_compatible, strong_content_key, PairingBasis,
@@ -25,8 +26,8 @@ use crate::value_compare::non_ref_variants_equal;
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
 
 fn refs_compatible(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_ref: Ref,
     new_ref: Ref,
     basis: PairingBasis,
@@ -34,20 +35,17 @@ fn refs_compatible(
     let (Some(old), Some(new)) = (old_dom.get_by_ref(old_ref), new_dom.get_by_ref(new_ref)) else {
         return false;
     };
-    pairing_compatible(old, new, basis)
+    pairing_compatible(&old, &new, basis)
 }
 
-fn tolerant_non_ref_properties_equal(
-    old: &rbx_dom_weak::Instance,
-    new: &rbx_dom_weak::Instance,
-) -> bool {
-    let authored = get_authored_properties(old.class.as_str());
+fn tolerant_non_ref_properties_equal(old: InstanceView<'_>, new: InstanceView<'_>) -> bool {
+    let authored = get_authored_properties(old.class());
 
-    for (name, old_value) in &old.properties {
-        if !authored.contains(name.as_str()) || matches!(old_value, rbx_types::Variant::Ref(_)) {
+    for (name, old_value) in old.properties() {
+        if !authored.contains(name) || matches!(old_value, rbx_types::Variant::Ref(_)) {
             continue;
         }
-        let Some(new_value) = new.properties.get(name) else {
+        let Some(new_value) = new.property(name) else {
             return false;
         };
         if matches!(new_value, rbx_types::Variant::Ref(_))
@@ -56,11 +54,11 @@ fn tolerant_non_ref_properties_equal(
             return false;
         }
     }
-    for (name, new_value) in &new.properties {
-        if !authored.contains(name.as_str()) || matches!(new_value, rbx_types::Variant::Ref(_)) {
+    for (name, new_value) in new.properties() {
+        if !authored.contains(name) || matches!(new_value, rbx_types::Variant::Ref(_)) {
             continue;
         }
-        if !old.properties.contains_key(name) {
+        if old.property(name).is_none() {
             return false;
         }
     }
@@ -82,8 +80,8 @@ pub struct MatchResult {
 /// from every recursive call, this memoizes each parent-pair result so mapping,
 /// diff, and edit-script walks reuse the exact same identity decisions.
 pub(crate) struct Matcher<'a> {
-    old_dom: &'a WeakDom,
-    new_dom: &'a WeakDom,
+    old_dom: &'a dyn DomView,
+    new_dom: &'a dyn DomView,
     old_hashes: &'a LazyHashCache<'a>,
     new_hashes: &'a LazyHashCache<'a>,
     old_deep: &'a DeepHashCache<'a>,
@@ -98,8 +96,8 @@ pub(crate) struct Matcher<'a> {
 
 impl<'a> Matcher<'a> {
     pub(crate) fn new(
-        old_dom: &'a WeakDom,
-        new_dom: &'a WeakDom,
+        old_dom: &'a dyn DomView,
+        new_dom: &'a dyn DomView,
         old_hashes: &'a LazyHashCache<'a>,
         new_hashes: &'a LazyHashCache<'a>,
         old_deep: &'a DeepHashCache<'a>,
@@ -155,11 +153,22 @@ impl<'a> Matcher<'a> {
         result
     }
 
-    pub(crate) fn old_dom(&self) -> &'a WeakDom {
+    /// Match one parent pair without retaining the result.
+    ///
+    /// Complete identity discovery visits every matched parent exactly once.
+    /// Caching those results keeps one `Rc<MatchResult>` allocation per
+    /// instance alive until the whole walk finishes, despite there being no
+    /// second consumer. The ordinary diff/edit passes still use
+    /// `match_children`, because they intentionally revisit parent pairs.
+    pub(crate) fn match_children_once(&self, old_parent: Ref, new_parent: Ref) -> MatchResult {
+        compute_child_matches(self, old_parent, new_parent)
+    }
+
+    pub(crate) fn old_dom(&self) -> &'a dyn DomView {
         self.old_dom
     }
 
-    pub(crate) fn new_dom(&self) -> &'a WeakDom {
+    pub(crate) fn new_dom(&self) -> &'a dyn DomView {
         self.new_dom
     }
 
@@ -188,12 +197,11 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     // Build list of old children with their info (no hash computed yet)
     let old_children: Vec<_> = old_parent_inst
         .children()
-        .iter()
-        .filter_map(|&r| {
+        .filter_map(|r| {
             old_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
-                name: inst.name.clone(),
-                class: inst.class.to_string(),
+                name: inst.name().to_string(),
+                class: inst.class().to_string(),
             })
         })
         .collect();
@@ -201,12 +209,11 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     // Build list of new children (no hash computed yet)
     let new_children: Vec<_> = new_parent_inst
         .children()
-        .iter()
-        .filter_map(|&r| {
+        .filter_map(|r| {
             new_dom.get_by_ref(r).map(|inst| ChildInfo {
                 referent: r,
-                name: inst.name.clone(),
-                class: inst.class.to_string(),
+                name: inst.name().to_string(),
+                class: inst.class().to_string(),
             })
         })
         .collect();
@@ -443,14 +450,14 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             .filter(|&&old_idx| !old_matched[old_idx])
             .filter_map(|&old_idx| {
                 let instance = old_dom.get_by_ref(old_children[old_idx].referent)?;
-                strong_content_key(instance).map(|identity| (old_idx, identity))
+                strong_content_key(&instance).map(|identity| (old_idx, identity))
             })
             .collect();
         let new_identities: HashMap<usize, String> = still_remaining
             .iter()
             .filter_map(|&new_idx| {
                 let instance = new_dom.get_by_ref(new_children[new_idx].referent)?;
-                strong_content_key(instance).map(|identity| (new_idx, identity))
+                strong_content_key(&instance).map(|identity| (new_idx, identity))
             })
             .collect();
         let mut old_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -522,7 +529,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                     for &new_idx in &still_remaining {
                         let old_inst = old_dom.get_by_ref(old_children[old_idx].referent).unwrap();
                         let new_inst = new_dom.get_by_ref(new_children[new_idx].referent).unwrap();
-                        if pairing_compatible(old_inst, new_inst, PairingBasis::Inferred)
+                        if pairing_compatible(&old_inst, &new_inst, PairingBasis::Inferred)
                             && tolerant_non_ref_properties_equal(old_inst, new_inst)
                         {
                             edges.push((old_idx, new_idx));
@@ -586,7 +593,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         if pass2_count > 0 || identity_count > 0 || tolerant_count > 0 || positional_count > 0 {
             let parent_name = old_dom
                 .get_by_ref(old_parent)
-                .map(|i| i.name.as_str())
+                .map(|i| i.name())
                 .unwrap_or("?");
             debug!(
                 parent = parent_name,
@@ -749,7 +756,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     if class_fallback_count > 0 {
         let parent_name = old_dom
             .get_by_ref(old_parent)
-            .map(|i| i.name.as_str())
+            .map(|i| i.name())
             .unwrap_or("?");
         debug!(
             parent = parent_name,
@@ -777,7 +784,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     if old_count + new_count > 10 {
         let parent_name = old_dom
             .get_by_ref(old_parent)
-            .map(|i| i.name.as_str())
+            .map(|i| i.name())
             .unwrap_or("?");
         info!(
             parent = parent_name,
@@ -793,7 +800,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     } else if hash_tiebreaks > 0 {
         let parent_name = old_dom
             .get_by_ref(old_parent)
-            .map(|i| i.name.as_str())
+            .map(|i| i.name())
             .unwrap_or("?");
         debug!(
             parent = parent_name,
@@ -818,14 +825,14 @@ struct ChildInfo {
 }
 
 /// Get the full path of an instance (e.g., "Workspace.Map.Building1")
-pub fn get_instance_path(dom: &WeakDom, referent: Ref) -> String {
+pub(crate) fn get_instance_path(dom: &dyn DomView, referent: Ref) -> String {
     let mut parts = Vec::new();
     let mut current = referent;
 
     while let Some(inst) = dom.get_by_ref(current) {
         // Skip the DataModel root
-        if inst.class.as_str() != "DataModel" {
-            parts.push(inst.name.to_string());
+        if inst.class() != "DataModel" {
+            parts.push(inst.name().to_string());
         }
         let parent = inst.parent();
         if parent.is_none() {

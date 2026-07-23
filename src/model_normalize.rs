@@ -56,6 +56,7 @@ use rbx_types::{CFrame, Variant};
 use std::collections::{HashMap, HashSet};
 
 use crate::diff::DiffConfig;
+use crate::diff_dom::{DescendantRefs, DomView, DomViewMut};
 use crate::dom_utils::class_is_a;
 use crate::edit_script::{
     compute_edit_script, compute_instance_identity, EditOp, EditScript, InstanceIdentity,
@@ -251,9 +252,9 @@ fn collect_matches(
     }
 }
 
-fn matched_refs(base: &WeakDom, side: &WeakDom) -> Vec<(Ref, Ref)> {
-    let base_hashes = LazyHashCache::new(base);
-    let side_hashes = LazyHashCache::new(side);
+fn matched_refs(base: &dyn DomView, side: &dyn DomView) -> Vec<(Ref, Ref)> {
+    let base_hashes = LazyHashCache::new_view(base);
+    let side_hashes = LazyHashCache::new_view(side);
     let ignored = HashSet::new();
     let base_deep = DeepHashCache::new(base, &ignored);
     let side_deep = DeepHashCache::new(side, &ignored);
@@ -270,36 +271,33 @@ fn matched_refs(base: &WeakDom, side: &WeakDom) -> Vec<(Ref, Ref)> {
     matches
 }
 
-fn cframe_property(dom: &WeakDom, referent: Ref) -> Option<CFrame> {
+fn cframe_property(dom: &dyn DomView, referent: Ref) -> Option<CFrame> {
     let instance = dom.get_by_ref(referent)?;
-    match instance.properties.get(&"CFrame".into()) {
+    match instance.property("CFrame") {
         Some(Variant::CFrame(cframe)) => Some(*cframe),
         _ => None,
     }
 }
 
-fn pivot_property(dom: &WeakDom, referent: Ref) -> Option<CFrame> {
+fn pivot_property(dom: &dyn DomView, referent: Ref) -> Option<CFrame> {
     let instance = dom.get_by_ref(referent)?;
-    if !class_is_a(instance.class.as_str(), "Model")
-        || class_is_a(instance.class.as_str(), "WorldRoot")
-    {
+    if !class_is_a(instance.class(), "Model") || class_is_a(instance.class(), "WorldRoot") {
         return None;
     }
-    match instance.properties.get(&"WorldPivotData".into()) {
+    match instance.property("WorldPivotData") {
         Some(Variant::OptionalCFrame(Some(cframe))) => Some(*cframe),
         _ => None,
     }
 }
 
-fn is_model_boundary(dom: &WeakDom, referent: Ref) -> bool {
+fn is_model_boundary(dom: &dyn DomView, referent: Ref) -> bool {
     dom.get_by_ref(referent).is_some_and(|instance| {
-        class_is_a(instance.class.as_str(), "Model")
-            && !class_is_a(instance.class.as_str(), "WorldRoot")
+        class_is_a(instance.class(), "Model") && !class_is_a(instance.class(), "WorldRoot")
     })
 }
 
 fn add_boundary_subtree(
-    dom: &WeakDom,
+    dom: &dyn DomView,
     referent: Ref,
     parent_boundary: Option<usize>,
     boundaries: &mut Vec<Boundary>,
@@ -332,22 +330,25 @@ fn add_boundary_subtree(
     let Some(instance) = dom.get_by_ref(referent) else {
         return;
     };
-    for &child in instance.children() {
+    for child in instance.children() {
         add_boundary_subtree(dom, child, active, boundaries, boundary_by_base_ref, false);
     }
 }
 
-fn boundary_definitions(base: &WeakDom) -> (Vec<Boundary>, HashMap<Ref, usize>) {
+fn boundary_definitions(base: &dyn DomView) -> (Vec<Boundary>, HashMap<Ref, usize>) {
     let mut boundaries = Vec::new();
     let mut by_ref = HashMap::new();
-    for &child in base.root().children() {
+    let Some(root) = base.get_by_ref(base.root_ref()) else {
+        return (boundaries, by_ref);
+    };
+    for child in root.children() {
         add_boundary_subtree(base, child, None, &mut boundaries, &mut by_ref, true);
     }
     (boundaries, by_ref)
 }
 
 fn nearest_boundary(
-    base: &WeakDom,
+    base: &dyn DomView,
     mut referent: Ref,
     boundary_by_ref: &HashMap<Ref, usize>,
 ) -> Option<usize> {
@@ -444,8 +445,8 @@ fn select_candidate(
 }
 
 fn detect_hierarchy_from_matches(
-    base: &WeakDom,
-    side: &WeakDom,
+    base: &dyn DomView,
+    side: &dyn DomView,
     matches: Vec<(Ref, Ref)>,
 ) -> HierarchyDetection {
     let base_to_side: HashMap<Ref, Ref> = matches.iter().copied().collect();
@@ -476,8 +477,8 @@ fn detect_hierarchy_from_matches(
         else {
             continue;
         };
-        if !class_is_a(base_instance.class.as_str(), "BasePart")
-            || !class_is_a(side_instance.class.as_str(), "BasePart")
+        if !class_is_a(base_instance.class(), "BasePart")
+            || !class_is_a(side_instance.class(), "BasePart")
         {
             continue;
         }
@@ -537,22 +538,22 @@ fn detect_hierarchy_from_matches(
     }
 }
 
-fn detect_hierarchy(base: &WeakDom, side: &WeakDom) -> HierarchyDetection {
+fn detect_hierarchy(base: &dyn DomView, side: &dyn DomView) -> HierarchyDetection {
     detect_hierarchy_from_matches(base, side, matched_refs(base, side))
 }
 
-fn ordered_matches(base: &WeakDom, matched: &HashMap<Ref, Ref>) -> Vec<(Ref, Ref)> {
-    base.descendants()
-        .filter_map(|instance| {
+fn ordered_matches(base: &dyn DomView, matched: &HashMap<Ref, Ref>) -> Vec<(Ref, Ref)> {
+    DescendantRefs::new(base)
+        .filter_map(|referent| {
             matched
-                .get(&instance.referent())
+                .get(&referent)
                 .copied()
-                .map(|side_ref| (instance.referent(), side_ref))
+                .map(|side_ref| (referent, side_ref))
         })
         .collect()
 }
 
-fn transform_world_refs(dom: &mut WeakDom, refs: Vec<(Ref, Rigid)>) {
+fn transform_world_refs(dom: &mut dyn DomViewMut, refs: Vec<(Ref, Rigid)>) {
     for (referent, alignment) in refs {
         // Rewriting a CFrame through an identity f64 round-trip can still
         // change its exact f32 representation. Besides being needless, doing
@@ -561,81 +562,86 @@ fn transform_world_refs(dom: &mut WeakDom, refs: Vec<(Ref, Rigid)>) {
         if Rigid::close(&alignment, &Rigid::identity()) {
             continue;
         }
-        let Some(instance) = dom.get_by_ref_mut(referent) else {
-            continue;
-        };
-
-        if class_is_a(instance.class.as_str(), "BasePart") {
-            if let Some(Variant::CFrame(cframe)) = instance.properties.get(&"CFrame".into()) {
-                let normalized = alignment.mul(Rigid::from_cframe(cframe)).to_cframe();
-                instance
-                    .properties
-                    .insert("CFrame".into(), Variant::CFrame(normalized));
-            }
-        }
-
-        if class_is_a(instance.class.as_str(), "Model")
-            && !class_is_a(instance.class.as_str(), "WorldRoot")
-        {
-            if let Some(Variant::OptionalCFrame(Some(cframe))) =
-                instance.properties.get(&"WorldPivotData".into())
+        let replacement = {
+            let Some(instance) = dom.get_by_ref(referent) else {
+                continue;
+            };
+            if class_is_a(instance.class(), "BasePart") {
+                match instance.property("CFrame") {
+                    Some(Variant::CFrame(cframe)) => Some((
+                        "CFrame",
+                        Variant::CFrame(alignment.mul(Rigid::from_cframe(cframe)).to_cframe()),
+                    )),
+                    _ => None,
+                }
+            } else if class_is_a(instance.class(), "Model")
+                && !class_is_a(instance.class(), "WorldRoot")
             {
-                let normalized = alignment.mul(Rigid::from_cframe(cframe)).to_cframe();
-                instance.properties.insert(
-                    "WorldPivotData".into(),
-                    Variant::OptionalCFrame(Some(normalized)),
-                );
+                match instance.property("WorldPivotData") {
+                    Some(Variant::OptionalCFrame(Some(cframe))) => Some((
+                        "WorldPivotData",
+                        Variant::OptionalCFrame(Some(
+                            alignment.mul(Rigid::from_cframe(cframe)).to_cframe(),
+                        )),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
             }
+        };
+        if let Some((name, value)) = replacement {
+            let updated = dom.set_existing_property(referent, name, value);
+            debug_assert!(updated);
         }
     }
 }
 
-fn snapshot_world_properties(dom: &WeakDom) -> Vec<(Ref, &'static str, Variant)> {
+fn snapshot_world_properties(dom: &dyn DomView) -> Vec<(Ref, &'static str, Variant)> {
     let mut snapshot = Vec::new();
-    for instance in dom.descendants() {
-        if class_is_a(instance.class.as_str(), "BasePart") {
-            if let Some(value) = instance.properties.get(&"CFrame".into()) {
-                snapshot.push((instance.referent(), "CFrame", value.clone()));
+    for referent in DescendantRefs::new(dom) {
+        let instance = dom
+            .get_by_ref(referent)
+            .expect("DomView descendant disappeared while taking frame snapshot");
+        if class_is_a(instance.class(), "BasePart") {
+            if let Some(value) = instance.property("CFrame") {
+                snapshot.push((referent, "CFrame", value.clone()));
             }
         }
-        if class_is_a(instance.class.as_str(), "Model")
-            && !class_is_a(instance.class.as_str(), "WorldRoot")
-        {
-            if let Some(value) = instance.properties.get(&"WorldPivotData".into()) {
-                snapshot.push((instance.referent(), "WorldPivotData", value.clone()));
+        if class_is_a(instance.class(), "Model") && !class_is_a(instance.class(), "WorldRoot") {
+            if let Some(value) = instance.property("WorldPivotData") {
+                snapshot.push((referent, "WorldPivotData", value.clone()));
             }
         }
     }
     snapshot
 }
 
-fn restore_world_properties(dom: &mut WeakDom, snapshot: Vec<(Ref, &'static str, Variant)>) {
+fn restore_world_properties(dom: &mut dyn DomViewMut, snapshot: Vec<(Ref, &'static str, Variant)>) {
     for (referent, property, value) in snapshot {
-        if let Some(instance) = dom.get_by_ref_mut(referent) {
-            instance.properties.insert(property.into(), value);
-        }
+        let updated = dom.set_existing_property(referent, property, value);
+        debug_assert!(updated);
     }
 }
 
-fn transform_world_properties_below(dom: &mut WeakDom, root: Ref, alignment: Rigid) {
+fn transform_world_properties_below(dom: &mut dyn DomViewMut, root: Ref, alignment: Rigid) {
     let mut pending = vec![root];
     let mut refs = Vec::new();
     while let Some(referent) = pending.pop() {
         let Some(instance) = dom.get_by_ref(referent) else {
             continue;
         };
-        pending.extend(instance.children().iter().copied());
+        pending.extend(instance.children());
         refs.push((referent, alignment));
     }
     transform_world_refs(dom, refs);
 }
 
-fn canonicalize_side(dom: &mut WeakDom, detection: &HierarchyDetection) {
+fn canonicalize_side(dom: &mut dyn DomViewMut, detection: &HierarchyDetection) {
     let mut pending: Vec<(Ref, Option<Rigid>)> = dom
-        .root()
-        .children()
-        .iter()
-        .copied()
+        .get_by_ref(dom.root_ref())
+        .into_iter()
+        .flat_map(|root| root.children())
         .map(|referent| (referent, None))
         .collect();
     let mut refs = Vec::new();
@@ -648,13 +654,7 @@ fn canonicalize_side(dom: &mut WeakDom, detection: &HierarchyDetection) {
         let Some(instance) = dom.get_by_ref(referent) else {
             continue;
         };
-        pending.extend(
-            instance
-                .children()
-                .iter()
-                .copied()
-                .map(|child| (child, active)),
-        );
+        pending.extend(instance.children().map(|child| (child, active)));
         if let Some(frame) = active {
             refs.push((referent, frame.inverse()));
         }
@@ -678,7 +678,11 @@ fn root_prefixes(detection: &HierarchyDetection) -> Vec<Rigid> {
     prefixes
 }
 
-fn canonicalize_roots(dom: &mut WeakDom, detection: &HierarchyDetection, prefixes: &[Rigid]) {
+fn canonicalize_roots(
+    dom: &mut dyn DomViewMut,
+    detection: &HierarchyDetection,
+    prefixes: &[Rigid],
+) {
     for (index, boundary) in detection.boundaries.iter().enumerate() {
         if boundary.parent.is_some() {
             continue;
@@ -807,9 +811,19 @@ fn identity_frame() -> CFrame {
 /// identity can be established. The resulting identity is then frozen while
 /// nested frames are removed.
 pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option<ModelFrameDiff> {
-    let initial_identity = compute_instance_identity(base, side, &DiffConfig::default());
-    let initial =
-        detect_hierarchy_from_matches(base, side, ordered_matches(base, &initial_identity.matched));
+    normalize_model_diff_frames_view(base, side)
+}
+
+pub(crate) fn normalize_model_diff_frames_view(
+    base: &dyn DomView,
+    side: &mut dyn DomViewMut,
+) -> Option<ModelFrameDiff> {
+    let initial_identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
+    let initial = detect_hierarchy_from_matches(
+        base,
+        side.as_view(),
+        ordered_matches(base, &initial_identity.matched),
+    );
     let prefixes = root_prefixes(&initial);
     let roots_changed = initial
         .boundaries
@@ -824,11 +838,14 @@ pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option
     // second place-wide boundary tree and world-property snapshot. Only a
     // changed serialized root requires mutation, rematching, and restoration.
     let (identity, mut detection, mut raw) = if roots_changed {
-        let raw = snapshot_world_properties(side);
+        let raw = snapshot_world_properties(side.as_view());
         canonicalize_roots(side, &initial, &prefixes);
-        let identity = compute_instance_identity(base, side, &DiffConfig::default());
-        let detection =
-            detect_hierarchy_from_matches(base, side, ordered_matches(base, &identity.matched));
+        let identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
+        let detection = detect_hierarchy_from_matches(
+            base,
+            side.as_view(),
+            ordered_matches(base, &identity.matched),
+        );
         (identity, detection, Some(raw))
     } else {
         (initial_identity, initial, None)
@@ -853,7 +870,7 @@ pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option
         frames.push(ModelFrameChange {
             base_ref: boundary.base_ref,
             side_ref,
-            path: get_instance_path(side, side_ref),
+            path: get_instance_path(side.as_view(), side_ref),
             order,
             parent_order,
             delta: local,

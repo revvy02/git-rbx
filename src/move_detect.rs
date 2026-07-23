@@ -19,11 +19,12 @@
 //! variants include the name).
 
 use blake3::Hasher;
-use rbx_dom_weak::{types::Ref, WeakDom};
+use rbx_dom_weak::types::Ref;
 use rbx_types::Variant;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
+use crate::diff_dom::{DomView, InstanceView};
 use crate::hash::{hash_variant, DeepHashCache};
 use crate::property_semantics::{get_authored_properties, pairing_compatible, PairingBasis};
 
@@ -37,8 +38,8 @@ const MAX_PAIRWISE: usize = 100_000;
 /// Pair removed/added subtree roots into moves: (old_ref, new_ref).
 /// Unpaired roots stay removed/added; the diff pass re-derives and reports them.
 pub fn detect_moves(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     removed: Vec<Ref>,
     added: Vec<Ref>,
     old_deep: &DeepHashCache,
@@ -68,14 +69,7 @@ pub fn detect_moves(
         };
 
         // Pass A: exact deep-hash over roots (pure moves)
-        pair_by_exact_hash(
-            &matcher,
-            &removed,
-            &added,
-            &can_old,
-            &can_new,
-            &mut on_pair,
-        );
+        pair_by_exact_hash(&matcher, &removed, &added, &can_old, &can_new, &mut on_pair);
     }
     let pass_a_count = moves.len();
 
@@ -89,14 +83,7 @@ pub fn detect_moves(
         };
 
         // Pass B: same (name, class) similarity over roots (move + edit)
-        pair_by_similarity(
-            &matcher,
-            &removed,
-            &added,
-            &can_old,
-            &can_new,
-            &mut on_pair,
-        );
+        pair_by_similarity(&matcher, &removed, &added, &can_old, &can_new, &mut on_pair);
     }
     let pass_b_count = moves.len() - pass_a_count;
 
@@ -193,8 +180,8 @@ pub fn detect_moves(
 /// hash access together makes it impossible for exact and similarity paths to
 /// accidentally consult different compatibility inputs.
 struct MoveMatcher<'a> {
-    old_dom: &'a WeakDom,
-    new_dom: &'a WeakDom,
+    old_dom: &'a dyn DomView,
+    new_dom: &'a dyn DomView,
     old_deep: &'a DeepHashCache<'a>,
     new_deep: &'a DeepHashCache<'a>,
 }
@@ -209,7 +196,7 @@ struct Claims {
 }
 
 impl Claims {
-    fn claim(&mut self, dom: &WeakDom, node: Ref) {
+    fn claim(&mut self, dom: &dyn DomView, node: Ref) {
         self.nodes.insert(node);
         let mut current = dom
             .get_by_ref(node)
@@ -224,7 +211,7 @@ impl Claims {
     /// A node can't pair if a claimed pair already covers it (an ancestor
     /// moved, taking it along) or it covers a claimed pair (its descendant
     /// moved away — this subtree is no longer a coherent unit).
-    fn conflicts(&self, dom: &WeakDom, node: Ref) -> bool {
+    fn conflicts(&self, dom: &dyn DomView, node: Ref) -> bool {
         if self.ancestors.contains(&node) {
             return true;
         }
@@ -271,7 +258,7 @@ fn pair_by_exact_hash(
         let Some(pos) = bucket.iter().position(|&n| {
             can_claim_new(n)
                 && matcher.new_dom.get_by_ref(n).is_some_and(|new_instance| {
-                    pairing_compatible(old_instance, new_instance, PairingBasis::ExactContent)
+                    pairing_compatible(&old_instance, &new_instance, PairingBasis::ExactContent)
                 })
         }) else {
             continue;
@@ -301,7 +288,7 @@ fn pair_by_similarity(
         }
         if let Some(inst) = old_dom.get_by_ref(o) {
             old_by_key
-                .entry((inst.name.to_string(), inst.class.to_string()))
+                .entry((inst.name().to_string(), inst.class().to_string()))
                 .or_default()
                 .push(o);
         }
@@ -313,7 +300,7 @@ fn pair_by_similarity(
         }
         if let Some(inst) = new_dom.get_by_ref(n) {
             new_by_key
-                .entry((inst.name.to_string(), inst.class.to_string()))
+                .entry((inst.name().to_string(), inst.class().to_string()))
                 .or_default()
                 .push(n);
         }
@@ -348,17 +335,10 @@ fn pair_by_similarity(
                 // agrees. Otherwise many generic MeshPart properties can
                 // outvote a different MeshContent and invent a destructive
                 // move between unrelated pieces of geometry.
-                if !pairing_compatible(old_instance, new_instance, PairingBasis::Inferred) {
+                if !pairing_compatible(&old_instance, &new_instance, PairingBasis::Inferred) {
                     continue;
                 }
-                let score = similarity(
-                    old_dom,
-                    new_dom,
-                    o,
-                    n,
-                    matcher.old_deep,
-                    matcher.new_deep,
-                );
+                let score = similarity(old_dom, new_dom, o, n, matcher.old_deep, matcher.new_deep);
                 if score >= SIMILARITY_THRESHOLD {
                     scored.push((score, o, n));
                 }
@@ -388,17 +368,17 @@ fn pair_by_similarity(
 
 /// Roots plus every node inside them, roots first (roots are preferred
 /// pairing targets — a coherent subtree beats a fragment).
-fn expand_with_descendants(dom: &WeakDom, roots: &[Ref]) -> Vec<Ref> {
+fn expand_with_descendants(dom: &dyn DomView, roots: &[Ref]) -> Vec<Ref> {
     let mut pool: Vec<Ref> = roots.to_vec();
     for &root in roots {
         let mut stack: Vec<Ref> = dom
             .get_by_ref(root)
-            .map(|i| i.children().to_vec())
+            .map(|i| i.children().collect())
             .unwrap_or_default();
         while let Some(node) = stack.pop() {
             pool.push(node);
             if let Some(inst) = dom.get_by_ref(node) {
-                stack.extend_from_slice(inst.children());
+                stack.extend(inst.children());
             }
         }
     }
@@ -409,8 +389,8 @@ fn expand_with_descendants(dom: &WeakDom, roots: &[Ref]) -> Vec<Ref> {
 /// same name and class. Blends own-property equality with child-content overlap;
 /// leaf instances are scored on properties alone.
 fn similarity(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     old_ref: Ref,
     new_ref: Ref,
     old_deep: &DeepHashCache,
@@ -427,8 +407,8 @@ fn similarity(
 
     let prop_score = property_similarity(old_dom, new_dom, old_inst, new_inst);
 
-    let old_children = old_inst.children();
-    let new_children = new_inst.children();
+    let old_children: Vec<Ref> = old_inst.children().collect();
+    let new_children: Vec<Ref> = new_inst.children().collect();
     let child_score = if old_children.is_empty() && new_children.is_empty() {
         None
     } else {
@@ -445,8 +425,8 @@ fn similarity(
             .filter_map(|&c| {
                 old_dom.get_by_ref(c).map(|inst| OldChild {
                     hash: *old_deep.get(c).as_bytes(),
-                    name: inst.name.to_string(),
-                    class: inst.class.to_string(),
+                    name: inst.name().to_string(),
+                    class: inst.class().to_string(),
                     consumed: false,
                 })
             })
@@ -454,7 +434,7 @@ fn similarity(
 
         let mut credit = 0.0f32;
         let mut identity_pending: Vec<(String, String)> = Vec::new();
-        for &c in new_children {
+        for &c in &new_children {
             let hash = *new_deep.get(c).as_bytes();
             match old_infos.iter_mut().find(|o| !o.consumed && o.hash == hash) {
                 Some(o) => {
@@ -463,7 +443,7 @@ fn similarity(
                 }
                 None => {
                     if let Some(inst) = new_dom.get_by_ref(c) {
-                        identity_pending.push((inst.name.to_string(), inst.class.to_string()));
+                        identity_pending.push((inst.name().to_string(), inst.class().to_string()));
                     }
                 }
             }
@@ -494,30 +474,30 @@ fn similarity(
 /// Fraction of authored properties with equal values (by variant hash).
 /// Returns None when neither side has authored properties (no signal).
 fn property_similarity(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
-    old_inst: &rbx_dom_weak::Instance,
-    new_inst: &rbx_dom_weak::Instance,
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
+    old_inst: InstanceView<'_>,
+    new_inst: InstanceView<'_>,
 ) -> Option<f32> {
-    let authored = get_authored_properties(old_inst.class.as_str());
+    let authored = get_authored_properties(old_inst.class());
 
     let mut total = 0usize;
     let mut equal = 0usize;
 
-    for (name, old_value) in &old_inst.properties {
-        if !authored.contains(name.as_str()) {
+    for (name, old_value) in old_inst.properties() {
+        if !authored.contains(name) {
             continue;
         }
         total += 1;
-        if let Some(new_value) = new_inst.properties.get(name) {
+        if let Some(new_value) = new_inst.property(name) {
             if variant_hash_eq(old_dom, old_value, new_dom, new_value) {
                 equal += 1;
             }
         }
     }
     // Properties only on the new side count against similarity
-    for (name, _) in &new_inst.properties {
-        if authored.contains(name.as_str()) && !old_inst.properties.contains_key(name) {
+    for (name, _) in new_inst.properties() {
+        if authored.contains(name) && old_inst.property(name).is_none() {
             total += 1;
         }
     }
@@ -529,7 +509,7 @@ fn property_similarity(
     }
 }
 
-fn variant_hash_eq(old_dom: &WeakDom, a: &Variant, new_dom: &WeakDom, b: &Variant) -> bool {
+fn variant_hash_eq(old_dom: &dyn DomView, a: &Variant, new_dom: &dyn DomView, b: &Variant) -> bool {
     let mut ha = Hasher::new();
     hash_variant(old_dom, &mut ha, a);
     let mut hb = Hasher::new();

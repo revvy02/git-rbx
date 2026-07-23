@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
+use crate::diff_dom::DomView;
 use crate::property_semantics::{get_authored_properties, normalize_asset_uri};
 
 macro_rules! n_hash {
@@ -55,7 +56,7 @@ fn vector_hash(hasher: &mut Hasher, vector: Vector3) {
 
 /// The target's position in the tree as child indices from the root,
 /// e.g. [2, 0, 3]. Distinguishes same-named siblings for Ref hashing.
-fn ref_index_path(dom: &WeakDom, target: Ref) -> Vec<u32> {
+fn ref_index_path(dom: &dyn DomView, target: Ref) -> Vec<u32> {
     let mut path = Vec::new();
     let mut current = target;
     while let Some(inst) = dom.get_by_ref(current) {
@@ -63,7 +64,7 @@ fn ref_index_path(dom: &WeakDom, target: Ref) -> Vec<u32> {
         let Some(parent_inst) = dom.get_by_ref(parent) else {
             break;
         };
-        if let Some(index) = parent_inst.children().iter().position(|&c| c == current) {
+        if let Some(index) = parent_inst.children().position(|child| child == current) {
             path.push(index as u32);
         }
         current = parent;
@@ -90,26 +91,26 @@ const NO_REFS_HASH: HashPolicy = HashPolicy {
 /// Hash one instance's class and authored properties under a policy. Deep
 /// hashing builds on the same prefix before adding child hashes.
 fn hash_instance(
-    dom: &WeakDom,
+    dom: &dyn DomView,
     referent: Ref,
     ignore_properties: Option<&HashSet<String>>,
     policy: HashPolicy,
 ) -> Hasher {
     let inst = dom.get_by_ref(referent).unwrap();
-    let authored = get_authored_properties(&inst.class);
+    let authored = get_authored_properties(inst.class());
     let mut hasher = Hasher::new();
 
     if policy.include_name {
-        hasher.update(inst.name.as_bytes());
+        hasher.update(inst.name().as_bytes());
     }
-    hasher.update(inst.class.as_bytes());
+    hasher.update(inst.class().as_bytes());
 
-    let mut props: Vec<_> = inst.properties.iter().collect();
-    props.sort_unstable_by_key(|(name, _)| name.as_str());
+    let mut props: Vec<_> = inst.properties().collect();
+    props.sort_unstable_by_key(|(name, _)| *name);
     for (name, value) in props {
-        if ignore_properties.is_some_and(|ignored| ignored.contains(name.as_str()))
+        if ignore_properties.is_some_and(|ignored| ignored.contains(name))
             || (!policy.include_refs && matches!(value, Variant::Ref(_)))
-            || !authored.contains(name.as_str())
+            || !authored.contains(name)
         {
             continue;
         }
@@ -125,7 +126,7 @@ fn hash_instance(
 /// - `get()`: Full hash (all properties including Refs)
 /// - `get_no_refs()`: Hash excluding Ref properties (stable when only Refs change)
 pub struct LazyHashCache<'a> {
-    dom: &'a WeakDom,
+    dom: &'a dyn DomView,
     cache: RefCell<HashMap<Ref, Hash>>,
     cache_no_refs: RefCell<HashMap<Ref, Hash>>,
 }
@@ -133,6 +134,10 @@ pub struct LazyHashCache<'a> {
 impl<'a> LazyHashCache<'a> {
     /// Create a new lazy hash cache for the given DOM.
     pub fn new(dom: &'a WeakDom) -> Self {
+        Self::new_view(dom)
+    }
+
+    pub(crate) fn new_view(dom: &'a dyn DomView) -> Self {
         Self {
             dom,
             cache: RefCell::new(HashMap::new()),
@@ -188,14 +193,14 @@ impl<'a> LazyHashCache<'a> {
 /// Computed lazily, bottom-up: requesting a parent's hash first computes all children.
 /// Skips ignored properties (e.g. UniqueId, HistoryId) so pruning works correctly.
 pub struct DeepHashCache<'a> {
-    dom: &'a WeakDom,
+    dom: &'a dyn DomView,
     ignore_properties: &'a HashSet<String>,
     cache: RefCell<HashMap<Ref, Hash>>,
     cache_no_refs: RefCell<HashMap<Ref, Hash>>,
 }
 
 impl<'a> DeepHashCache<'a> {
-    pub fn new(dom: &'a WeakDom, ignore_properties: &'a HashSet<String>) -> Self {
+    pub fn new(dom: &'a dyn DomView, ignore_properties: &'a HashSet<String>) -> Self {
         Self {
             dom,
             ignore_properties,
@@ -257,7 +262,7 @@ impl<'a> DeepHashCache<'a> {
         let inst = self.dom.get_by_ref(referent).unwrap();
         let mut hasher = hash_instance(self.dom, referent, Some(self.ignore_properties), policy);
 
-        for &child_ref in inst.children() {
+        for child_ref in inst.children() {
             let child_hash = self.get_with_policy(
                 child_ref,
                 HashPolicy {
@@ -274,7 +279,7 @@ impl<'a> DeepHashCache<'a> {
 
 /// Hash a variant value.
 /// For Ref properties, uses name+class of the target as a stable identifier.
-pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) {
+pub(crate) fn hash_variant(dom: &dyn DomView, hasher: &mut Hasher, value: &Variant) {
     match value {
         Variant::Attributes(attrs) => {
             let mut sorted: Vec<_> = attrs.iter().collect();
@@ -423,8 +428,8 @@ pub(crate) fn hash_variant(dom: &WeakDom, hasher: &mut Hasher, value: &Variant) 
                 // spuriously changed hash only costs pruning/matching work —
                 // the property pass still decides equality via the ref mapping.
                 hasher.update(&[0x01]);
-                hasher.update(target.name.as_bytes());
-                hasher.update(target.class.as_bytes());
+                hasher.update(target.name().as_bytes());
+                hasher.update(target.class().as_bytes());
                 for index in ref_index_path(dom, *target_ref) {
                     n_hash!(hasher, index);
                 }

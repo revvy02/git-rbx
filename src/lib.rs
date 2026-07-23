@@ -2,6 +2,7 @@
 
 mod conflict_file;
 mod diff;
+mod diff_dom;
 mod dom_utils;
 mod edit_script;
 mod explorer_tree;
@@ -23,6 +24,7 @@ pub use conflict_file::{
 };
 pub use diff::{compute_diff, CFrameValue, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
+pub use diff_dom::DiffDom;
 pub use edit_script::{
     apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript, InstanceIdentity,
 };
@@ -52,8 +54,8 @@ pub fn diff_doms_with_config(
     new_dom: &WeakDom,
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
-    let old_hashes = hash::LazyHashCache::new(old_dom);
-    let new_hashes = hash::LazyHashCache::new(new_dom);
+    let old_hashes = hash::LazyHashCache::new_view(old_dom);
+    let new_hashes = hash::LazyHashCache::new_view(new_dom);
     compute_diff(old_dom, new_dom, &old_hashes, &new_hashes, config)
 }
 
@@ -67,12 +69,40 @@ pub fn diff_model_doms_with_config(
     new_dom: &mut WeakDom,
     config: &DiffConfig,
 ) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
-    let normalization = normalize_model_diff_frames(old_dom, new_dom);
-    let old_hashes = hash::LazyHashCache::new(old_dom);
-    let new_hashes = hash::LazyHashCache::new(new_dom);
+    diff_model_views_with_config(old_dom, new_dom, config)
+}
+
+/// Diff against a compact old-side snapshot while retaining a mutable new
+/// WeakDom for model-frame canonicalization.
+pub fn diff_model_compact_old_with_config(
+    old_dom: &DiffDom,
+    new_dom: &mut WeakDom,
+    config: &DiffConfig,
+) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
+    diff_model_views_with_config(old_dom, new_dom, config)
+}
+
+/// Diff two compact snapshots, mutating only existing world-space properties
+/// on the new side while hierarchical model frames are factored.
+pub fn diff_model_compact_doms_with_config(
+    old_dom: &DiffDom,
+    new_dom: &mut DiffDom,
+    config: &DiffConfig,
+) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
+    diff_model_views_with_config(old_dom, new_dom, config)
+}
+
+fn diff_model_views_with_config(
+    old_dom: &dyn diff_dom::DomView,
+    new_dom: &mut dyn diff_dom::DomViewMut,
+    config: &DiffConfig,
+) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
+    let normalization = model_normalize::normalize_model_diff_frames_view(old_dom, new_dom);
+    let old_hashes = hash::LazyHashCache::new_view(old_dom);
+    let new_hashes = hash::LazyHashCache::new_view(new_dom.as_view());
     let mut diffs = diff::compute_diff_with_identity(
         old_dom,
-        new_dom,
+        new_dom.as_view(),
         &old_hashes,
         &new_hashes,
         config,
@@ -84,7 +114,7 @@ pub fn diff_model_doms_with_config(
         for frame in &state.frames {
             let class = new_dom
                 .get_by_ref(frame.side_ref)
-                .map(|instance| instance.class.to_string())
+                .map(|instance| instance.class().to_string())
                 .unwrap_or_else(|| "Model".to_string());
             frames.push(DiffEntry::ModelFrame {
                 old_ref: frame.base_ref.to_string(),
