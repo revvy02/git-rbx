@@ -438,8 +438,6 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
         new_ref,
         ctx.config,
         ctx.matched,
-        ctx.matcher.old_deep(),
-        ctx.matcher.new_deep(),
     ) {
         ops.push(EditOp::SetProperty {
             old_ref,

@@ -89,6 +89,9 @@ const NO_REFS_HASH: HashPolicy = HashPolicy {
 };
 
 enum HashStorage {
+    Uninitialized {
+        dense_len: Option<usize>,
+    },
     Sparse(HashMap<Ref, Hash>),
     Dense {
         values: Vec<Option<Hash>>,
@@ -98,17 +101,14 @@ enum HashStorage {
 
 impl HashStorage {
     fn new(dom: &dyn DomView) -> Self {
-        match dom.dense_len() {
-            Some(len) => Self::Dense {
-                values: vec![None; len],
-                populated: 0,
-            },
-            None => Self::Sparse(HashMap::new()),
+        Self::Uninitialized {
+            dense_len: dom.dense_len(),
         }
     }
 
     fn get(&self, instance: InstanceView<'_>) -> Option<Hash> {
         match self {
+            Self::Uninitialized { .. } => None,
             Self::Sparse(values) => values.get(&instance.referent()).copied(),
             Self::Dense { values, .. } => {
                 values[instance
@@ -119,7 +119,17 @@ impl HashStorage {
     }
 
     fn insert(&mut self, instance: InstanceView<'_>, hash: Hash) {
+        if let Self::Uninitialized { dense_len } = self {
+            *self = match *dense_len {
+                Some(len) => Self::Dense {
+                    values: vec![None; len],
+                    populated: 0,
+                },
+                None => Self::Sparse(HashMap::new()),
+            };
+        }
         match self {
+            Self::Uninitialized { .. } => unreachable!("hash storage was initialized above"),
             Self::Sparse(values) => {
                 values.insert(instance.referent(), hash);
             }
@@ -137,6 +147,7 @@ impl HashStorage {
 
     fn len(&self) -> usize {
         match self {
+            Self::Uninitialized { .. } => 0,
             Self::Sparse(values) => values.len(),
             Self::Dense { populated, .. } => *populated,
         }

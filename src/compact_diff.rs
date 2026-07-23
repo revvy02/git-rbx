@@ -11,7 +11,6 @@ use crate::diff::{
 };
 use crate::diff_dom::{DiffDom, DiffNode, DomView, InstanceView, NodeId};
 use crate::edit_script::{Anchor, EditOp, InstanceIdentity, SemanticChangeSet};
-use crate::hash::DeepHashCache;
 use crate::value_compare::non_ref_variants_equal;
 
 struct DenseIdentity {
@@ -228,8 +227,6 @@ struct CompactDiffContext<'a> {
     dense: &'a DenseIdentity,
     changed: &'a [bool],
     config: &'a DiffConfig,
-    old_deep: &'a DeepHashCache<'a>,
-    new_deep: &'a DeepHashCache<'a>,
     moved_old: &'a HashSet<Ref>,
     moved_new: &'a HashSet<Ref>,
 }
@@ -329,8 +326,6 @@ fn emit_compact_instance_changes(
         new_ref,
         context.config,
         &context.identity.matched,
-        context.old_deep,
-        context.new_deep,
     ) {
         ops.push(EditOp::SetProperty {
             old_ref,
@@ -371,8 +366,6 @@ pub(crate) fn compute_compact_diff_with_identity(
 ) -> Vec<DiffEntry> {
     let dense = DenseIdentity::from_complete(old_dom, new_dom, identity);
     let changed = compact_changed_subtrees(old_dom, new_dom, identity, &dense, config);
-    let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
-    let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
     let moved_old: HashSet<Ref> = identity.moves.iter().map(|(old, _)| *old).collect();
     let moved_new: HashSet<Ref> = identity.moves.iter().map(|(_, new)| *new).collect();
     let context = CompactDiffContext {
@@ -382,8 +375,6 @@ pub(crate) fn compute_compact_diff_with_identity(
         dense: &dense,
         changed: &changed,
         config,
-        old_deep: &old_deep,
-        new_deep: &new_deep,
         moved_old: &moved_old,
         moved_new: &moved_new,
     };

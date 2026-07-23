@@ -2,12 +2,12 @@
 //!
 //! Phase 1: Recursively match instances across both DOMs, building a global ref mapping.
 //! Phase 2: Compare properties using the ref mapping for Ref property comparison.
-//! Ref properties pointing to matched instances are considered equal (same logical target),
-//! with hash-based fallback for refs into pruned (identical) subtrees.
+//! Ref properties pointing to matched instances are considered equal (same logical target).
+//! Identity discovery is complete, so an unmapped target is a different logical instance.
 
 use crate::diff_dom::{DomView, InstanceView};
 use crate::edit_script::{Anchor, EditOp, SemanticChangeSet};
-use crate::hash::{DeepHashCache, LazyHashCache};
+use crate::hash::LazyHashCache;
 use crate::match_instances::get_instance_path;
 use crate::property_semantics::get_authored_properties;
 use crate::value_compare::non_ref_variants_equal;
@@ -389,8 +389,6 @@ pub(crate) fn raw_property_changes(
     new_ref: Ref,
     config: &DiffConfig,
     ref_mapping: &HashMap<Ref, Ref>,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
 ) -> Vec<RawPropertyChange> {
     let old_inst = old_dom.get_by_ref(old_ref).unwrap();
     let new_inst = new_dom.get_by_ref(new_ref).unwrap();
@@ -431,8 +429,6 @@ pub(crate) fn raw_property_changes(
                     old_value,
                     new_value,
                     ref_mapping,
-                    old_deep,
-                    new_deep,
                 ) {
                     changes.push(RawPropertyChange {
                         name: name.to_string(),
@@ -734,34 +730,23 @@ fn variants_equal(
     a: &Variant,
     b: &Variant,
     ref_mapping: &HashMap<Ref, Ref>,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
 ) -> bool {
     match (a, b) {
-        (Variant::Ref(old_target), Variant::Ref(new_target)) => refs_equal(
-            old_dom,
-            new_dom,
-            *old_target,
-            *new_target,
-            ref_mapping,
-            old_deep,
-            new_deep,
-        ),
+        (Variant::Ref(old_target), Variant::Ref(new_target)) => {
+            refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping)
+        }
         _ => non_ref_variants_equal(a, b),
     }
 }
 
 /// Compare two Ref values by checking if they point to the same matched instance.
-/// Uses the ref mapping first (covers matched instances that may have changed content),
-/// falls back to deep hash comparison for refs into pruned (identical) subtrees.
+/// Complete identity covers unchanged and changed subtrees alike.
 fn refs_equal(
     old_dom: &dyn DomView,
     new_dom: &dyn DomView,
     old_target: Ref,
     new_target: Ref,
     ref_mapping: &HashMap<Ref, Ref>,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
 ) -> bool {
     let old_exists = !old_target.is_none() && old_dom.get_by_ref(old_target).is_some();
     let new_exists = !new_target.is_none() && new_dom.get_by_ref(new_target).is_some();
@@ -769,14 +754,7 @@ fn refs_equal(
     match (old_exists, new_exists) {
         (false, false) => true,
         (true, false) | (false, true) => false,
-        (true, true) => {
-            // Check mapping: are these the same logical instance?
-            if let Some(&mapped_new) = ref_mapping.get(&old_target) {
-                return mapped_new == new_target;
-            }
-            // Fallback for pruned subtrees (identical content, not in mapping)
-            old_deep.get(old_target) == new_deep.get(new_target)
-        }
+        (true, true) => ref_mapping.get(&old_target) == Some(&new_target),
     }
 }
 
@@ -911,5 +889,38 @@ pub(crate) fn attribute_variant_to_property_value(v: &Variant) -> PropertyValue 
             },
         },
         _ => variant_to_property_value(v),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refs_equal;
+    use rbx_dom_weak::{InstanceBuilder, WeakDom};
+    use std::collections::HashMap;
+
+    #[test]
+    fn identical_but_unmatched_ref_targets_are_not_equal() {
+        let old_target = InstanceBuilder::new("Part").with_name("Target");
+        let old_ref = old_target.referent();
+        let old = WeakDom::new(InstanceBuilder::new("Folder").with_child(old_target));
+
+        let new_target = InstanceBuilder::new("Part").with_name("Target");
+        let new_ref = new_target.referent();
+        let new = WeakDom::new(InstanceBuilder::new("Folder").with_child(new_target));
+
+        assert!(!refs_equal(
+            &old,
+            &new,
+            old_ref,
+            new_ref,
+            &HashMap::new()
+        ));
+        assert!(refs_equal(
+            &old,
+            &new,
+            old_ref,
+            new_ref,
+            &HashMap::from([(old_ref, new_ref)])
+        ));
     }
 }
