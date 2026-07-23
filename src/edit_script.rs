@@ -62,12 +62,31 @@ pub struct EditScript {
     pub moved_destinations: HashSet<Ref>,
 }
 
+/// Complete cross-DOM identity captured before a representation-only
+/// canonicalization, including the exact roots recognized as moves.
+#[derive(Debug, Clone)]
+pub struct InstanceIdentity {
+    pub matched: HashMap<Ref, Ref>,
+    pub moves: Vec<(Ref, Ref)>,
+}
+
 /// Compute the edit script transforming `old_dom` into `new_dom`.
 pub fn compute_edit_script(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
     config: &DiffConfig,
 ) -> EditScript {
+    compute_edit_script_with_matches(old_dom, new_dom, config, None)
+}
+
+/// Establish complete cross-DOM identity without constructing property ops.
+/// Frame normalization needs this mapping before it rewrites representation;
+/// avoiding the edit-emission pass matters for large place-file diffs.
+pub(crate) fn compute_instance_identity(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    config: &DiffConfig,
+) -> InstanceIdentity {
     let old_hashes = LazyHashCache::new(old_dom);
     let new_hashes = LazyHashCache::new(new_dom);
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
@@ -80,13 +99,21 @@ pub fn compute_edit_script(
         &old_deep,
         &new_deep,
     );
+    discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep)
+}
 
-    // Full (unpruned) match walk: identity for every matched instance
+fn discover_identity(
+    matcher: &Matcher<'_>,
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    old_deep: &DeepHashCache,
+    new_deep: &DeepHashCache,
+) -> InstanceIdentity {
     let mut matched = HashMap::new();
     let mut removed_roots = Vec::new();
     let mut added_roots = Vec::new();
     build_full_mapping(
-        &matcher,
+        matcher,
         old_dom.root_ref(),
         new_dom.root_ref(),
         &mut matched,
@@ -94,21 +121,18 @@ pub fn compute_edit_script(
         &mut added_roots,
     );
 
-    // Pair moves globally, then map inside moved subtrees too
     let moves = detect_moves(
         old_dom,
         new_dom,
         removed_roots,
         added_roots,
-        &old_deep,
-        &new_deep,
+        old_deep,
+        new_deep,
     );
-    let moved_old: HashSet<Ref> = moves.iter().map(|(o, _)| *o).collect();
-    let moved_new: HashSet<Ref> = moves.iter().map(|(_, n)| *n).collect();
     for (old_root, new_root) in &moves {
         matched.insert(*old_root, *new_root);
         build_full_mapping(
-            &matcher,
+            matcher,
             *old_root,
             *new_root,
             &mut matched,
@@ -116,6 +140,44 @@ pub fn compute_edit_script(
             &mut Vec::new(),
         );
     }
+    InstanceIdentity { matched, moves }
+}
+
+/// Compute an edit script while preserving identity established before a
+/// representation-only DOM canonicalization.
+pub(crate) fn compute_edit_script_with_matches(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    config: &DiffConfig,
+    pinned: Option<&InstanceIdentity>,
+) -> EditScript {
+    let old_hashes = LazyHashCache::new(old_dom);
+    let new_hashes = LazyHashCache::new(new_dom);
+    let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
+    let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
+    let mut matcher = Matcher::new(
+        old_dom,
+        new_dom,
+        &old_hashes,
+        &new_hashes,
+        &old_deep,
+        &new_deep,
+    );
+    if let Some(pinned) = pinned {
+        matcher = matcher.with_complete_identity(&pinned.matched);
+    }
+
+    let (matched, moves) = if let Some(pinned) = pinned {
+        // This is a complete identity map captured before representation-only
+        // canonicalization. Derive moves from parent identity directly rather
+        // than asking content hashes to rediscover them after transforms.
+        (pinned.matched.clone(), pinned.moves.clone())
+    } else {
+        let identity = discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep);
+        (identity.matched, identity.moves)
+    };
+    let moved_old: HashSet<Ref> = moves.iter().map(|(old, _)| *old).collect();
+    let moved_new: HashSet<Ref> = moves.iter().map(|(_, new)| *new).collect();
 
     let mut ops = Vec::new();
     let reverse_matched: HashMap<Ref, Ref> =

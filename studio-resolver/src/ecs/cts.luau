@@ -51,8 +51,6 @@ export type Base = {
 	value: any, -- Property: value to restore
 	parent: Instance?, -- MoveTarget: parent to restore
 	parts: { [BasePart]: number }?, -- clone swaps: true target transparencies
-	frameParts: { [BasePart]: CFrame }?, -- ModelFrame: canonical world transforms
-	frameModels: { [Model]: CFrame }?, -- ModelFrame: canonical pivots
 }
 
 -- One occurrence in a projected Explorer view. `subject` and `entity` retain
@@ -85,6 +83,13 @@ export type VersionTreeNode = {
 }
 
 export type VersionTrees = { [string]: { VersionTreeNode } }
+
+export type FrameApplication = {
+	target: Instance,
+	order: number,
+	parentOrder: number?,
+	delta: CFrame,
+}
 
 local cts = {
 	-- The live preview Instance an entity mirrors.
@@ -119,6 +124,8 @@ local cts = {
 	Target = world:component(), -- the contested live Instance
 	Entry = world:component(), -- the stamped container entry (Name = CLI --entry)
 	Order = world:component(), -- stable list position (entry-name sort)
+	FrameOrder = world:component(), -- hierarchical frame order (ancestors first)
+	FrameParentOrder = world:component(), -- nearest ancestor frame decision
 	Ours = world:component(), -- SideInfo
 	Theirs = world:component(), -- SideInfo
 	ImpactOurs = world:component(), -- ImpactSide
@@ -138,6 +145,7 @@ local cts = {
 	Conflicts = world:component(), -- boot-sorted conflict entity array (immutable after boot)
 	Cards = world:component(), -- display list: group entities + ungrouped conflicts
 	Container = world:component(), -- the stamped __RbxDiffMerge container
+	FramePlan = world:component(), -- automatic local frames deferred by a frame conflict
 	ViewTab = world:component(), -- "base" | "ours" | "theirs" | "result"
 	SelectedConflict = world:component(), -- conflict entity
 	SelectedInstance = world:component(), -- Instance the explorer/props focus on

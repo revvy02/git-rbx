@@ -88,6 +88,11 @@ pub(crate) struct Matcher<'a> {
     new_hashes: &'a LazyHashCache<'a>,
     old_deep: &'a DeepHashCache<'a>,
     new_deep: &'a DeepHashCache<'a>,
+    /// Identity established before a representation-only canonicalization.
+    /// Pinned direct-child pairs are consumed before content matching so
+    /// normalization cannot reshuffle otherwise identical siblings.
+    pinned_children: HashMap<(Ref, Ref), Vec<(Ref, Ref)>>,
+    pinned_complete: bool,
     child_matches: RefCell<HashMap<(Ref, Ref), Rc<MatchResult>>>,
 }
 
@@ -107,8 +112,35 @@ impl<'a> Matcher<'a> {
             new_hashes,
             old_deep,
             new_deep,
+            pinned_children: HashMap::new(),
+            pinned_complete: false,
             child_matches: RefCell::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn with_complete_identity(mut self, pinned: &HashMap<Ref, Ref>) -> Self {
+        for (&old_ref, &new_ref) in pinned {
+            let Some(old_parent) = self
+                .old_dom
+                .get_by_ref(old_ref)
+                .map(|instance| instance.parent())
+            else {
+                continue;
+            };
+            let Some(new_parent) = self
+                .new_dom
+                .get_by_ref(new_ref)
+                .map(|instance| instance.parent())
+            else {
+                continue;
+            };
+            self.pinned_children
+                .entry((old_parent, new_parent))
+                .or_default()
+                .push((old_ref, new_ref));
+        }
+        self.pinned_complete = true;
+        self
     }
 
     pub(crate) fn match_children(&self, old_parent: Ref, new_parent: Ref) -> Rc<MatchResult> {
@@ -189,6 +221,57 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
 
     let mut old_matched = vec![false; old_count];
     let mut new_matched = vec![false; new_count];
+
+    // Canonicalizing CFrames can make several same-named siblings newly
+    // identical. Preserve the pre-canonical identity rather than allowing a
+    // later hash or positional pass to permute those siblings.
+    let old_indices: HashMap<Ref, usize> = old_children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| (child.referent, index))
+        .collect();
+    let new_indices: HashMap<Ref, usize> = new_children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| (child.referent, index))
+        .collect();
+    for &(old_ref, new_ref) in matcher
+        .pinned_children
+        .get(&(old_parent, new_parent))
+        .into_iter()
+        .flatten()
+    {
+        let (Some(&old_index), Some(&new_index)) =
+            (old_indices.get(&old_ref), new_indices.get(&new_ref))
+        else {
+            continue;
+        };
+        if !old_matched[old_index] && !new_matched[new_index] {
+            old_matched[old_index] = true;
+            new_matched[new_index] = true;
+            matched.push((old_ref, new_ref));
+        }
+    }
+
+    if matcher.pinned_complete {
+        let removed = old_children
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !old_matched[*index])
+            .map(|(_, child)| child.referent)
+            .collect();
+        let added = new_children
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !new_matched[*index])
+            .map(|(_, child)| child.referent)
+            .collect();
+        return MatchResult {
+            matched,
+            removed,
+            added,
+        };
+    }
 
     // Build name → indices map for O(1) lookup instead of O(n) scan
     let mut name_index: HashMap<&str, Vec<usize>> = HashMap::new();

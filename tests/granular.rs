@@ -4,10 +4,11 @@
 
 use rbx_diff::{
     apply_edit_script, compute_edit_script, diff_doms, finalize, find_container, list_entries,
-    mark_entry, mark_entry_custom, merge_doms, stamp_conflicts, ConflictKind, DiffConfig, DiffEntry,
+    mark_entry, mark_entry_custom, merge_doms, stamp_conflicts, ConflictKind, DiffConfig,
+    DiffEntry, PropertyValue,
 };
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::{Attributes, Tags, Variant};
+use rbx_types::{Attributes, BinaryString, Tags, Variant};
 
 fn folder(name: &str) -> InstanceBuilder {
     InstanceBuilder::new("Folder").with_name(name)
@@ -39,6 +40,16 @@ fn dom_with(attr_pairs: &[(&str, f64)], tag_names: &[&str]) -> WeakDom {
         thing = thing.with_property("Tags", tags(tag_names));
     }
     WeakDom::new(folder("root").with_child(thing))
+}
+
+fn dom_with_attribute(key: &str, value: Variant) -> WeakDom {
+    let mut attributes = Attributes::new();
+    attributes.insert(key.to_string(), value);
+    WeakDom::new(
+        folder("root").with_child(
+            folder("Thing").with_property("Attributes", Variant::Attributes(attributes)),
+        ),
+    )
 }
 
 fn attr_of(dom: &WeakDom, key: &str) -> Option<f64> {
@@ -75,14 +86,21 @@ fn diff_reports_per_key_attribute_changes() {
 
     let diffs = diff_doms(&old, &new);
     assert_eq!(diffs.len(), 1, "{diffs:#?}");
-    let DiffEntry::Modified { property_changes, .. } = &diffs[0] else {
+    let DiffEntry::Modified {
+        property_changes, ..
+    } = &diffs[0]
+    else {
         panic!("expected Modified: {diffs:#?}");
     };
     let mut names: Vec<&str> = property_changes.iter().map(|c| c.name.as_str()).collect();
     names.sort();
     assert_eq!(
         names,
-        vec!["Attributes.added", "Attributes.changed", "Attributes.removed"],
+        vec![
+            "Attributes.added",
+            "Attributes.changed",
+            "Attributes.removed"
+        ],
         "{property_changes:#?}"
     );
 }
@@ -96,6 +114,44 @@ fn empty_container_on_one_side_is_not_a_change() {
 
     let diffs = diff_doms(&old, &new);
     assert!(diffs.is_empty(), "{diffs:#?}");
+}
+
+#[test]
+fn utf8_binary_attribute_displays_as_a_string() {
+    let old = dom_with(&[], &[]);
+    let session = "8719b00d-c64c-4fcb-8856-d124257d3411";
+    let new = dom_with_attribute(
+        "rodeoSession",
+        Variant::BinaryString(BinaryString::from(session.as_bytes())),
+    );
+
+    let diffs = diff_doms(&old, &new);
+    let [DiffEntry::Modified {
+        property_changes, ..
+    }] = diffs.as_slice()
+    else {
+        panic!("expected one attribute modification: {diffs:#?}");
+    };
+    let [change] = property_changes.as_slice() else {
+        panic!("expected one attribute change: {property_changes:#?}");
+    };
+    assert_eq!(change.name, "Attributes.rodeoSession");
+    assert!(matches!(
+        &change.new_value,
+        Some(PropertyValue::String { value }) if value == session
+    ));
+}
+
+#[test]
+fn string_and_binary_attribute_encodings_compare_equal() {
+    let session = "8719b00d-c64c-4fcb-8856-d124257d3411";
+    let old = dom_with_attribute("rodeoSession", Variant::String(session.to_string()));
+    let new = dom_with_attribute(
+        "rodeoSession",
+        Variant::BinaryString(BinaryString::from(session.as_bytes())),
+    );
+
+    assert!(diff_doms(&old, &new).is_empty());
 }
 
 // ============================================================================
@@ -151,7 +207,9 @@ fn same_attribute_key_conflicts() {
     assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
     assert_eq!(
         result.conflicts[0].kind,
-        ConflictKind::Property { name: "Attributes.x".to_string() }
+        ConflictKind::Property {
+            name: "Attributes.x".to_string()
+        }
     );
     // Base value retained on the contested key
     assert_eq!(attr_of(&base, "x"), Some(1.0));

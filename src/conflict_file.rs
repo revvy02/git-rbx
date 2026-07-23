@@ -15,6 +15,10 @@
 //!       <clone of our version>      (shallow for property conflicts,
 //!                                    full subtree for delete-vs-edit)
 //!     Theirs                        Folder; same shape
+//!   FramePlan                       Folder; automatic hierarchical frames
+//!     Frame_1                       Folder; attrs: FrameOrder,
+//!                                   FrameParentOrder?, Path, Delta
+//!       Target                      ObjectValue -> live boundary instance
 //! ```
 //!
 //! Live conflicted instances are tagged `RbxDiffConflict` so any consumer —
@@ -30,13 +34,13 @@ use rbx_types::{Attributes, Tags, Variant};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 
-use crate::diff::{variant_to_property_value, PropertyValue};
+use crate::diff::{attribute_variant_to_property_value, variant_to_property_value, PropertyValue};
 use crate::dom_utils::class_is_a;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
 use crate::explorer_tree::{ExplorerTree, ExplorerTrees, ExplorerVersion};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
-use crate::model_normalize::apply_model_frame;
+use crate::model_normalize::{apply_model_frame_plan, ModelFrameApplication};
 use crate::rigid_groups::{Rigid, RigidGroup};
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
@@ -76,7 +80,7 @@ pub fn stamp_conflicts(
                 "Attributes",
                 Variant::Attributes(
                     Attributes::new()
-                        .with("Version", Variant::Float64(3.0))
+                        .with("Version", Variant::Float64(4.0))
                         .with(
                             "ConflictCount",
                             Variant::Float64(result.conflicts.len() as f64),
@@ -124,7 +128,29 @@ pub fn stamp_conflicts(
                 .with_property("Value", Variant::Ref(conflict.base_ref)),
         );
 
-        if let ConflictKind::ModelFrame { ours, theirs } = &conflict.kind {
+        if let ConflictKind::ModelFrame {
+            ours,
+            theirs,
+            order,
+            parent_order,
+        } = &conflict.kind
+        {
+            if let Some(instance) = base.get_by_ref_mut(entry) {
+                let mut attrs = match instance.properties.get(&"Attributes".into()) {
+                    Some(Variant::Attributes(attrs)) => attrs.clone(),
+                    _ => Attributes::new(),
+                };
+                attrs.insert("FrameOrder".to_string(), Variant::Float64(*order as f64));
+                if let Some(parent_order) = parent_order {
+                    attrs.insert(
+                        "FrameParentOrder".to_string(),
+                        Variant::Float64(*parent_order as f64),
+                    );
+                }
+                instance
+                    .properties
+                    .insert("Attributes".into(), Variant::Attributes(attrs));
+            }
             let ours_impact =
                 model_frame_impact(base, conflict.base_ref, &result.explorer_trees, ours);
             let theirs_impact =
@@ -159,6 +185,45 @@ pub fn stamp_conflicts(
         }
 
         tag_instance(base, conflict.base_ref, CONFLICT_TAG);
+    }
+}
+
+/// Persist automatic local frame applications when at least one hierarchical
+/// frame remains conflicted. These records have no `Kind`, so they are not
+/// resolver decisions and do not affect the conflict count. Finalization and
+/// Studio combine them with selected ModelFrame entries and apply the complete
+/// plan in `FrameOrder` after ordinary resolutions.
+pub fn stamp_model_frame_plan(base: &mut WeakDom, frames: &[ModelFrameApplication]) {
+    if frames.is_empty() {
+        return;
+    }
+    let Some(container) = find_container(base) else {
+        return;
+    };
+    let plan = base.insert(
+        container,
+        InstanceBuilder::new("Folder").with_name("FramePlan"),
+    );
+    for (index, frame) in frames.iter().enumerate() {
+        let mut attrs = Attributes::new()
+            .with("FrameOrder", Variant::Float64(frame.order as f64))
+            .with("Path", Variant::String(frame.path.clone()))
+            .with("Delta", Variant::CFrame(frame.delta));
+        if let Some(parent_order) = frame.parent_order {
+            attrs = attrs.with("FrameParentOrder", Variant::Float64(parent_order as f64));
+        }
+        let entry = base.insert(
+            plan,
+            InstanceBuilder::new("Folder")
+                .with_name(format!("Frame_{}", index + 1))
+                .with_property("Attributes", Variant::Attributes(attrs)),
+        );
+        base.insert(
+            entry,
+            InstanceBuilder::new("ObjectValue")
+                .with_name("Target")
+                .with_property("Value", Variant::Ref(frame.target_ref)),
+        );
     }
 }
 
@@ -384,7 +449,7 @@ fn stamp_impact(base: &mut WeakDom, side_folder: Ref, impact: &ImpactSide) {
     );
 }
 
-fn patch_value(dom: &WeakDom, value: Option<&Variant>) -> PropertyValue {
+fn patch_value(dom: &WeakDom, property: &str, value: Option<&Variant>) -> PropertyValue {
     match value {
         None => PropertyValue::Nil,
         Some(Variant::Ref(r)) if r.is_none() => PropertyValue::Nil,
@@ -394,6 +459,9 @@ fn patch_value(dom: &WeakDom, value: Option<&Variant>) -> PropertyValue {
                 .map(|_| get_instance_path(dom, *r))
                 .unwrap_or_else(|| format!("{r}")),
         },
+        Some(value) if property.starts_with("Attributes.") => {
+            attribute_variant_to_property_value(value)
+        }
         Some(value) => variant_to_property_value(value),
     }
 }
@@ -444,8 +512,8 @@ fn impact_for_ops(
                     Some(name.clone()),
                     None,
                     id.into_iter().collect(),
-                    Some(patch_value(base, old_value.as_ref())),
-                    Some(patch_value(branch, value.as_ref())),
+                    Some(patch_value(base, name, old_value.as_ref())),
+                    Some(patch_value(branch, name, value.as_ref())),
                 )
             }
             EditOp::SetName { old_ref, name } => {
@@ -752,6 +820,9 @@ pub struct ConflictEntry {
     pub property: Option<String>,
     /// Atomic serialized fields for PropertyBundle entries.
     pub properties: Vec<String>,
+    /// Hierarchical ModelFrame application order (ancestors first).
+    pub frame_order: Option<usize>,
+    pub frame_parent_order: Option<usize>,
     pub resolved: Option<String>,
     /// Rigid-group entry name this conflict belongs to, if grouped.
     pub group: Option<String>,
@@ -792,6 +863,16 @@ pub fn list_entries(dom: &WeakDom, container: Ref) -> Vec<ConflictEntry> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                frame_order: match attrs.get("FrameOrder") {
+                    Some(Variant::Float64(value)) if *value >= 0.0 => Some(*value as usize),
+                    Some(Variant::Float32(value)) if *value >= 0.0 => Some(*value as usize),
+                    Some(Variant::Int32(value)) if *value >= 0 => Some(*value as usize),
+                    Some(Variant::Int64(value)) if *value >= 0 => Some(*value as usize),
+                    _ => None,
+                },
+                frame_parent_order: numeric_attr(attrs, "FrameParentOrder")
+                    .filter(|value| *value >= 0.0)
+                    .map(|value| value as usize),
                 resolved: get_str("Resolved").filter(|s| !s.is_empty()),
                 group: get_str("Group"),
             })
@@ -1076,18 +1157,98 @@ pub fn finalize(dom: &mut WeakDom) -> Result<usize> {
     }
 
     let count = entries.len();
-    // ModelFrame is deliberately last: every other resolution is expressed
-    // in the canonical content frame, then the chosen asset placement carries
-    // the complete resolved tree into world space as one operation.
+    let frame_actions = read_frame_actions(dom, container, &entries)?;
+
+    // Every ordinary resolution is expressed in canonical boundary frames.
+    // The complete frame plan (automatic plus selected decisions) is applied
+    // afterwards in explicit top-down order. This is semantically necessary
+    // for nested rotations; overlapping rigid transforms do not commute.
     for entry in entries.iter().filter(|entry| entry.kind != "ModelFrame") {
         apply_entry(dom, entry)?;
     }
-    for entry in entries.iter().filter(|entry| entry.kind == "ModelFrame") {
-        apply_entry(dom, entry)?;
+    for action in &frame_actions {
+        untag_instance(dom, action.target_ref, CONFLICT_TAG);
     }
+    apply_model_frame_plan(dom, &frame_actions);
 
     dom.destroy(container);
     Ok(count)
+}
+
+fn read_frame_actions(
+    dom: &WeakDom,
+    container: Ref,
+    entries: &[ConflictEntry],
+) -> Result<Vec<ModelFrameApplication>> {
+    let mut actions = Vec::new();
+
+    if let Some(plan) = child_by_name(dom, container, "FramePlan") {
+        let children = dom
+            .get_by_ref(plan)
+            .map(|instance| instance.children().to_vec())
+            .unwrap_or_default();
+        for frame in children {
+            let Some(instance) = dom.get_by_ref(frame) else {
+                continue;
+            };
+            let Some(Variant::Attributes(attrs)) = instance.properties.get(&"Attributes".into())
+            else {
+                continue;
+            };
+            let order = numeric_attr(attrs, "FrameOrder").ok_or_else(|| {
+                anyhow::anyhow!("{}: automatic frame has no FrameOrder", instance.name)
+            })? as usize;
+            let delta = match attrs.get("Delta") {
+                Some(Variant::CFrame(delta)) => *delta,
+                _ => bail!("{}: automatic frame has no Delta", instance.name),
+            };
+            let target = child_object_value(dom, frame, "Target").ok_or_else(|| {
+                anyhow::anyhow!("{}: automatic frame has no Target", instance.name)
+            })?;
+            actions.push(ModelFrameApplication {
+                target_ref: target,
+                path: attr_string(attrs, "Path").unwrap_or_else(|| instance.name.clone()),
+                order,
+                parent_order: numeric_attr(attrs, "FrameParentOrder")
+                    .filter(|value| *value >= 0.0)
+                    .map(|value| value as usize),
+                delta,
+            });
+        }
+    }
+
+    for entry in entries.iter().filter(|entry| entry.kind == "ModelFrame") {
+        let side = entry.resolved.as_deref().unwrap();
+        let side_folder_name = if side == "ours" { "Ours" } else { "Theirs" };
+        let target = child_object_value(dom, entry.entry_ref, "Target")
+            .ok_or_else(|| anyhow::anyhow!("{}: missing Target", entry.path))?;
+        let side_folder =
+            child_by_name(dom, entry.entry_ref, side_folder_name).ok_or_else(|| {
+                anyhow::anyhow!("{}: missing {} folder", entry.path, side_folder_name)
+            })?;
+        let delta = side_attr_cframe(dom, side_folder, "Delta").ok_or_else(|| {
+            anyhow::anyhow!("{}: {} frame has no Delta", entry.path, side_folder_name)
+        })?;
+        actions.push(ModelFrameApplication {
+            target_ref: target,
+            path: entry.path.clone(),
+            order: entry.frame_order.unwrap_or(usize::MAX),
+            parent_order: entry.frame_parent_order,
+            delta,
+        });
+    }
+
+    Ok(actions)
+}
+
+fn numeric_attr(attrs: &Attributes, key: &str) -> Option<f64> {
+    match attrs.get(key) {
+        Some(Variant::Float64(value)) => Some(*value),
+        Some(Variant::Float32(value)) => Some(*value as f64),
+        Some(Variant::Int32(value)) => Some(*value as f64),
+        Some(Variant::Int64(value)) => Some(*value as f64),
+        _ => None,
+    }
 }
 
 fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
@@ -1263,10 +1424,10 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             dom.transfer_within(target, dest);
         }
         "ModelFrame" => {
-            let delta = side_attr_cframe(dom, side_folder, "Delta").ok_or_else(|| {
-                anyhow::anyhow!("{}: {} frame has no Delta", entry.path, side_folder_name)
-            })?;
-            apply_model_frame(dom, target, &delta);
+            bail!(
+                "{}: ModelFrame must be applied through its frame plan",
+                entry.path
+            );
         }
         other => bail!("{}: unknown conflict kind '{other}'", entry.path),
     }

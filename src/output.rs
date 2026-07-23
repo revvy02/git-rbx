@@ -1,6 +1,6 @@
 //! Output formatting for diff results.
 
-use crate::diff::{DiffEntry, PropertyValue};
+use crate::diff::{CFrameValue, DiffEntry, PropertyValue};
 use colored::Colorize;
 
 /// Output format options.
@@ -34,6 +34,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
     let mut removed = Vec::new();
     let mut modified = Vec::new();
     let mut moved = Vec::new();
+    let mut model_frames = Vec::new();
 
     for diff in diffs {
         match diff {
@@ -41,6 +42,21 @@ fn print_pretty(diffs: &[DiffEntry]) {
             DiffEntry::Removed { .. } => removed.push(diff),
             DiffEntry::Modified { .. } => modified.push(diff),
             DiffEntry::Moved { .. } => moved.push(diff),
+            DiffEntry::ModelFrame { .. } => model_frames.push(diff),
+        }
+    }
+
+    // Print inferred rigid movement before residual property edits.
+    if !model_frames.is_empty() {
+        println!("\n{}", "Model frames:".cyan().bold());
+        for diff in &model_frames {
+            if let DiffEntry::ModelFrame {
+                path, class, delta, ..
+            } = diff
+            {
+                println!("  {} {} [{}]", "↻".cyan(), path.cyan(), class);
+                println!("      delta: {}", format_cframe_value(delta).cyan());
+            }
         }
     }
 
@@ -112,7 +128,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
 
     // Print summary
     println!();
-    print_summary_line(&added, &removed, &modified, &moved);
+    print_summary_line(&added, &removed, &modified, &moved, &model_frames);
 }
 
 fn print_property_changes(property_changes: &[crate::diff::PropertyChange]) {
@@ -171,23 +187,7 @@ fn format_property_value(v: &PropertyValue) -> String {
         PropertyValue::CFrame {
             position,
             orientation,
-        } => {
-            format!(
-                "CFrame(position=({}, {}, {}), orientation=[({}, {}, {}), ({}, {}, {}), ({}, {}, {})])",
-                position[0],
-                position[1],
-                position[2],
-                orientation[0][0],
-                orientation[0][1],
-                orientation[0][2],
-                orientation[1][0],
-                orientation[1][1],
-                orientation[1][2],
-                orientation[2][0],
-                orientation[2][1],
-                orientation[2][2],
-            )
-        }
+        } => format_cframe(position, orientation),
         PropertyValue::Color3 { r, g, b } => format!("Color3({}, {}, {})", r, g, b),
         PropertyValue::BrickColor { value } => format!("BrickColor({})", value),
         PropertyValue::Enum { value } => format!("Enum({})", value),
@@ -222,11 +222,34 @@ fn format_property_value(v: &PropertyValue) -> String {
     }
 }
 
+fn format_cframe_value(value: &CFrameValue) -> String {
+    format_cframe(&value.position, &value.orientation)
+}
+
+fn format_cframe(position: &[f32; 3], orientation: &[[f32; 3]; 3]) -> String {
+    format!(
+        "CFrame(position=({}, {}, {}), orientation=[({}, {}, {}), ({}, {}, {}), ({}, {}, {})])",
+        position[0],
+        position[1],
+        position[2],
+        orientation[0][0],
+        orientation[0][1],
+        orientation[0][2],
+        orientation[1][0],
+        orientation[1][1],
+        orientation[1][2],
+        orientation[2][0],
+        orientation[2][1],
+        orientation[2][2],
+    )
+}
+
 fn print_summary(diffs: &[DiffEntry]) {
     let mut added = 0;
     let mut removed = 0;
     let mut modified = 0;
     let mut moved = 0;
+    let mut model_frames = 0;
 
     for diff in diffs {
         match diff {
@@ -234,18 +257,20 @@ fn print_summary(diffs: &[DiffEntry]) {
             DiffEntry::Removed { .. } => removed += 1,
             DiffEntry::Modified { .. } => modified += 1,
             DiffEntry::Moved { .. } => moved += 1,
+            DiffEntry::ModelFrame { .. } => model_frames += 1,
         }
     }
 
-    if added == 0 && removed == 0 && modified == 0 && moved == 0 {
+    if added == 0 && removed == 0 && modified == 0 && moved == 0 && model_frames == 0 {
         println!("No differences found.");
     } else {
         println!(
-            "{} added, {} removed, {} modified, {} moved",
+            "{} added, {} removed, {} modified, {} moved, {} model frames",
             added.to_string().green(),
             removed.to_string().red(),
             modified.to_string().yellow(),
-            moved.to_string().cyan()
+            moved.to_string().cyan(),
+            model_frames.to_string().cyan(),
         );
     }
 }
@@ -255,14 +280,16 @@ fn print_summary_line(
     removed: &[&DiffEntry],
     modified: &[&DiffEntry],
     moved: &[&DiffEntry],
+    model_frames: &[&DiffEntry],
 ) {
     println!(
-        "{}: {} added, {} removed, {} modified, {} moved",
+        "{}: {} added, {} removed, {} modified, {} moved, {} model frames",
         "Summary".bold(),
         added.len().to_string().green(),
         removed.len().to_string().red(),
         modified.len().to_string().yellow(),
-        moved.len().to_string().cyan()
+        moved.len().to_string().cyan(),
+        model_frames.len().to_string().cyan(),
     );
 }
 
@@ -280,6 +307,7 @@ fn print_json(diffs: &[DiffEntry]) {
         removed: usize,
         modified: usize,
         moved: usize,
+        model_frames: usize,
     }
 
     let added = diffs
@@ -298,6 +326,10 @@ fn print_json(diffs: &[DiffEntry]) {
         .iter()
         .filter(|d| matches!(d, DiffEntry::Moved { .. }))
         .count();
+    let model_frames = diffs
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::ModelFrame { .. }))
+        .count();
 
     let output = Output {
         changes: diffs,
@@ -306,6 +338,7 @@ fn print_json(diffs: &[DiffEntry]) {
             removed,
             modified,
             moved,
+            model_frames,
         },
     };
 

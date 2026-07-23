@@ -84,7 +84,7 @@ fn cframe_noise_and_visible_motion_are_distinguished() {
     let base = dom_with("CFrame", Variant::CFrame(cframe_at(value)));
     let noisy = dom_with("CFrame", Variant::CFrame(cframe_at(adjacent)));
     let sub_tolerance = dom_with("CFrame", Variant::CFrame(cframe_at(value + 0.00005)));
-    let moved = dom_with("CFrame", Variant::CFrame(cframe_at(value + 0.0002)));
+    let moved = dom_with("CFrame", Variant::CFrame(cframe_at(value + 0.002)));
 
     assert!(diff_doms(&base, &noisy).is_empty());
     assert!(diff_doms(&base, &sub_tolerance).is_empty());

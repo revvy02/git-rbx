@@ -32,6 +32,7 @@ fn summarize(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
             DiffEntry::Removed { .. } => counts.1 += 1,
             DiffEntry::Modified { .. } => counts.2 += 1,
             DiffEntry::Moved { .. } => counts.3 += 1,
+            DiffEntry::ModelFrame { .. } => {}
         }
     }
     counts

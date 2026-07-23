@@ -4,7 +4,7 @@
 //! are `#[ignore]`d because debug-mode decoding is slow — run them with
 //! `cargo test --release -- --ignored`.
 
-use rbx_diff::{diff_doms, DiffEntry};
+use rbx_diff::{diff_doms, diff_model_doms_with_config, DiffConfig, DiffEntry};
 use rbx_dom_weak::WeakDom;
 use std::fs::File;
 use std::io::BufReader;
@@ -35,6 +35,7 @@ fn counts(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
             DiffEntry::Removed { .. } => c.1 += 1,
             DiffEntry::Modified { .. } => c.2 += 1,
             DiffEntry::Moved { .. } => c.3 += 1,
+            DiffEntry::ModelFrame { .. } => {}
         }
     }
     c
@@ -150,6 +151,46 @@ fn save_vs_save_tree_move_is_cframe_changes_only() {
         DiffEntry::Modified { path, .. } if path.contains("Tree4")
     ));
     assert!(tree4_changed, "expected Tree4 CFrame modifications: {diffs:?}");
+}
+
+#[test]
+#[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
+fn police_station_and_nested_moves_collapse_to_three_frames() {
+    let Some(base) = load("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
+        return;
+    };
+    let Some(mut side) = load(
+        "tests-new/models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl",
+    ) else {
+        return;
+    };
+
+    let (diffs, frames) = diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    let frames = frames.expect("the fixture contains three hierarchical model moves");
+    assert_eq!(frames.frames.len(), 3, "{:#?}", frames.frames);
+    assert_eq!(counts(&diffs), (0, 1, 5, 0), "{diffs:#?}");
+
+    let residual_cframes: Vec<_> = diffs
+        .iter()
+        .filter_map(|diff| match diff {
+            DiffEntry::Modified {
+                path,
+                property_changes,
+                ..
+            } if path.contains("PoliceStation")
+                && property_changes
+                    .iter()
+                    .any(|change| change.name == "CFrame") =>
+            {
+                Some(path)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        residual_cframes.is_empty(),
+        "model moves must not leak descendant CFrames: {residual_cframes:#?}"
+    );
 }
 
 #[test]

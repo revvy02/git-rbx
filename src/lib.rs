@@ -18,15 +18,22 @@ mod value_compare;
 
 pub use conflict_file::{
     finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_conflicts,
-    stamp_rigid_groups, ConflictEntry, CONFLICT_TAG, CONTAINER_NAME, ENTRY_TAG, VIRTUAL_TREES_NAME,
+    stamp_model_frame_plan, stamp_rigid_groups, ConflictEntry, CONFLICT_TAG, CONTAINER_NAME,
+    ENTRY_TAG, VIRTUAL_TREES_NAME,
 };
-pub use diff::{compute_diff, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
+pub use diff::{compute_diff, CFrameValue, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
-pub use edit_script::{apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript};
-pub use merge::{merge_doms, ConflictKind, MergeConflict, MergeResult, MergeStats};
+pub use edit_script::{
+    apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript, InstanceIdentity,
+};
+pub use merge::{
+    merge_doms, merge_doms_with_matches, ConflictKind, MergeConflict, MergeResult, MergeStats,
+};
 pub use model_normalize::{
-    apply_model_frame, apply_model_frame_to_dom, model_frames_close, normalize_model_dom_to_base,
-    normalize_model_merge_frames, ModelFrameDecision, ModelFrameMerge, ModelNormalization,
+    apply_model_frame, apply_model_frame_plan, apply_model_frame_to_dom, model_frames_close,
+    normalize_model_diff_frames, normalize_model_dom_to_base, normalize_model_merge_frames,
+    ModelFrame, ModelFrameApplication, ModelFrameChange, ModelFrameDecision, ModelFrameDiff,
+    ModelFrameMerge, ModelNormalization,
 };
 pub use rigid_groups::{detect_rigid_groups, RigidGroup};
 pub use semantic_verify::{verify_mesh_geometry, SemanticMismatch};
@@ -48,4 +55,50 @@ pub fn diff_doms_with_config(
     let old_hashes = hash::LazyHashCache::new(old_dom);
     let new_hashes = hash::LazyHashCache::new(new_dom);
     compute_diff(old_dom, new_dom, &old_hashes, &new_hashes, config)
+}
+
+/// Diff two model-asset DOMs using hierarchical frame factorization.
+///
+/// The new DOM is canonicalized in place. Inferred rigid movement is returned
+/// as one [`DiffEntry::ModelFrame`] per affected boundary; ordinary entries
+/// contain only residual authored changes.
+pub fn diff_model_doms_with_config(
+    old_dom: &WeakDom,
+    new_dom: &mut WeakDom,
+    config: &DiffConfig,
+) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
+    let normalization = normalize_model_diff_frames(old_dom, new_dom);
+    let old_hashes = hash::LazyHashCache::new(old_dom);
+    let new_hashes = hash::LazyHashCache::new(new_dom);
+    let mut diffs = diff::compute_diff_with_identity(
+        old_dom,
+        new_dom,
+        &old_hashes,
+        &new_hashes,
+        config,
+        normalization.as_ref().map(|state| &state.identity),
+    );
+
+    if let Some(state) = &normalization {
+        let mut frames = Vec::with_capacity(state.frames.len());
+        for frame in &state.frames {
+            let class = new_dom
+                .get_by_ref(frame.side_ref)
+                .map(|instance| instance.class.to_string())
+                .unwrap_or_else(|| "Model".to_string());
+            frames.push(DiffEntry::ModelFrame {
+                old_ref: frame.base_ref.to_string(),
+                new_ref: frame.side_ref.to_string(),
+                path: frame.path.clone(),
+                class,
+                order: frame.order,
+                parent_order: frame.parent_order,
+                delta: frame.delta.into(),
+            });
+        }
+        frames.append(&mut diffs);
+        diffs = frames;
+    }
+
+    (diffs, normalization)
 }

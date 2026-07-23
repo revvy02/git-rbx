@@ -3,6 +3,7 @@
 //! tested. These assertions compare the raw serialized CFrames after each
 //! resolution against the corresponding original branch.
 
+use rbx_diff::{diff_model_doms_with_config, DiffConfig, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Matrix3, Variant, Vector3};
 use std::fs::File;
@@ -31,6 +32,62 @@ fn translated(x: f32) -> CFrame {
             Vector3::new(0.0, 1.0, 0.0),
             Vector3::new(0.0, 0.0, 1.0),
         ),
+    )
+}
+
+fn rotation_z(radians: f32) -> Matrix3 {
+    let (sin, cos) = radians.sin_cos();
+    Matrix3::new(
+        Vector3::new(cos, -sin, 0.0),
+        Vector3::new(sin, cos, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    )
+}
+
+fn rotate(matrix: Matrix3, vector: Vector3) -> Vector3 {
+    Vector3::new(
+        matrix.x.x * vector.x + matrix.x.y * vector.y + matrix.x.z * vector.z,
+        matrix.y.x * vector.x + matrix.y.y * vector.y + matrix.y.z * vector.z,
+        matrix.z.x * vector.x + matrix.z.y * vector.y + matrix.z.z * vector.z,
+    )
+}
+
+fn multiply(a: Matrix3, b: Matrix3) -> Matrix3 {
+    let column = |matrix: Matrix3, index: usize| match index {
+        0 => Vector3::new(matrix.x.x, matrix.y.x, matrix.z.x),
+        1 => Vector3::new(matrix.x.y, matrix.y.y, matrix.z.y),
+        _ => Vector3::new(matrix.x.z, matrix.y.z, matrix.z.z),
+    };
+    let dot =
+        |row: Vector3, column: Vector3| row.x * column.x + row.y * column.y + row.z * column.z;
+    Matrix3::new(
+        Vector3::new(
+            dot(a.x, column(b, 0)),
+            dot(a.x, column(b, 1)),
+            dot(a.x, column(b, 2)),
+        ),
+        Vector3::new(
+            dot(a.y, column(b, 0)),
+            dot(a.y, column(b, 1)),
+            dot(a.y, column(b, 2)),
+        ),
+        Vector3::new(
+            dot(a.z, column(b, 0)),
+            dot(a.z, column(b, 1)),
+            dot(a.z, column(b, 2)),
+        ),
+    )
+}
+
+fn apply_delta(delta: CFrame, base: CFrame) -> CFrame {
+    let rotated = rotate(delta.orientation, base.position);
+    CFrame::new(
+        Vector3::new(
+            delta.position.x + rotated.x,
+            delta.position.y + rotated.y,
+            delta.position.z + rotated.z,
+        ),
+        multiply(delta.orientation, base.orientation),
     )
 }
 
@@ -94,6 +151,58 @@ fn overlapping_nested_asset(outer_offset: f32, inner_offset: f32) -> WeakDom {
                                 .with_child(part("InnerB", inner_origin + 4.0))
                                 .with_child(part("InnerC", inner_origin + 8.0)),
                         ),
+                ),
+        ),
+    )
+}
+
+fn nested_rotated_asset(parent_delta: CFrame, child_local: CFrame) -> WeakDom {
+    let world = |base: CFrame, child: bool| {
+        let parent_world = apply_delta(parent_delta, base);
+        if child {
+            apply_delta(child_local, parent_world)
+        } else {
+            parent_world
+        }
+    };
+    let part = |name: &str, base: CFrame, child: bool| {
+        InstanceBuilder::new("Part")
+            .with_name(name)
+            .with_property("CFrame", Variant::CFrame(world(base, child)))
+    };
+    let parent_pivot = translated(5.0);
+    let child_pivot = CFrame::new(Vector3::new(12.0, 3.0, 0.0), rotation_z(0.2));
+    WeakDom::new(
+        InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Model")
+                .with_name("Asset")
+                .with_property(
+                    "WorldPivotData",
+                    Variant::OptionalCFrame(Some(world(parent_pivot, false))),
+                )
+                .with_child(part("ParentA", translated(2.0), false))
+                .with_child(part(
+                    "ParentB",
+                    CFrame::new(Vector3::new(6.0, 2.0, 0.0), rotation_z(-0.15)),
+                    false,
+                ))
+                .with_child(
+                    InstanceBuilder::new("Model")
+                        .with_name("Child")
+                        .with_property(
+                            "WorldPivotData",
+                            Variant::OptionalCFrame(Some(world(child_pivot, true))),
+                        )
+                        .with_child(part(
+                            "ChildA",
+                            CFrame::new(Vector3::new(10.0, 2.0, 0.0), rotation_z(0.1)),
+                            true,
+                        ))
+                        .with_child(part(
+                            "ChildB",
+                            CFrame::new(Vector3::new(14.0, 4.0, 0.0), rotation_z(-0.3)),
+                            true,
+                        )),
                 ),
         ),
     )
@@ -169,6 +278,81 @@ fn assert_raw_spatial_match(actual_path: &Path, expected_path: &Path) {
             &format!("{actual_class} {actual_name}"),
         );
     }
+}
+
+#[test]
+fn two_way_diff_factors_rotated_parent_and_child_frames() {
+    let identity = translated(0.0);
+    let parent = CFrame::new(Vector3::new(45.0, -12.0, 8.0), rotation_z(0.55));
+    let child = CFrame::new(Vector3::new(3.0, 7.0, -2.0), rotation_z(-0.35));
+    let base = nested_rotated_asset(identity, identity);
+    let mut side = nested_rotated_asset(parent, child);
+
+    let (diffs, normalization) =
+        diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    let normalization = normalization.expect("parent and child frames should be detected");
+    assert_eq!(normalization.frames.len(), 2, "{:#?}", normalization.frames);
+    assert_eq!(diffs.len(), 2, "{diffs:#?}");
+    assert!(diffs
+        .iter()
+        .all(|diff| matches!(diff, DiffEntry::ModelFrame { .. })));
+    let parent_order = match &diffs[0] {
+        DiffEntry::ModelFrame {
+            path,
+            order,
+            parent_order,
+            ..
+        } => {
+            assert!(path.ends_with("Asset"));
+            assert_eq!(*parent_order, None);
+            *order
+        }
+        _ => unreachable!(),
+    };
+    assert!(matches!(&diffs[1], DiffEntry::ModelFrame {
+        path,
+        parent_order: Some(order),
+        ..
+    } if path.ends_with("Asset.Child") && *order == parent_order));
+}
+
+#[test]
+fn two_way_diff_cli_json_reports_frames_instead_of_descendant_cframes() {
+    let identity = translated(0.0);
+    let parent = CFrame::new(Vector3::new(45.0, -12.0, 8.0), rotation_z(0.55));
+    let child = CFrame::new(Vector3::new(3.0, 7.0, -2.0), rotation_z(-0.35));
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-model-frame-diff-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let base_path = scratch.join("base.rbxm");
+    let side_path = scratch.join("side.rbxm");
+    save(&base_path, &nested_rotated_asset(identity, identity));
+    save(&side_path, &nested_rotated_asset(parent, child));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+        .args([
+            "diff",
+            base_path.to_str().unwrap(),
+            side_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let changes = json["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 2, "{json:#}");
+    assert!(changes.iter().all(|change| change["type"] == "model_frame"));
+    assert_eq!(json["summary"]["model_frames"], 2);
+    assert_eq!(json["summary"]["modified"], 0);
+
+    std::fs::remove_dir_all(scratch).unwrap();
 }
 
 fn run(binary: &str, args: &[&str], expected_success: bool) {
@@ -304,7 +488,7 @@ fn one_sided_frame_move_is_automatic_and_carries_the_other_sides_edit() {
 }
 
 #[test]
-fn overlapping_nested_moves_do_not_become_incompatible_asset_frames() {
+fn overlapping_nested_moves_compose_without_a_conflict() {
     let binary = env!("CARGO_BIN_EXE_rbx-diff");
     let scratch = std::env::temp_dir().join(format!(
         "rbx-diff-nested-model-frame-test-{}",
@@ -314,17 +498,61 @@ fn overlapping_nested_moves_do_not_become_incompatible_asset_frames() {
     let base_path = scratch.join("base.rbxm");
     let ours_path = scratch.join("ours.rbxm");
     let theirs_path = scratch.join("theirs.rbxm");
-    let merged_theirs_path = scratch.join("merged-theirs.rbxm");
+    let expected_path = scratch.join("expected.rbxm");
     let conflicted_path = scratch.join("conflicted.rbxm");
     save(&base_path, &overlapping_nested_asset(0.0, 0.0));
     save(&ours_path, &overlapping_nested_asset(100.0, 0.0));
     save(&theirs_path, &overlapping_nested_asset(0.0, -50.0));
-    // Taking theirs for the contested inner move still keeps ours' independent,
-    // one-sided outer move. Because serialized model contents are world-space,
-    // the selected inner branch values remain at their authored world position.
+    // The independent one-sided local frames compose: ours' outer +100, then
+    // theirs' inner -50, leaving the inner content at base +50 in world space.
+    save(&expected_path, &overlapping_nested_asset(100.0, -50.0));
+
+    run(
+        binary,
+        &[
+            "merge",
+            base_path.to_str().unwrap(),
+            ours_path.to_str().unwrap(),
+            theirs_path.to_str().unwrap(),
+            "--output",
+            conflicted_path.to_str().unwrap(),
+        ],
+        true,
+    );
+    assert_raw_spatial_match(&conflicted_path, &expected_path);
+
+    std::fs::remove_dir_all(&scratch).unwrap();
+}
+
+#[test]
+fn nested_rotated_frame_choices_reconstruct_and_compose_in_top_down_order() {
+    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-nested-rotation-frame-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    let identity = CFrame::identity();
+    let ours_parent = CFrame::new(Vector3::new(30.0, -4.0, 0.0), rotation_z(0.65));
+    let theirs_parent = CFrame::new(Vector3::new(-12.0, 18.0, 0.0), rotation_z(-0.4));
+    let ours_child = CFrame::new(Vector3::new(3.0, 7.0, 0.0), rotation_z(-0.25));
+    let theirs_child = CFrame::new(Vector3::new(-8.0, 2.0, 0.0), rotation_z(0.5));
+
+    let base_path = scratch.join("base.rbxm");
+    let ours_path = scratch.join("ours.rbxm");
+    let theirs_path = scratch.join("theirs.rbxm");
+    let mixed_path = scratch.join("mixed.rbxm");
+    let conflicted_path = scratch.join("conflicted.rbxm");
+    save(&base_path, &nested_rotated_asset(identity, identity));
+    save(&ours_path, &nested_rotated_asset(ours_parent, ours_child));
     save(
-        &merged_theirs_path,
-        &overlapping_nested_asset(100.0, -150.0),
+        &theirs_path,
+        &nested_rotated_asset(theirs_parent, theirs_child),
+    );
+    save(
+        &mixed_path,
+        &nested_rotated_asset(ours_parent, theirs_child),
     );
 
     run(
@@ -340,7 +568,76 @@ fn overlapping_nested_moves_do_not_become_incompatible_asset_frames() {
         false,
     );
 
-    for (side, expected) in [("ours", &ours_path), ("theirs", &merged_theirs_path)] {
+    for (label, parent_side, child_side, expected) in [
+        ("ours", "ours", "ours", &ours_path),
+        ("theirs", "theirs", "theirs", &theirs_path),
+        ("mixed", "ours", "theirs", &mixed_path),
+    ] {
+        let resolved = scratch.join(format!("resolved-{label}.rbxm"));
+        std::fs::copy(&conflicted_path, &resolved).unwrap();
+        for (entry, side) in [("Conflict_1", parent_side), ("Conflict_2", child_side)] {
+            run(
+                binary,
+                &[
+                    "resolve",
+                    resolved.to_str().unwrap(),
+                    "--take",
+                    side,
+                    "--entry",
+                    entry,
+                ],
+                true,
+            );
+        }
+        run(
+            binary,
+            &["resolve", resolved.to_str().unwrap(), "--finalize"],
+            true,
+        );
+        assert_raw_spatial_match(&resolved, expected);
+    }
+
+    std::fs::remove_dir_all(&scratch).unwrap();
+}
+
+#[test]
+fn automatic_rotated_parent_is_deferred_with_a_child_frame_conflict() {
+    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-deferred-parent-frame-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    let identity = CFrame::identity();
+    let shared_parent = CFrame::new(Vector3::new(21.0, -9.0, 0.0), rotation_z(0.7));
+    let ours_child = CFrame::new(Vector3::new(4.0, 6.0, 0.0), rotation_z(-0.35));
+    let theirs_child = CFrame::new(Vector3::new(-7.0, 3.0, 0.0), rotation_z(0.45));
+    let base_path = scratch.join("base.rbxm");
+    let ours_path = scratch.join("ours.rbxm");
+    let theirs_path = scratch.join("theirs.rbxm");
+    let conflicted_path = scratch.join("conflicted.rbxm");
+    save(&base_path, &nested_rotated_asset(identity, identity));
+    save(&ours_path, &nested_rotated_asset(shared_parent, ours_child));
+    save(
+        &theirs_path,
+        &nested_rotated_asset(shared_parent, theirs_child),
+    );
+
+    run(
+        binary,
+        &[
+            "merge",
+            base_path.to_str().unwrap(),
+            ours_path.to_str().unwrap(),
+            theirs_path.to_str().unwrap(),
+            "--output",
+            conflicted_path.to_str().unwrap(),
+        ],
+        false,
+    );
+
+    for (side, expected) in [("ours", &ours_path), ("theirs", &theirs_path)] {
         let resolved = scratch.join(format!("resolved-{side}.rbxm"));
         std::fs::copy(&conflicted_path, &resolved).unwrap();
         run(

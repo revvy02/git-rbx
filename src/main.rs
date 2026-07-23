@@ -11,10 +11,10 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    apply_model_frame_to_dom, detect_rigid_groups, diff_doms_with_config, finalize, find_container,
-    list_entries, mark_entry, mark_entry_custom, merge_doms, normalize_model_dom_to_base,
-    normalize_model_merge_frames, stamp_conflicts, stamp_rigid_groups, ConflictKind, DiffConfig,
-    MergeConflict, ModelFrameDecision, CONTAINER_NAME,
+    detect_rigid_groups, diff_model_doms_with_config, finalize, find_container, list_entries,
+    mark_entry, mark_entry_custom, merge_doms, merge_doms_with_matches,
+    normalize_model_merge_frames, stamp_conflicts, stamp_model_frame_plan, stamp_rigid_groups,
+    ConflictKind, DiffConfig, MergeConflict, ModelFrameDecision, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -198,22 +198,22 @@ fn cmd_diff(
     };
     let new_load_time = load_start.elapsed();
 
-    if is_model_asset_path(old_file) && is_model_asset_path(new_file) {
-        if let Some(normalization) = normalize_model_dom_to_base(&old_dom, &mut new_dom) {
-            eprintln!(
-                "Normalized model frame from {}/{} matched parts ({})",
-                normalization.supporting_parts,
-                normalization.matched_parts,
-                format_delta(&normalization.side_delta),
-            );
-        }
-    }
-
     let config = DiffConfig::default();
 
     let diff_start = Instant::now();
     eprintln!("Computing differences...");
-    let diffs = diff_doms_with_config(&old_dom, &new_dom, &config);
+    // Unlike the old root-only model normalization, hierarchical framing
+    // reports every inferred movement explicitly. It is therefore safe and
+    // useful for place files too: authored placement remains visible as one
+    // ModelFrame entry instead of thousands of descendant CFrame changes.
+    let (diffs, frames) = diff_model_doms_with_config(&old_dom, &mut new_dom, &config);
+    if let Some(frames) = frames {
+        eprintln!(
+            "Factored {} hierarchical model frame(s) ({} boundaries detected)",
+            frames.frames.len(),
+            frames.detected,
+        );
+    }
     let diff_time = diff_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -264,16 +264,10 @@ fn cmd_merge(
         let frames = normalize_model_merge_frames(&base, &mut ours, &mut theirs);
         if let Some(frames) = &frames {
             eprintln!(
-                "Normalized ours model frame from {}/{} matched parts ({})",
-                frames.ours.supporting_parts,
-                frames.ours.matched_parts,
-                format_delta(&frames.ours.side_delta),
-            );
-            eprintln!(
-                "Normalized theirs model frame from {}/{} matched parts ({})",
-                frames.theirs.supporting_parts,
-                frames.theirs.matched_parts,
-                format_delta(&frames.theirs.side_delta),
+                "Factored {} hierarchical model frame(s) ({} ours / {} theirs boundaries detected)",
+                frames.frames.len(),
+                frames.ours_detected,
+                frames.theirs_detected,
             );
         }
         frames
@@ -281,35 +275,49 @@ fn cmd_merge(
         None
     };
 
-    if let Some(frames) = &model_frames {
-        if let ModelFrameDecision::Automatic(frame) = &frames.decision {
-            // Merge every branch in the automatically selected output frame.
-            // This also carries additions and conflict-side clones into the
-            // correct placement without special cases later.
-            apply_model_frame_to_dom(&mut base, frame);
-            apply_model_frame_to_dom(&mut ours, frame);
-            apply_model_frame_to_dom(&mut theirs, frame);
-        }
-    }
-
     let config = DiffConfig::default();
 
     eprintln!("Merging...");
     let start = Instant::now();
-    let mut result = merge_doms(&mut base, &ours, &theirs, &config);
+    let mut result = if let Some(frames) = &model_frames {
+        merge_doms_with_matches(
+            &mut base,
+            &ours,
+            &theirs,
+            &config,
+            &frames.ours_identity,
+            &frames.theirs_identity,
+        )
+    } else {
+        merge_doms(&mut base, &ours, &theirs, &config)
+    };
     if let Some(frames) = &model_frames {
-        if matches!(frames.decision, ModelFrameDecision::Conflict) {
-            result.conflicts.push(MergeConflict {
-                kind: ConflictKind::ModelFrame {
-                    ours: frames.ours.side_delta,
-                    theirs: frames.theirs.side_delta,
-                },
-                base_ref: frames.target_ref,
-                path: frames.path.clone(),
-                ours: Vec::new(),
-                theirs: Vec::new(),
-            });
-            result.stats.conflicted += 1;
+        for frame in &frames.frames {
+            if matches!(frame.decision, ModelFrameDecision::Conflict) {
+                result.conflicts.push(MergeConflict {
+                    kind: ConflictKind::ModelFrame {
+                        ours: frame.ours,
+                        theirs: frame.theirs,
+                        order: frame.order,
+                        parent_order: frame.parent_order,
+                    },
+                    base_ref: frame.target_ref,
+                    path: frame.path.clone(),
+                    ours: Vec::new(),
+                    theirs: Vec::new(),
+                });
+                result.stats.conflicted += 1;
+            }
+        }
+
+        // With no unresolved frame decision, materialize the selected plan in
+        // every canonical DOM before stamping. Branch-side clones therefore
+        // share the result's final placement. If any frame conflicts, defer
+        // the entire ordered plan to finalization/Studio preview.
+        if !frames.has_conflicts() {
+            frames.apply_automatic_to_base(&mut base);
+            frames.apply_automatic_to_ours(&mut ours);
+            frames.apply_automatic_to_theirs(&mut theirs);
         }
     }
     eprintln!(
@@ -328,6 +336,11 @@ fn cmd_merge(
     if !result.conflicts.is_empty() {
         groups = detect_rigid_groups(&base, &result.conflicts);
         stamp_conflicts(&mut base, &ours, &theirs, &result);
+        if let Some(frames) = &model_frames {
+            if frames.has_conflicts() {
+                stamp_model_frame_plan(&mut base, &frames.automatic_applications());
+            }
+        }
         stamp_rigid_groups(&mut base, &groups);
     }
 

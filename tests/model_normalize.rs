@@ -1,5 +1,6 @@
 use rbx_diff::{
-    merge_doms, normalize_model_dom_to_base, normalize_model_merge_frames, ConflictKind, DiffConfig,
+    diff_model_doms_with_config, merge_doms, normalize_model_dom_to_base,
+    normalize_model_merge_frames, ConflictKind, DiffConfig, DiffEntry, ModelFrameDecision,
 };
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Matrix3, Variant, Vector3};
@@ -92,6 +93,23 @@ fn nested_majority_asset(nested_offset: f32) -> WeakDom {
     )
 }
 
+fn large_asset(offset: f32, part_count: usize) -> WeakDom {
+    let mut model = InstanceBuilder::new("Model")
+        .with_name("LargeAsset")
+        .with_property(
+            "WorldPivotData",
+            Variant::OptionalCFrame(Some(cframe(offset, 0.0, 0.0))),
+        );
+    for index in 0..part_count {
+        model = model.with_child(part(&format!("Part{index}"), offset + index as f32));
+    }
+    WeakDom::new(
+        InstanceBuilder::new("DataModel")
+            .with_name("root")
+            .with_child(model),
+    )
+}
+
 fn property<'a>(dom: &'a WeakDom, name: &str, property: &str) -> &'a Variant {
     dom.descendants()
         .find(|instance| instance.name == name)
@@ -169,29 +187,226 @@ fn normalization_removes_global_cframe_conflicts_but_keeps_pivot_edits() {
 }
 
 #[test]
-fn dominant_nested_model_move_is_not_promoted_to_asset_frame() {
+fn nested_model_move_becomes_its_own_local_frame() {
     let mut base = nested_majority_asset(0.0);
     let mut ours = nested_majority_asset(100.0);
     let mut theirs = nested_majority_asset(0.0);
 
-    assert!(
-        normalize_model_merge_frames(&base, &mut ours, &mut theirs).is_none(),
-        "a nested-only move is not an asset-wide frame choice"
-    );
+    let frames = normalize_model_merge_frames(&base, &mut ours, &mut theirs)
+        .expect("nested model establishes a local frame");
+    assert_eq!(frames.frames.len(), 1);
+    assert!(frames.frames[0].path.ends_with("Asset.Nested"));
+    assert!(matches!(
+        frames.frames[0].decision,
+        ModelFrameDecision::Automatic(_)
+    ));
 
-    // Declining normalization leaves both branches untouched. Ordinary
-    // one-sided merge semantics then apply the nested move exactly.
+    // The branch is canonical while ordinary merge semantics run.
     assert!((pivot_x_of(&ours, "Asset") - 0.0).abs() < 1e-4);
     assert!((x_of(&ours, "Outer") - 0.0).abs() < 1e-4);
-    assert!((pivot_x_of(&ours, "Nested") - 120.0).abs() < 1e-4);
+    assert!((pivot_x_of(&ours, "Nested") - 20.0).abs() < 1e-4);
 
     let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
     assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+    frames.apply_automatic_to_base(&mut base);
 
+    // Materializing the local plan restores the authored nested movement
+    // without moving the parent boundary.
     assert!((pivot_x_of(&base, "Asset") - 0.0).abs() < 1e-4);
     assert!((x_of(&base, "Outer") - 0.0).abs() < 1e-4);
     assert!((pivot_x_of(&base, "Nested") - 120.0).abs() < 1e-4);
     assert!((x_of(&base, "NestedA") - 120.0).abs() < 1e-4);
     assert!((x_of(&base, "NestedB") - 124.0).abs() < 1e-4);
     assert!((x_of(&base, "NestedC") - 128.0).abs() < 1e-4);
+}
+
+#[test]
+fn two_way_diff_collapses_nested_movement_into_one_frame_entry() {
+    let base = nested_majority_asset(0.0);
+    let mut side = nested_majority_asset(100.0);
+
+    let (diffs, normalization) =
+        diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    let normalization = normalization.expect("nested frame should be detected");
+    assert_eq!(normalization.frames.len(), 1);
+    assert_eq!(diffs.len(), 1, "{diffs:#?}");
+    match &diffs[0] {
+        DiffEntry::ModelFrame {
+            path, delta, class, ..
+        } => {
+            assert!(path.ends_with("Asset.Nested"), "{path}");
+            assert_eq!(class, "Model");
+            assert!((delta.position[0] - 100.0).abs() < 1e-4, "{delta:?}");
+        }
+        other => panic!("expected one model frame, got {other:#?}"),
+    }
+}
+
+#[test]
+fn two_way_diff_keeps_pivot_edit_separate_from_content_frame() {
+    let base = asset(0.0, 0.0, 0.0, None, false);
+    // All content moves +100, while the pivot moves +125.
+    let mut side = asset(100.0, 125.0, 0.0, None, false);
+
+    let (diffs, _) = diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    assert_eq!(diffs.len(), 2, "{diffs:#?}");
+    assert!(matches!(&diffs[0], DiffEntry::ModelFrame { delta, .. }
+        if (delta.position[0] - 100.0).abs() < 1e-4));
+    assert!(diffs.iter().any(|diff| matches!(
+        diff,
+        DiffEntry::Modified { property_changes, .. }
+            if property_changes.len() == 1
+                && property_changes[0].name == "WorldPivotData"
+    )));
+}
+
+#[test]
+fn two_way_diff_collapses_a_thousand_cframes_into_one_frame_entry() {
+    let base = large_asset(0.0, 1_000);
+    let mut side = large_asset(250.0, 1_000);
+
+    let (diffs, normalization) =
+        diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    assert_eq!(normalization.unwrap().frames.len(), 1);
+    assert_eq!(diffs.len(), 1, "{diffs:#?}");
+    assert!(matches!(diffs[0], DiffEntry::ModelFrame { .. }));
+}
+
+#[test]
+fn studio_rotation_normalization_does_not_invent_large_world_frame() {
+    let fresh = Matrix3::new(
+        Vector3::new(1.000009, -0.0000000093191375, 0.0002928916),
+        Vector3::new(-0.000000011180918, 1.0000004, -0.000000000004998568),
+        Vector3::new(-0.0002936968, -0.00000000000208967, 1.0000066),
+    );
+    let studio = Matrix3::new(
+        Vector3::new(1.0, 0.000000011180819, 0.00029369417),
+        Vector3::new(-0.000000011180818, 1.0, 0.000000000004826645),
+        Vector3::new(-0.00029369417, -0.0000000000081103865, 1.0),
+    );
+    let asset = |orientation: Matrix3| {
+        let positioned = |name: &str, x: f32| {
+            InstanceBuilder::new("Part").with_name(name).with_property(
+                "CFrame",
+                Variant::CFrame(CFrame::new(
+                    Vector3::new(x, 7.4760227, 189.35971),
+                    orientation,
+                )),
+            )
+        };
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Model")
+                    .with_name("FarFromOrigin")
+                    .with_child(positioned("A", -168.445))
+                    .with_child(positioned("B", -208.445)),
+            ),
+        )
+    };
+    let base = asset(fresh);
+    let mut side = asset(studio);
+
+    let (diffs, normalization) =
+        diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    assert!(
+        normalization.is_none(),
+        "representation noise is not a frame"
+    );
+    assert!(diffs.is_empty(), "{diffs:#?}");
+}
+
+#[test]
+fn translated_far_model_ignores_studio_rotation_normalization_residue() {
+    let fresh = Matrix3::new(
+        Vector3::new(1.000009, -0.0000000093191375, 0.0002928916),
+        Vector3::new(-0.000000011180918, 1.0000004, -0.000000000004998568),
+        Vector3::new(-0.0002936968, -0.00000000000208967, 1.0000066),
+    );
+    let studio = Matrix3::new(
+        Vector3::new(1.0, 0.000000011180819, 0.00029369417),
+        Vector3::new(-0.000000011180818, 1.0, 0.000000000004826645),
+        Vector3::new(-0.00029369417, -0.0000000000081103865, 1.0),
+    );
+    let asset = |orientation: Matrix3, translation: f32| {
+        let positioned = |name: &str, x: f32| {
+            InstanceBuilder::new("Part").with_name(name).with_property(
+                "CFrame",
+                Variant::CFrame(CFrame::new(
+                    Vector3::new(x + translation, -108.0, 7_050.0),
+                    orientation,
+                )),
+            )
+        };
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Model")
+                    .with_name("FarFromOrigin")
+                    .with_property(
+                        "WorldPivotData",
+                        Variant::OptionalCFrame(Some(CFrame::new(
+                            Vector3::new(-500.0 + translation, -108.0, 7_050.0),
+                            orientation,
+                        ))),
+                    )
+                    .with_child(positioned("A", -490.0))
+                    .with_child(positioned("B", -510.0)),
+            ),
+        )
+    };
+    let base = asset(fresh, 0.0);
+    let mut side = asset(studio, -1.0);
+
+    let (diffs, normalization) =
+        diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    let normalization = normalization.expect("the translation should establish a frame");
+    assert_eq!(normalization.frames.len(), 1, "{:#?}", normalization.frames);
+    assert_eq!(diffs.len(), 1, "{diffs:#?}");
+    assert!(matches!(
+        &diffs[0],
+        DiffEntry::ModelFrame { delta, .. }
+            if (delta.position[0] + 1.0).abs() < 1e-4
+                && delta.position[1].abs() < 1e-4
+                && delta.position[2].abs() < 1e-4
+    ));
+}
+
+#[test]
+fn frame_consensus_averages_f32_translation_quantization() {
+    let asset = |a_shift: f32, b_shift: f32, pivot_shift: f32| {
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Model")
+                    .with_name("FarFromOrigin")
+                    .with_property(
+                        "WorldPivotData",
+                        Variant::OptionalCFrame(Some(cframe(
+                            -500.0 + pivot_shift,
+                            -108.0,
+                            7_050.0,
+                        ))),
+                    )
+                    .with_child(InstanceBuilder::new("Part").with_name("A").with_property(
+                        "CFrame",
+                        Variant::CFrame(cframe(-490.0 + a_shift, -108.0, 7_050.0)),
+                    ))
+                    .with_child(InstanceBuilder::new("Part").with_name("B").with_property(
+                        "CFrame",
+                        Variant::CFrame(cframe(-510.0 + b_shift, -108.0, 7_050.0)),
+                    )),
+            ),
+        )
+    };
+    let base = asset(0.0, 0.0, 0.0);
+    // At large world coordinates the same authored translation can round to
+    // slightly different f32 deltas on different parts.
+    let mut side = asset(-0.99945, -1.00055, -1.0);
+
+    let (diffs, normalization) =
+        diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
+    assert_eq!(normalization.unwrap().frames.len(), 1);
+    assert_eq!(diffs.len(), 1, "{diffs:#?}");
+    assert!(matches!(
+        &diffs[0],
+        DiffEntry::ModelFrame { delta, .. } if (delta.position[0] + 1.0).abs() < 1e-4
+    ));
 }

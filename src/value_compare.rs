@@ -14,7 +14,7 @@ const MAX_FLOAT_ULPS: u32 = 2;
 // same authored placement. Sub-millistud/sub-hundredth-degree placement
 // changes are outside rbx-diff's useful fidelity, so CFrames get a deliberately
 // wider policy without weakening comparison for unrelated float properties.
-const CFRAME_POSITION_ABS_TOLERANCE: f32 = 1.0e-4;
+const CFRAME_POSITION_ABS_TOLERANCE: f32 = 1.0e-3;
 const CFRAME_ROTATION_ABS_TOLERANCE: f32 = 1.0e-4;
 
 fn ordered_f32_bits(value: f32) -> u32 {
@@ -79,7 +79,7 @@ fn vector3_equal_with_tolerance(
         && f32_equal_with_tolerance(a.z, b.z, absolute_tolerance)
 }
 
-fn cframe_equal(a: rbx_types::CFrame, b: rbx_types::CFrame) -> bool {
+pub(crate) fn cframes_equal(a: rbx_types::CFrame, b: rbx_types::CFrame) -> bool {
     vector3_equal_with_tolerance(a.position, b.position, CFRAME_POSITION_ABS_TOLERANCE)
         && vector3_equal_with_tolerance(
             a.orientation.x,
@@ -111,9 +111,9 @@ pub(crate) fn non_ref_variants_equal(a: &Variant, b: &Variant) -> bool {
         (Variant::Float64(x), Variant::Float64(y)) => f64_equal(*x, *y),
         (Variant::Vector2(x), Variant::Vector2(y)) => vector2_equal(*x, *y),
         (Variant::Vector3(x), Variant::Vector3(y)) => vector3_equal(*x, *y),
-        (Variant::CFrame(x), Variant::CFrame(y)) => cframe_equal(*x, *y),
+        (Variant::CFrame(x), Variant::CFrame(y)) => cframes_equal(*x, *y),
         (Variant::OptionalCFrame(x), Variant::OptionalCFrame(y)) => match (x, y) {
-            (Some(x), Some(y)) => cframe_equal(*x, *y),
+            (Some(x), Some(y)) => cframes_equal(*x, *y),
             (None, None) => true,
             _ => false,
         },

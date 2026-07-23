@@ -103,6 +103,8 @@ type ConflictRecord = {
 	group: string?,
 	target: Instance,
 	entry: Instance,
+	frameOrder: number?,
+	frameParentOrder: number?,
 	impactOurs: cts.ImpactSide?,
 	impactTheirs: cts.ImpactSide?,
 }
@@ -151,6 +153,8 @@ for _, entry in container:GetChildren() do
 			group = entry:GetAttribute("Group") :: string?,
 			target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
 			entry = entry,
+			frameOrder = entry:GetAttribute("FrameOrder") :: number?,
+			frameParentOrder = entry:GetAttribute("FrameParentOrder") :: number?,
 			impactOurs = readImpact(entry, "Ours"),
 			impactTheirs = readImpact(entry, "Theirs"),
 		})
@@ -184,6 +188,12 @@ for index, record in records do
 	world:set(entity, cts.Path, record.path)
 	world:set(entity, cts.Target, record.target)
 	world:set(entity, cts.Entry, record.entry)
+	if record.frameOrder then
+		world:set(entity, cts.FrameOrder, record.frameOrder)
+	end
+	if record.frameParentOrder then
+		world:set(entity, cts.FrameParentOrder, record.frameParentOrder)
+	end
 	if record.property then
 		world:set(entity, cts.Property, record.property)
 	end
@@ -209,6 +219,30 @@ for index, record in records do
 end
 world:set(cts.Conflicts, cts.Conflicts, conflictEntities)
 world:set(cts.Container, cts.Container, container)
+
+local framePlan: { cts.FrameApplication } = {}
+local framePlanFolder = container:FindFirstChild("FramePlan")
+if framePlanFolder then
+	for _, entry in framePlanFolder:GetChildren() do
+		local targetValue = entry:FindFirstChild("Target")
+		local target = if targetValue and targetValue:IsA("ObjectValue") then targetValue.Value else nil
+		local order = entry:GetAttribute("FrameOrder") :: number?
+		local parentOrder = entry:GetAttribute("FrameParentOrder") :: number?
+		local delta = entry:GetAttribute("Delta") :: CFrame?
+		if target and order and delta then
+			table.insert(framePlan, {
+				target = target,
+				order = order,
+				parentOrder = parentOrder,
+				delta = delta,
+			})
+		end
+	end
+	table.sort(framePlan, function(a, b)
+		return a.order < b.order
+	end)
+end
+world:set(cts.FramePlan, cts.FramePlan, framePlan)
 
 -- Rust captures these complete hierarchies before mutating base into the
 -- partial merge. They are compact data, not cloned Roblox instances; logical

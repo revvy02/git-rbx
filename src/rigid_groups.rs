@@ -87,6 +87,20 @@ impl Rigid {
         }
     }
 
+    /// Interpret a serialized CFrame as a mathematical rigid transform.
+    ///
+    /// Studio saves can contain rotation rows that are only approximately
+    /// orthonormal. Transposing those raw rows as an inverse turns their tiny
+    /// scale/shear residue into a false translation proportional to the
+    /// instance's distance from the world origin.
+    fn from_cframe_orthonormalized(cf: &CFrame) -> Self {
+        let mut rigid = Self::from_cframe(cf);
+        if let Some(rotation) = orthonormalize(rigid.r) {
+            rigid.r = rotation;
+        }
+        rigid
+    }
+
     pub(crate) fn to_cframe(self) -> CFrame {
         let v = |row: [f64; 3]| Vector3::new(row[0] as f32, row[1] as f32, row[2] as f32);
         CFrame::new(
@@ -128,6 +142,72 @@ impl Rigid {
         new.mul(base.inverse())
     }
 
+    /// Recover the rigid world transform between two serialized CFrames.
+    ///
+    /// Delta estimation uses orthonormalized rotations, while application
+    /// continues to multiply the original serialized matrix so harmless
+    /// representation residue is not rewritten unnecessarily. A rotation
+    /// within the frame-clustering tolerance is snapped to exact identity;
+    /// this keeps a pure translation independent of Studio's save-time
+    /// rotation normalization.
+    pub(crate) fn delta_cframes(new: &CFrame, base: &CFrame) -> Rigid {
+        let new = Self::from_cframe_orthonormalized(new);
+        let base = Self::from_cframe_orthonormalized(base);
+        let mut delta = Self::delta(new, base);
+        if delta.rotation_close_to_identity() {
+            delta.r = Self::identity().r;
+            delta.p = [
+                new.p[0] - base.p[0],
+                new.p[1] - base.p[1],
+                new.p[2] - base.p[2],
+            ];
+        }
+        delta
+    }
+
+    /// Average numerically equivalent observations of the same transform.
+    ///
+    /// Candidate selection still counts each boundary as one vote; the
+    /// supporting-part weights are used only to recover a less noisy transform
+    /// after that cluster wins.
+    pub(crate) fn weighted_average(
+        self,
+        self_weight: usize,
+        other: Rigid,
+        other_weight: usize,
+    ) -> Rigid {
+        let self_weight = self_weight as f64;
+        let other_weight = other_weight as f64;
+        let total = self_weight + other_weight;
+        let mut average = Rigid {
+            r: std::array::from_fn(|row| {
+                std::array::from_fn(|column| {
+                    (self.r[row][column] * self_weight + other.r[row][column] * other_weight)
+                        / total
+                })
+            }),
+            p: std::array::from_fn(|axis| {
+                (self.p[axis] * self_weight + other.p[axis] * other_weight) / total
+            }),
+        };
+        if let Some(rotation) = orthonormalize(average.r) {
+            average.r = rotation;
+        }
+        if average.rotation_close_to_identity() {
+            average.r = Self::identity().r;
+        }
+        average
+    }
+
+    fn rotation_close_to_identity(&self) -> bool {
+        let identity = Self::identity();
+        (0..3).all(|row| {
+            (0..3).all(|column| {
+                (self.r[row][column] - identity.r[row][column]).abs() <= ROTATION_EPSILON
+            })
+        })
+    }
+
     pub(crate) fn close(a: &Rigid, b: &Rigid) -> bool {
         for i in 0..3 {
             if (a.p[i] - b.p[i]).abs() > POSITION_EPSILON {
@@ -141,6 +221,34 @@ impl Rigid {
         }
         true
     }
+}
+
+fn orthonormalize(rows: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    fn scale(value: [f64; 3], factor: f64) -> [f64; 3] {
+        value.map(|component| component * factor)
+    }
+    fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+    fn normalize(value: [f64; 3]) -> Option<[f64; 3]> {
+        let length = dot(value, value).sqrt();
+        (length.is_finite() && length > f64::EPSILON).then(|| scale(value, length.recip()))
+    }
+    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    let x = normalize(rows[0])?;
+    let y = normalize(subtract(rows[1], scale(x, dot(rows[1], x))))?;
+    let z = normalize(cross(x, y))?;
+    Some([x, y, z])
 }
 
 /// The CFrame payload of a spatial property value, if it has one.
@@ -179,7 +287,7 @@ fn spatial_conflict(
     let side_value = |ops: &[EditOp]| match ops {
         [EditOp::SetProperty {
             value: Some(value), ..
-        }] => spatial_cframe(value).map(Rigid::from_cframe),
+        }] => spatial_cframe(value).copied(),
         _ => None,
     };
     let ours = side_value(&conflict.ours)?;
@@ -188,13 +296,13 @@ fn spatial_conflict(
         .properties
         .get(&name.as_str().into())
         .and_then(spatial_cframe)
-        .map(Rigid::from_cframe)?;
+        .copied()?;
     Some(SpatialConflict {
         conflict_index,
         base_ref: conflict.base_ref,
         kind,
-        delta_ours: Rigid::delta(ours, base_value),
-        delta_theirs: Rigid::delta(theirs, base_value),
+        delta_ours: Rigid::delta_cframes(&ours, &base_value),
+        delta_theirs: Rigid::delta_cframes(&theirs, &base_value),
     })
 }
 

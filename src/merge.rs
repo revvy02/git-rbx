@@ -12,7 +12,10 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::diff::DiffConfig;
-use crate::edit_script::{apply_ops, compute_edit_script, Anchor, EditOp, EditScript};
+use crate::edit_script::{
+    apply_ops, compute_edit_script, compute_edit_script_with_matches, Anchor, EditOp, EditScript,
+    InstanceIdentity,
+};
 use crate::explorer_tree::ExplorerTrees;
 use crate::hash::DeepHashCache;
 use crate::match_instances::get_instance_path;
@@ -36,7 +39,14 @@ pub enum ConflictKind {
     MoveTarget,
     /// Both branches placed an otherwise canonical model asset in different
     /// world frames. The deltas take canonical/base content to each side.
-    ModelFrame { ours: CFrame, theirs: CFrame },
+    ModelFrame {
+        ours: CFrame,
+        theirs: CFrame,
+        /// Stable top-down order among hierarchical frame boundaries.
+        order: usize,
+        /// Nearest ancestor that also has a frame decision.
+        parent_order: Option<usize>,
+    },
 }
 
 #[derive(Debug)]
@@ -79,6 +89,23 @@ pub fn merge_doms(
 ) -> MergeResult {
     let ours_script = compute_edit_script(base, ours, config);
     let theirs_script = compute_edit_script(base, theirs, config);
+    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+}
+
+/// Three-way merge using instance identities captured before a
+/// representation-only normalization pass. This prevents canonical CFrames
+/// from making duplicate siblings reshuffle during the real merge.
+pub fn merge_doms_with_matches(
+    base: &mut WeakDom,
+    ours: &WeakDom,
+    theirs: &WeakDom,
+    config: &DiffConfig,
+    ours_identity: &InstanceIdentity,
+    theirs_identity: &InstanceIdentity,
+) -> MergeResult {
+    let ours_script = compute_edit_script_with_matches(base, ours, config, Some(ours_identity));
+    let theirs_script =
+        compute_edit_script_with_matches(base, theirs, config, Some(theirs_identity));
     merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
 }
 

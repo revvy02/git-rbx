@@ -18,6 +18,7 @@ export type ExplorerNode = cts.ExplorerNode
 export type ExplorerProjection = cts.ExplorerProjection
 export type VersionTreeNode = cts.VersionTreeNode
 export type VersionTrees = cts.VersionTrees
+export type FrameApplication = cts.FrameApplication
 
 export type SystemInit = (world: World, cts: Cts, scheduler: Scheduler) -> ()
 

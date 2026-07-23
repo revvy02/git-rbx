@@ -6,11 +6,12 @@
 //! with hash-based fallback for refs into pruned (identical) subtrees.
 
 use rbx_dom_weak::{types::Ref, WeakDom};
-use rbx_types::{ContentType, Variant};
+use rbx_types::{CFrame, ContentType, Variant};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, info_span};
 
+use crate::edit_script::InstanceIdentity;
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
 use crate::move_detect::detect_moves;
@@ -52,6 +53,55 @@ pub enum DiffEntry {
         class: String,
         property_changes: Vec<PropertyChange>,
     },
+    /// A Model boundary and its world-space descendants moved together.
+    /// This is an inferred rigid transform, not a Roblox property change;
+    /// `WorldPivotData` edits that differ from the content still appear as
+    /// ordinary property changes.
+    ModelFrame {
+        old_ref: String,
+        new_ref: String,
+        path: String,
+        class: String,
+        /// Stable top-down order among model-frame entries.
+        order: usize,
+        /// `order` of the nearest ancestor frame, when nested.
+        parent_order: Option<usize>,
+        /// Local transform relative to `parent_order`, or world-space when
+        /// this entry has no participating parent.
+        delta: CFrameValue,
+    },
+}
+
+/// Serializable representation of a rigid CFrame used by model-frame diffs.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CFrameValue {
+    pub position: [f32; 3],
+    pub orientation: [[f32; 3]; 3],
+}
+
+impl From<CFrame> for CFrameValue {
+    fn from(value: CFrame) -> Self {
+        Self {
+            position: [value.position.x, value.position.y, value.position.z],
+            orientation: [
+                [
+                    value.orientation.x.x,
+                    value.orientation.x.y,
+                    value.orientation.x.z,
+                ],
+                [
+                    value.orientation.y.x,
+                    value.orientation.y.y,
+                    value.orientation.y.z,
+                ],
+                [
+                    value.orientation.z.x,
+                    value.orientation.z.y,
+                    value.orientation.z.z,
+                ],
+            ],
+        }
+    }
 }
 
 /// A property change within an instance.
@@ -189,39 +239,64 @@ pub fn compute_diff(
     new_hashes: &LazyHashCache,
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
+    compute_diff_with_identity(old_dom, new_dom, old_hashes, new_hashes, config, None)
+}
+
+/// Compute a diff while preserving identity captured before a
+/// representation-only canonicalization.
+pub(crate) fn compute_diff_with_identity(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    old_hashes: &LazyHashCache,
+    new_hashes: &LazyHashCache,
+    config: &DiffConfig,
+    identity: Option<&InstanceIdentity>,
+) -> Vec<DiffEntry> {
     let _span = info_span!("compute_diff").entered();
 
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
     let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
-    let matcher = Matcher::new(
+    let mut matcher = Matcher::new(
         old_dom, new_dom, old_hashes, new_hashes, &old_deep, &new_deep,
     );
+    if let Some(identity) = identity {
+        matcher = matcher.with_complete_identity(&identity.matched);
+    }
 
     // Phase 1: Build global ref mapping (old_ref → new_ref) for matched instances,
     // collecting removed/added subtree roots for global move detection
-    let mut ref_mapping = HashMap::new();
+    let mut ref_mapping = identity
+        .map(|identity| identity.matched.clone())
+        .unwrap_or_default();
     let mut removed_roots = Vec::new();
     let mut added_roots = Vec::new();
-    build_ref_mapping(
-        &matcher,
-        old_dom.root_ref(),
-        new_dom.root_ref(),
-        &mut ref_mapping,
-        &mut removed_roots,
-        &mut added_roots,
-    );
+    if identity.is_none() {
+        build_ref_mapping(
+            &matcher,
+            old_dom.root_ref(),
+            new_dom.root_ref(),
+            &mut ref_mapping,
+            &mut removed_roots,
+            &mut added_roots,
+        );
+    }
     info!(matched_pairs = ref_mapping.len(), "ref mapping built");
 
     // Phase 1.5: Pair removed/added roots globally into moves.
     // Must happen before the diff pass so Ref properties pointing at moved
     // instances compare through the mapping instead of reporting false changes.
-    let moves = detect_moves(
-        old_dom,
-        new_dom,
-        removed_roots,
-        added_roots,
-        &old_deep,
-        &new_deep,
+    let moves = identity.map_or_else(
+        || {
+            detect_moves(
+                old_dom,
+                new_dom,
+                removed_roots,
+                added_roots,
+                &old_deep,
+                &new_deep,
+            )
+        },
+        |identity| identity.moves.clone(),
     );
     let moved_old: HashSet<Ref> = moves.iter().map(|(o, _)| *o).collect();
     let moved_new: HashSet<Ref> = moves.iter().map(|(_, n)| *n).collect();
@@ -443,7 +518,18 @@ pub(crate) struct RawPropertyChange {
 
 /// Equality for attribute values (no Refs possible inside Attributes; float
 /// tolerance matches variants_equal).
+fn attr_string_bytes(value: &Variant) -> Option<&[u8]> {
+    match value {
+        Variant::String(value) => Some(value.as_bytes()),
+        Variant::BinaryString(value) => Some(value.as_ref()),
+        _ => None,
+    }
+}
+
 fn attr_value_eq(a: &Variant, b: &Variant) -> bool {
+    if let (Some(a), Some(b)) = (attr_string_bytes(a), attr_string_bytes(b)) {
+        return a == b;
+    }
     match (a, b) {
         (Variant::Float32(x), Variant::Float32(y)) => {
             x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() < 0.01
@@ -697,10 +783,18 @@ fn diff_properties(
         old_deep,
         new_deep,
     ) {
+        let attribute = raw.name.starts_with("Attributes.");
+        let display_value = |value: &Variant| {
+            if attribute {
+                attribute_variant_to_property_value(value)
+            } else {
+                variant_to_property_value(value)
+            }
+        };
         changes.push(PropertyChange {
             name: raw.name,
-            old_value: raw.old.as_ref().map(variant_to_property_value),
-            new_value: raw.new.as_ref().map(variant_to_property_value),
+            old_value: raw.old.as_ref().map(display_value),
+            new_value: raw.new.as_ref().map(display_value),
         });
     }
 
@@ -928,5 +1022,23 @@ pub(crate) fn variant_to_property_value(v: &Variant) -> PropertyValue {
         _ => PropertyValue::Other {
             type_name: format!("{:?}", v.ty()),
         },
+    }
+}
+
+/// Attribute strings decode from binary Roblox files as `BinaryString`
+/// because the container's payload has no reflected property type. Inside an
+/// Attributes container, valid UTF-8 bytes are nevertheless the Roblox
+/// `string` attribute type. Keep generic BinaryString properties opaque.
+pub(crate) fn attribute_variant_to_property_value(v: &Variant) -> PropertyValue {
+    match v {
+        Variant::BinaryString(value) => match std::str::from_utf8(value.as_ref()) {
+            Ok(value) => PropertyValue::String {
+                value: value.to_string(),
+            },
+            Err(_) => PropertyValue::BinaryString {
+                len: AsRef::<[u8]>::as_ref(value).len(),
+            },
+        },
+        _ => variant_to_property_value(v),
     }
 }

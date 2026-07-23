@@ -20,6 +20,7 @@ type Base = types.Base
 
 return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	local conflictList = (world:get(cts.Conflicts, cts.Conflicts) :: { any }?) or {}
+	local automaticFramePlan = (world:get(cts.FramePlan, cts.FramePlan) :: { types.FrameApplication }?) or {}
 
 	local function eachPart(root: Instance, fn: (BasePart) -> ())
 		if root:IsA("BasePart") then
@@ -80,6 +81,23 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		container.Parent = game:GetService("ServerStorage")
 	end
 
+	-- Capture one canonical snapshot across every automatic and selectable
+	-- frame boundary. Overlapping boundaries intentionally share entries in
+	-- these maps: restoration writes the same canonical value exactly once.
+	local canonicalFrameParts: { [BasePart]: CFrame } = {}
+	local canonicalFrameModels: { [Model]: CFrame } = {}
+	local function captureFrameTarget(target: Instance)
+		eachPart(target, function(part)
+			canonicalFrameParts[part] = canonicalFrameParts[part] or part.CFrame
+		end)
+		eachModel(target, function(model)
+			canonicalFrameModels[model] = canonicalFrameModels[model] or model.WorldPivot
+		end)
+	end
+	for _, application in automaticFramePlan do
+		captureFrameTarget(application.target)
+	end
+
 	for _, entity in conflictList do
 		local entry = world:get(entity, cts.Entry) :: Instance
 		world:set(entity, cts.Ours, sideInfo(entry, "Ours"))
@@ -106,16 +124,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		elseif kind == "MoveTarget" then
 			base.parent = target.Parent
 		elseif kind == "ModelFrame" then
-			local frameParts: { [BasePart]: CFrame } = {}
-			local frameModels: { [Model]: CFrame } = {}
-			eachPart(target, function(part)
-				frameParts[part] = part.CFrame
-			end)
-			eachModel(target, function(model)
-				frameModels[model] = model.WorldPivot
-			end)
-			base.frameParts = frameParts
-			base.frameModels = frameModels
+			captureFrameTarget(target)
 		end
 		world:set(entity, cts.Base, base)
 	end
@@ -204,40 +213,79 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			if clone then
 				clone.Parent = if staged == keepSide then target.Parent else keepInfo.folder
 			end
-		elseif kind == "ModelFrame" then
-			local info = if staged == "ours" then ours elseif staged == "theirs" then theirs else nil
-			local delta = if info then info.delta else CFrame.identity
-			if delta then
-				if target:IsA("PVInstance") then
-					-- PivotTo performs exactly the left-multiplied world transform
-					-- represented by Delta, including nested explicit pivots.
-					target:PivotTo(delta * target:GetPivot())
-				else
-					eachPart(target, function(part)
-						part.CFrame = delta * part.CFrame
-					end)
-					eachModel(target, function(model)
-						model.WorldPivot = delta * model.WorldPivot
-					end)
-				end
-			end
 		end
 	end
 
 	local function restoreCanonicalFrames()
+		for part, cframe in canonicalFrameParts do
+			if part.Parent then
+				part.CFrame = cframe
+			end
+		end
+		for model, pivot in canonicalFrameModels do
+			if model.Parent then
+				model.WorldPivot = pivot
+			end
+		end
+	end
+
+	local function applyFramePlan()
+		local applications: { types.FrameApplication } = table.clone(automaticFramePlan)
 		for _, entity in conflictList do
 			if world:get(entity, cts.Kind) == "ModelFrame" then
-				local base = world:get(entity, cts.Base) :: Base
-				for part, cframe in base.frameParts or {} do
-					if part.Parent then
-						part.CFrame = cframe
-					end
+				local staged = world:get(entity, cts.Resolution) :: string?
+				local info = if staged == "ours"
+					then world:get(entity, cts.Ours) :: SideInfo
+					elseif staged == "theirs" then world:get(entity, cts.Theirs) :: SideInfo
+					else nil
+				if info and info.delta then
+					table.insert(applications, {
+						target = world:get(entity, cts.Target) :: Instance,
+						order = (world:get(entity, cts.FrameOrder) :: number?) or math.huge,
+						parentOrder = world:get(entity, cts.FrameParentOrder) :: number?,
+						delta = info.delta,
+					})
 				end
-				for model, pivot in base.frameModels or {} do
-					if model.Parent then
-						model.WorldPivot = pivot
-					end
+			end
+		end
+		table.sort(applications, function(a, b)
+			return a.order < b.order
+		end)
+
+		-- Compose every local choice first. Direct property writes then visit
+		-- each descendant once, avoiding both compounded preview transforms and
+		-- float drift from repeated parent/child PivotTo calls.
+		local effectiveByOrder: { [number]: CFrame } = {}
+		local effectiveByTarget: { [Instance]: CFrame } = {}
+		local roots: { Instance } = {}
+		for _, application in applications do
+			local parent = if application.parentOrder then effectiveByOrder[application.parentOrder] else nil
+			local effective = application.delta * (parent or CFrame.identity)
+			effectiveByOrder[application.order] = effective
+			effectiveByTarget[application.target] = effective
+			if parent == nil then
+				table.insert(roots, application.target)
+			end
+		end
+
+		local function visit(instance: Instance, inherited: CFrame?)
+			local effective = effectiveByTarget[instance] or inherited
+			if effective then
+				if instance:IsA("BasePart") then
+					instance.CFrame = effective * instance.CFrame
+				elseif instance:IsA("Model") then
+					-- Assigning WorldPivot directly changes only the serialized pivot;
+					-- descendants receive their own one-time world transforms below.
+					instance.WorldPivot = effective * instance.WorldPivot
 				end
+			end
+			for _, child in instance:GetChildren() do
+				visit(child, effective)
+			end
+		end
+		for _, root in roots do
+			if root.Parent then
+				visit(root, nil)
 			end
 		end
 	end
@@ -261,18 +309,15 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			if changed then
 				-- Rebuild from the canonical frame on every decision change so
 				-- switching ours/theirs never compounds transforms. Ordinary
-				-- property/tree choices run first; ModelFrame runs last.
+				-- property/tree choices run first; the complete hierarchical frame
+				-- plan then runs once in parent-before-child order.
 				restoreCanonicalFrames()
 				for _, entity in conflictList do
 					if world:get(entity, cts.Kind) ~= "ModelFrame" then
 						applyPreview(entity)
 					end
 				end
-				for _, entity in conflictList do
-					if world:get(entity, cts.Kind) == "ModelFrame" then
-						applyPreview(entity)
-					end
-				end
+				applyFramePlan()
 				for _, entity in conflictList do
 					local staged = (world:get(entity, cts.Resolution) :: string?) or "unresolved"
 					world:set(entity, cts.Rendered, staged)
