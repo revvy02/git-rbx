@@ -61,18 +61,22 @@ fn pure_move_is_reported_as_moved_not_add_remove() {
     assert_eq!(modified, 0);
 
     match diffs.iter().find(|d| matches!(d, DiffEntry::Moved { .. })).unwrap() {
-        DiffEntry::Moved { old_path, path, class, property_changes, .. } => {
+        DiffEntry::Moved {
+            old_path,
+            path,
+            class,
+            ..
+        } => {
             assert_eq!(old_path, "root.A.P");
             assert_eq!(path, "root.B.P");
             assert_eq!(class, "Part");
-            assert!(property_changes.is_empty(), "pure move should have no property changes");
         }
         _ => unreachable!(),
     }
 }
 
 #[test]
-fn move_with_edit_reports_moved_with_property_changes() {
+fn move_with_edit_reports_primitive_moved_and_modified_entries() {
     // P moves from A to B and its Transparency changes
     let old = WeakDom::new(
         folder("root")
@@ -93,14 +97,25 @@ fn move_with_edit_reports_moved_with_property_changes() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, _modified, moved) = summarize(&diffs);
+    let (added, removed, modified, moved) = summarize(&diffs);
 
     assert_eq!(moved, 1, "expected one move, got diffs: {:?}", diffs);
+    assert_eq!(
+        modified, 1,
+        "expected a separate modification, got diffs: {:?}",
+        diffs
+    );
     assert_eq!(added, 0);
     assert_eq!(removed, 0);
 
-    match diffs.iter().find(|d| matches!(d, DiffEntry::Moved { .. })).unwrap() {
-        DiffEntry::Moved { property_changes, .. } => {
+    match diffs
+        .iter()
+        .find(|d| matches!(d, DiffEntry::Modified { .. }))
+        .unwrap()
+    {
+        DiffEntry::Modified {
+            property_changes, ..
+        } => {
             assert_eq!(property_changes.len(), 1, "changes: {:?}", property_changes);
             assert_eq!(property_changes[0].name, "Transparency");
         }

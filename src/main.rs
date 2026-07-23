@@ -184,7 +184,6 @@ fn cmd_diff(
     let total_start = Instant::now();
 
     let load_start = Instant::now();
-    eprintln!("Loading {}...", old_file);
     let old_dom = {
         let _span = info_span!("load_old_file", file = %old_file).entered();
         load_diff_file(old_file)?
@@ -192,7 +191,6 @@ fn cmd_diff(
     let old_load_time = load_start.elapsed();
 
     let load_start = Instant::now();
-    eprintln!("Loading {}...", new_file);
     let mut new_dom = {
         let _span = info_span!("load_new_file", file = %new_file).entered();
         load_diff_file(new_file)?
@@ -202,19 +200,14 @@ fn cmd_diff(
     let config = DiffConfig::default();
 
     let diff_start = Instant::now();
-    eprintln!("Computing differences...");
     // Unlike the old root-only model normalization, hierarchical framing
     // reports every inferred movement explicitly. It is therefore safe and
     // useful for place files too: authored placement remains visible as one
     // Pivoted entry instead of thousands of descendant CFrame changes.
     let (diffs, pivots) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
-    if let Some(pivots) = pivots {
-        eprintln!(
-            "Factored {} hierarchical pivot(s) ({} boundaries detected)",
-            pivots.pivots.len(),
-            pivots.detected,
-        );
-    }
+    let pivot_stats = pivots
+        .as_ref()
+        .map(|pivots| (pivots.pivots.len(), pivots.detected));
     let diff_time = diff_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -227,7 +220,6 @@ fn cmd_diff(
         OutputFormat::Pretty
     };
 
-    eprintln!();
     print_diff(&diffs, format);
 
     if timing {
@@ -239,6 +231,12 @@ fn cmd_diff(
             "  Diff computation (includes lazy hashing): {:?}",
             diff_time
         );
+        if let Some((pivot_count, boundary_count)) = pivot_stats {
+            eprintln!(
+                "  Pivot factoring: {} pivot(s) from {} boundaries",
+                pivot_count, boundary_count
+            );
+        }
         eprintln!("  Total: {:?}", total_time);
     }
 
@@ -403,19 +401,10 @@ fn cmd_merge(
     std::process::exit(1);
 }
 
-/// Compact one-line summary of a rigid delta for merge output.
+/// Compact one-line summary of a rigid delta for merge/normalization output —
+/// the same axis-angle formatting the pivoted diff rows use.
 fn format_delta(cf: &rbx_types::CFrame) -> String {
-    let o = &cf.orientation;
-    let rotated =
-        (o.x.x - 1.0).abs() > 1e-4 || (o.y.y - 1.0).abs() > 1e-4 || (o.z.z - 1.0).abs() > 1e-4;
-    let p = cf.position;
-    format!(
-        "\u{394}({:.1}, {:.1}, {:.1}){}",
-        p.x,
-        p.y,
-        p.z,
-        if rotated { " + rotation" } else { "" }
-    )
+    rbx_diff::output::format_delta(&(*cf).into())
 }
 
 fn is_model_asset_path(path: &str) -> bool {

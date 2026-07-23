@@ -5,7 +5,7 @@
 
 use rbx_diff::{diff_model_doms_with_config, DiffConfig, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::{CFrame, Matrix3, Variant, Vector3};
+use rbx_types::{Attributes, CFrame, Matrix3, Variant, Vector3};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
@@ -353,6 +353,11 @@ fn two_way_diff_cli_json_reports_pivots_instead_of_descendant_cframes() {
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        output.stderr.is_empty(),
+        "ordinary diff output should not include diagnostics:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let changes = json["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2, "{json:#}");
@@ -360,8 +365,264 @@ fn two_way_diff_cli_json_reports_pivots_instead_of_descendant_cframes() {
     assert!(changes.iter().all(|change| change["delta"]
         .as_array()
         .is_some_and(|delta| delta.len() == 12)));
+    assert!(changes
+        .iter()
+        .all(|change| change.get("path_segments").is_none()));
     assert_eq!(json["summary"]["pivoted"], 2);
     assert_eq!(json["summary"]["modified"], 0);
+
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn pretty_diff_splits_long_cframe_changes() {
+    let camera_asset = |offset: f32| {
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Camera")
+                    .with_name("Camera")
+                    .with_property("CFrame", Variant::CFrame(translated(offset))),
+            ),
+        )
+    };
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-pretty-output-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let base_path = scratch.join("base.rbxm");
+    let side_path = scratch.join("side.rbxm");
+    save(&base_path, &camera_asset(0.0));
+    save(&side_path, &camera_asset(100.0));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+        .args([
+            "diff",
+            base_path.to_str().unwrap(),
+            side_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "ordinary diff output should not include diagnostics:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("~ Camera [Camera]\n"), "{stdout}");
+    assert!(stdout.contains("    CFrame:\n      - CFrame("), "{stdout}");
+    assert!(stdout.contains("\n      + CFrame("), "{stdout}");
+    assert!(!stdout.contains("CFrame: CFrame("), "{stdout}");
+    assert!(!stdout.contains("\nModified\n"), "{stdout}");
+
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn pretty_diff_renders_every_shared_path_segment_and_direct_property_changes() {
+    let asset = |a_transparency: f32, b_transparency: f32| {
+        let part = |name: &str, transparency: f32| {
+            InstanceBuilder::new("Part")
+                .with_name(name)
+                .with_property("Transparency", Variant::Float32(transparency))
+        };
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Folder").with_name("Root").with_child(
+                    InstanceBuilder::new("Folder")
+                        .with_name("Shared")
+                        .with_child(part("A", a_transparency))
+                        .with_child(part("B", b_transparency)),
+                ),
+            ),
+        )
+    };
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-collapsed-output-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let base_path = scratch.join("base.rbxm");
+    let side_path = scratch.join("side.rbxm");
+    save(&base_path, &asset(0.0, 0.0));
+    save(&side_path, &asset(0.25, 0.5));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+        .args([
+            "diff",
+            base_path.to_str().unwrap(),
+            side_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("Root\n  Shared\n"), "{stdout}");
+    assert!(!stdout.contains("Root.Shared"), "{stdout}");
+    assert!(stdout.contains("    ~ A [Part]\n"), "{stdout}");
+    assert!(stdout.contains("    ~ B [Part]\n"), "{stdout}");
+    assert!(
+        stdout.contains("        Transparency:\n          - 0\n          + 0.25"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("        Transparency:\n          - 0\n          + 0.5"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains('→'), "{stdout}");
+
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn pretty_diff_nests_attributes_with_direct_values() {
+    let asset = |pairs: &[(&str, f64)]| {
+        let mut attributes = Attributes::new();
+        for (key, value) in pairs {
+            attributes.insert((*key).to_string(), Variant::Float64(*value));
+        }
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Folder")
+                    .with_name("Thing")
+                    .with_property("Attributes", Variant::Attributes(attributes)),
+            ),
+        )
+    };
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-attribute-output-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let base_path = scratch.join("base.rbxm");
+    let side_path = scratch.join("side.rbxm");
+    save(&base_path, &asset(&[("changed", 1.0), ("removed", 1.0)]));
+    save(&side_path, &asset(&[("added", 3.0), ("changed", 2.0)]));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+        .args([
+            "diff",
+            base_path.to_str().unwrap(),
+            side_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("    Attributes\n"), "{stdout}");
+    assert!(stdout.contains("      added:\n        + 3"), "{stdout}");
+    assert!(
+        stdout.contains("      changed:\n        - 1\n        + 2"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("      removed:\n        - 1"), "{stdout}");
+    assert!(!stdout.contains("Attributes."), "{stdout}");
+
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
+    let asset = |destination: &str, transparency: f32| {
+        let part = InstanceBuilder::new("Part")
+            .with_name("P")
+            .with_property("Anchored", Variant::Bool(true))
+            .with_property("Transparency", Variant::Float32(transparency));
+        let (a, b) = if destination == "A" {
+            (
+                InstanceBuilder::new("Folder")
+                    .with_name("A")
+                    .with_child(part),
+                InstanceBuilder::new("Folder").with_name("B"),
+            )
+        } else {
+            (
+                InstanceBuilder::new("Folder").with_name("A"),
+                InstanceBuilder::new("Folder")
+                    .with_name("B")
+                    .with_child(part),
+            )
+        };
+        WeakDom::new(
+            InstanceBuilder::new("DataModel").with_child(
+                InstanceBuilder::new("Folder")
+                    .with_name("Root")
+                    .with_child(a)
+                    .with_child(b),
+            ),
+        )
+    };
+    let scratch = std::env::temp_dir().join(format!(
+        "rbx-diff-move-edit-output-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let base_path = scratch.join("base.rbxm");
+    let side_path = scratch.join("side.rbxm");
+    save(&base_path, &asset("A", 0.0));
+    save(&side_path, &asset("B", 0.5));
+
+    let pretty = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+        .args([
+            "diff",
+            base_path.to_str().unwrap(),
+            side_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        pretty.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&pretty.stderr)
+    );
+    let stdout = String::from_utf8(pretty.stdout).unwrap();
+    assert!(
+        stdout.starts_with("Root\n  B\n    > ~ P [Part]\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("        from Root.A.P\n"), "{stdout}");
+    assert!(
+        stdout.contains("        Transparency:\n          - 0\n          + 0.5"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Summary: 0 added, 0 removed, 1 modified, 1 moved, 0 pivoted"),
+        "{stdout}"
+    );
+
+    let json = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+        .args([
+            "diff",
+            base_path.to_str().unwrap(),
+            side_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        json.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let changes = json["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 2, "{json:#}");
+    assert_eq!(changes[0]["type"], "moved");
+    assert!(changes[0].get("property_changes").is_none(), "{json:#}");
+    assert_eq!(changes[1]["type"], "modified");
 
     std::fs::remove_dir_all(scratch).unwrap();
 }

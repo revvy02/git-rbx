@@ -677,13 +677,22 @@ impl ChildInfo<'_> {
 
 /// Get the full path of an instance (e.g., "Workspace.Map.Building1")
 pub(crate) fn get_instance_path(dom: &dyn DomView, referent: Ref) -> String {
+    let segments = get_instance_path_segments(dom, referent);
+    join_instance_path(&segments)
+}
+
+/// Get the individual instance names that form a full path.
+///
+/// Presentation code must retain these boundaries rather than splitting the
+/// dot-joined display path, because Roblox instance names may contain dots.
+pub(crate) fn get_instance_path_segments(dom: &dyn DomView, referent: Ref) -> Vec<(Ref, String)> {
     let mut parts = Vec::new();
     let mut current = referent;
 
     while let Some(inst) = dom.get_by_ref(current) {
         // Skip the DataModel root
         if inst.class() != "DataModel" {
-            parts.push(inst.name().to_string());
+            parts.push((current, inst.name().to_string()));
         }
         let parent = inst.parent();
         if parent.is_none() {
@@ -693,5 +702,18 @@ pub(crate) fn get_instance_path(dom: &dyn DomView, referent: Ref) -> String {
     }
 
     parts.reverse();
-    parts.join(".")
+    parts
+}
+
+pub(crate) fn join_instance_path(segments: &[(Ref, String)]) -> String {
+    let capacity = segments.iter().map(|(_, name)| name.len()).sum::<usize>()
+        + segments.len().saturating_sub(1);
+    let mut path = String::with_capacity(capacity);
+    for (index, (_, name)) in segments.iter().enumerate() {
+        if index > 0 {
+            path.push('.');
+        }
+        path.push_str(name);
+    }
+    path
 }

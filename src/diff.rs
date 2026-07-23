@@ -8,7 +8,9 @@
 use crate::diff_dom::{DomView, InstanceView};
 use crate::edit_script::{Anchor, EditOp, SemanticChangeSet};
 use crate::hash::LazyHashCache;
-use crate::match_instances::get_instance_path;
+use crate::match_instances::{
+    get_instance_path, get_instance_path_segments, join_instance_path,
+};
 use crate::property_semantics::get_authored_properties;
 use crate::value_compare::non_ref_variants_equal;
 use rbx_dom_weak::{types::Ref, WeakDom};
@@ -24,12 +26,18 @@ pub enum DiffEntry {
     Added {
         new_ref: String,
         path: String,
+        /// Structured presentation path; omitted from machine output.
+        #[serde(skip)]
+        path_segments: Vec<(Ref, String)>,
         class: String,
     },
     /// Instance was removed (only in old DOM)
     Removed {
         old_ref: String,
         path: String,
+        /// Structured presentation path; omitted from machine output.
+        #[serde(skip)]
+        path_segments: Vec<(Ref, String)>,
         class: String,
     },
     /// Instance was modified (properties changed)
@@ -37,19 +45,24 @@ pub enum DiffEntry {
         old_ref: String,
         new_ref: String,
         path: String,
+        /// Structured presentation path; omitted from machine output.
+        #[serde(skip)]
+        path_segments: Vec<(Ref, String)>,
         class: String,
         property_changes: Vec<PropertyChange>,
     },
     /// Instance was moved to a different parent (same logical instance).
-    /// `path` is the new location; property_changes covers any edits made
-    /// alongside the move (empty for a pure move).
+    /// `path` is the new location. Property edits remain separate `Modified`
+    /// entries so every diff entry represents one primitive operation.
     Moved {
         old_ref: String,
         new_ref: String,
         old_path: String,
         path: String,
+        /// Structured presentation path; omitted from machine output.
+        #[serde(skip)]
+        path_segments: Vec<(Ref, String)>,
         class: String,
-        property_changes: Vec<PropertyChange>,
     },
     /// A Model boundary and its world-space descendants were pivoted together.
     /// This is an inferred rigid transform, not a Roblox property change;
@@ -59,6 +72,9 @@ pub enum DiffEntry {
         old_ref: String,
         new_ref: String,
         path: String,
+        /// Structured presentation path; omitted from machine output.
+        #[serde(skip)]
+        path_segments: Vec<(Ref, String)>,
         class: String,
         /// Stable top-down order among pivot operations.
         order: usize,
@@ -481,6 +497,23 @@ pub(crate) fn raw_property_changes(
 /// The change set is authoritative: this function does not rematch instances
 /// or compare properties again. Changes below a moved root are deferred until
 /// after that root's `Moved` row, preserving the tree-oriented output order.
+fn presentation_path(
+    dom: &dyn DomView,
+    referent: Ref,
+    canonical_refs: Option<&HashMap<Ref, Ref>>,
+) -> (String, Vec<(Ref, String)>) {
+    let mut segments = get_instance_path_segments(dom, referent);
+    if let Some(canonical_refs) = canonical_refs {
+        for (referent, _) in &mut segments {
+            if let Some(canonical) = canonical_refs.get(referent) {
+                *referent = *canonical;
+            }
+        }
+    }
+    let path = join_instance_path(&segments);
+    (path, segments)
+}
+
 pub(crate) fn semantic_changes_to_diff(
     old_dom: &dyn DomView,
     new_dom: &dyn DomView,
@@ -491,10 +524,16 @@ pub(crate) fn semantic_changes_to_diff(
         let Some(instance) = new_dom.get_by_ref(pivot.side_ref) else {
             continue;
         };
+        let (path, path_segments) = presentation_path(
+            new_dom,
+            pivot.side_ref,
+            Some(&changes.identity.reverse_matched),
+        );
         result.push(DiffEntry::Pivoted {
             old_ref: pivot.target_ref.to_string(),
             new_ref: pivot.side_ref.to_string(),
-            path: get_instance_path(new_dom, pivot.side_ref),
+            path,
+            path_segments,
             class: instance.class().to_string(),
             order: pivot.order,
             parent_order: pivot.parent_order,
@@ -578,10 +617,12 @@ pub(crate) fn semantic_changes_to_diff(
                 let Some(instance) = old_dom.get_by_ref(*old_ref) else {
                     continue;
                 };
+                let (path, path_segments) = presentation_path(old_dom, *old_ref, None);
                 push(
                     DiffEntry::Removed {
                         old_ref: old_ref.to_string(),
-                        path: get_instance_path(old_dom, *old_ref),
+                        path,
+                        path_segments,
                         class: instance.class().to_string(),
                     },
                     moved_ancestor(*old_ref),
@@ -593,6 +634,11 @@ pub(crate) fn semantic_changes_to_diff(
                 let Some(instance) = new_dom.get_by_ref(*new_ref) else {
                     continue;
                 };
+                let (path, path_segments) = presentation_path(
+                    new_dom,
+                    *new_ref,
+                    Some(&changes.identity.reverse_matched),
+                );
                 let owner = match parent {
                     Anchor::Old(parent) => {
                         if changes.identity.moved_old.contains(parent) {
@@ -606,7 +652,8 @@ pub(crate) fn semantic_changes_to_diff(
                 push(
                     DiffEntry::Added {
                         new_ref: new_ref.to_string(),
-                        path: get_instance_path(new_dom, *new_ref),
+                        path,
+                        path_segments,
                         class: instance.class().to_string(),
                     },
                     owner,
@@ -615,9 +662,12 @@ pub(crate) fn semantic_changes_to_diff(
                 );
             }
             EditOp::SetName { old_ref, .. } | EditOp::SetProperty { old_ref, .. } => {
-                if !emitted_modifications.insert(*old_ref)
-                    || changes.identity.moved_old.contains(old_ref)
-                {
+                // A moved instance's property edits are emitted immediately
+                // after its primitive Moved entry below.
+                if changes.identity.moved_old.contains(old_ref) {
+                    continue;
+                }
+                if !emitted_modifications.insert(*old_ref) {
                     continue;
                 }
                 let Some(&new_ref) = changes.identity.matched.get(old_ref) else {
@@ -630,11 +680,17 @@ pub(crate) fn semantic_changes_to_diff(
                 if property_changes.is_empty() {
                     continue;
                 }
+                let (path, path_segments) = presentation_path(
+                    new_dom,
+                    new_ref,
+                    Some(&changes.identity.reverse_matched),
+                );
                 push(
                     DiffEntry::Modified {
                         old_ref: old_ref.to_string(),
                         new_ref: new_ref.to_string(),
-                        path: get_instance_path(new_dom, new_ref),
+                        path,
+                        path_segments,
                         class: instance.class().to_string(),
                         property_changes,
                     },
@@ -651,14 +707,30 @@ pub(crate) fn semantic_changes_to_diff(
         let Some(instance) = new_dom.get_by_ref(*new_ref) else {
             continue;
         };
+        let (path, path_segments) = presentation_path(
+            new_dom,
+            *new_ref,
+            Some(&changes.identity.reverse_matched),
+        );
+        let property_changes = modifications.remove(old_ref).unwrap_or_default();
         result.push(DiffEntry::Moved {
             old_ref: old_ref.to_string(),
             new_ref: new_ref.to_string(),
             old_path: get_instance_path(old_dom, *old_ref),
-            path: get_instance_path(new_dom, *new_ref),
+            path: path.clone(),
+            path_segments: path_segments.clone(),
             class: instance.class().to_string(),
-            property_changes: modifications.remove(old_ref).unwrap_or_default(),
         });
+        if !property_changes.is_empty() {
+            result.push(DiffEntry::Modified {
+                old_ref: old_ref.to_string(),
+                new_ref: new_ref.to_string(),
+                path,
+                path_segments,
+                class: instance.class().to_string(),
+                property_changes,
+            });
+        }
         if let Some(mut descendants) = deferred.remove(old_ref) {
             result.append(&mut descendants);
         }

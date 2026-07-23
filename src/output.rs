@@ -1,7 +1,9 @@
 //! Output formatting for diff results.
 
-use crate::diff::{CFrameValue, DiffEntry, PropertyValue};
+use crate::diff::{CFrameValue, DiffEntry, PropertyChange, PropertyValue};
 use colored::Colorize;
+use rbx_dom_weak::types::Ref;
+use std::collections::HashMap;
 
 /// Output format options.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,7 +31,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
         return;
     }
 
-    // Group by type for cleaner output
+    let entries: Vec<&DiffEntry> = diffs.iter().collect();
     let mut added = Vec::new();
     let mut removed = Vec::new();
     let mut modified = Vec::new();
@@ -46,121 +48,272 @@ fn print_pretty(diffs: &[DiffEntry]) {
         }
     }
 
-    // Print inferred rigid movement before residual property edits.
-    if !pivoted.is_empty() {
-        println!("\n{}", "Pivoted:".cyan().bold());
-        for diff in &pivoted {
-            if let DiffEntry::Pivoted {
-                path, class, delta, ..
-            } = diff
-            {
-                println!("  {} {} [{}]", "↻".cyan(), path.cyan(), class);
-                println!("      delta: {}", format_cframe_value(delta).cyan());
-            }
-        }
-    }
+    print_path_tree(&entries, print_instance_changes);
 
-    // Print removed instances
-    if !removed.is_empty() {
-        println!("\n{}", "Removed:".red().bold());
-        for diff in &removed {
-            if let DiffEntry::Removed { path, class, .. } = diff {
-                println!("  {} {}", "-".red(), format!("{} [{}]", path, class).red());
-            }
-        }
-    }
-
-    // Print added instances
-    if !added.is_empty() {
-        println!("\n{}", "Added:".green().bold());
-        for diff in &added {
-            if let DiffEntry::Added { path, class, .. } = diff {
-                println!(
-                    "  {} {}",
-                    "+".green(),
-                    format!("{} [{}]", path, class).green()
-                );
-            }
-        }
-    }
-
-    // Print moved instances
-    if !moved.is_empty() {
-        println!("\n{}", "Moved:".cyan().bold());
-        for diff in &moved {
-            if let DiffEntry::Moved {
-                old_path,
-                path,
-                class,
-                property_changes,
-                ..
-            } = diff
-            {
-                println!(
-                    "  {} {} {} {} [{}]",
-                    ">".cyan(),
-                    old_path.cyan(),
-                    "→".dimmed(),
-                    path.cyan(),
-                    class
-                );
-                print_property_changes(property_changes);
-            }
-        }
-    }
-
-    // Print modified instances
-    if !modified.is_empty() {
-        println!("\n{}", "Modified:".yellow().bold());
-        for diff in &modified {
-            if let DiffEntry::Modified {
-                path,
-                class,
-                property_changes,
-                ..
-            } = diff
-            {
-                println!("  {} {} [{}]", "~".yellow(), path.yellow(), class);
-                print_property_changes(property_changes);
-            }
-        }
-    }
-
-    // Print summary
     println!();
     print_summary_line(&added, &removed, &modified, &moved, &pivoted);
 }
 
-fn print_property_changes(property_changes: &[crate::diff::PropertyChange]) {
-    for change in property_changes {
-        match (&change.old_value, &change.new_value) {
-            (Some(old), Some(new)) => {
-                println!(
-                    "      {}: {} {} {}",
-                    change.name,
-                    format_property_value(old).red(),
-                    "→".dimmed(),
-                    format_property_value(new).green()
-                );
-            }
-            (None, Some(new)) => {
-                println!(
-                    "      {}: {} {}",
-                    change.name,
-                    "+".green(),
-                    format_property_value(new).green()
-                );
-            }
-            (Some(old), None) => {
-                println!(
-                    "      {}: {} {}",
-                    change.name,
-                    "-".red(),
-                    format_property_value(old).red()
-                );
-            }
-            (None, None) => {}
+fn print_instance_changes(entries: &[&DiffEntry], label: &str, depth: usize) {
+    let markers = entries
+        .iter()
+        .map(|entry| match entry {
+            DiffEntry::Added { .. } => "+".green(),
+            DiffEntry::Removed { .. } => "-".red(),
+            DiffEntry::Modified { .. } => "~".yellow(),
+            DiffEntry::Moved { .. } => ">".cyan(),
+            DiffEntry::Pivoted { .. } => "↻".cyan(),
+        })
+        .map(|marker| marker.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let class = diff_class(entries[0]);
+    let label = match entries[0] {
+        DiffEntry::Added { .. } => label.green().bold(),
+        DiffEntry::Removed { .. } => label.red().bold(),
+        DiffEntry::Modified { .. } | DiffEntry::Moved { .. } | DiffEntry::Pivoted { .. } => {
+            label.bold()
         }
+    };
+    println!(
+        "{}{} {} {}",
+        tree_indent(depth),
+        markers,
+        label,
+        format!("[{}]", class).dimmed()
+    );
+
+    for entry in entries {
+        match entry {
+            DiffEntry::Pivoted { delta, .. } => {
+                println!("{}{}", detail_indent(depth), format_delta(delta).cyan());
+            }
+            DiffEntry::Moved { old_path, .. } => {
+                println!(
+                    "{}{} {}",
+                    detail_indent(depth),
+                    "from".dimmed(),
+                    old_path.cyan()
+                );
+            }
+            DiffEntry::Modified {
+                property_changes, ..
+            } => print_property_changes(property_changes, depth),
+            DiffEntry::Added { .. } | DiffEntry::Removed { .. } => {}
+        }
+    }
+}
+
+fn diff_class(diff: &DiffEntry) -> &str {
+    match diff {
+        DiffEntry::Added { class, .. }
+        | DiffEntry::Removed { class, .. }
+        | DiffEntry::Modified { class, .. }
+        | DiffEntry::Moved { class, .. }
+        | DiffEntry::Pivoted { class, .. } => class,
+    }
+}
+
+struct PathTreeNode<'a> {
+    segment: String,
+    entries: Vec<&'a DiffEntry>,
+    children: Vec<PathTreeNode<'a>>,
+    child_indices: HashMap<Ref, usize>,
+}
+
+impl<'a> PathTreeNode<'a> {
+    fn root() -> Self {
+        Self {
+            segment: String::new(),
+            entries: Vec::new(),
+            children: Vec::new(),
+            child_indices: HashMap::new(),
+        }
+    }
+
+    fn new(segment: String) -> Self {
+        Self {
+            segment,
+            entries: Vec::new(),
+            children: Vec::new(),
+            child_indices: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, segments: &[(Ref, String)], entry: &'a DiffEntry) {
+        let Some(((referent, segment), remaining)) = segments.split_first() else {
+            self.entries.push(entry);
+            return;
+        };
+        let child_index = match self.child_indices.get(referent) {
+            Some(index) => *index,
+            None => {
+                let index = self.children.len();
+                self.children.push(Self::new(segment.clone()));
+                self.child_indices.insert(*referent, index);
+                index
+            }
+        };
+        self.children[child_index].insert(remaining, entry);
+    }
+}
+
+fn print_path_tree<'a>(
+    entries: &[&'a DiffEntry],
+    mut print_entries: impl FnMut(&[&DiffEntry], &str, usize),
+) {
+    let mut root = PathTreeNode::root();
+    for entry in entries {
+        root.insert(path_segments(entry), entry);
+    }
+
+    for group in group_entries(&root.entries) {
+        print_entries(&group, "<root>", 0);
+    }
+    for child in &root.children {
+        print_path_node(child, 0, &mut print_entries);
+    }
+}
+
+fn print_path_node(
+    node: &PathTreeNode<'_>,
+    depth: usize,
+    print_entries: &mut impl FnMut(&[&DiffEntry], &str, usize),
+) {
+    if node.entries.is_empty() {
+        println!("{}{}", tree_indent(depth), node.segment.dimmed());
+    } else {
+        for group in group_entries(&node.entries) {
+            print_entries(&group, &node.segment, depth);
+        }
+    }
+
+    for child in &node.children {
+        print_path_node(child, depth + 1, print_entries);
+    }
+}
+
+fn group_entries<'a>(entries: &[&'a DiffEntry]) -> Vec<Vec<&'a DiffEntry>> {
+    let mut groups: Vec<Vec<&DiffEntry>> = Vec::new();
+    let mut group_indices = HashMap::new();
+    for entry in entries {
+        let identity = diff_identity(entry);
+        let index = match group_indices.get(&identity) {
+            Some(index) => *index,
+            None => {
+                let index = groups.len();
+                groups.push(Vec::new());
+                group_indices.insert(identity, index);
+                index
+            }
+        };
+        groups[index].push(entry);
+    }
+    groups
+}
+
+fn diff_identity(diff: &DiffEntry) -> (bool, &str) {
+    match diff {
+        DiffEntry::Removed { old_ref, .. } => (false, old_ref),
+        DiffEntry::Added { new_ref, .. }
+        | DiffEntry::Modified { new_ref, .. }
+        | DiffEntry::Moved { new_ref, .. }
+        | DiffEntry::Pivoted { new_ref, .. } => (true, new_ref),
+    }
+}
+
+fn path_segments(diff: &DiffEntry) -> &[(Ref, String)] {
+    match diff {
+        DiffEntry::Added { path_segments, .. }
+        | DiffEntry::Removed { path_segments, .. }
+        | DiffEntry::Modified { path_segments, .. }
+        | DiffEntry::Moved { path_segments, .. }
+        | DiffEntry::Pivoted { path_segments, .. } => path_segments,
+    }
+}
+
+fn tree_indent(depth: usize) -> String {
+    "  ".repeat(depth)
+}
+
+fn detail_indent(depth: usize) -> String {
+    "  ".repeat(depth + 2)
+}
+
+enum PropertyTreeItem<'a> {
+    Change(&'a PropertyChange),
+    Container {
+        name: &'static str,
+        changes: Vec<(&'a str, &'a PropertyChange)>,
+    },
+}
+
+fn print_property_changes(property_changes: &[PropertyChange], tree_depth: usize) {
+    let mut items = Vec::new();
+    for change in property_changes {
+        let container_change =
+            change
+                .name
+                .split_once('.')
+                .and_then(|(container, key)| match container {
+                    "Attributes" => Some(("Attributes", key)),
+                    "Tags" => Some(("Tags", key)),
+                    _ => None,
+                });
+        let Some((container, key)) = container_change else {
+            items.push(PropertyTreeItem::Change(change));
+            continue;
+        };
+
+        let existing = items.iter_mut().find(|item| {
+            matches!(
+                item,
+                PropertyTreeItem::Container { name, .. } if *name == container
+            )
+        });
+        if let Some(PropertyTreeItem::Container { changes, .. }) = existing {
+            changes.push((key, change));
+        } else {
+            items.push(PropertyTreeItem::Container {
+                name: container,
+                changes: vec![(key, change)],
+            });
+        }
+    }
+
+    for item in items {
+        match item {
+            PropertyTreeItem::Change(change) => {
+                print_property_change(change, &change.name, tree_depth + 2);
+            }
+            PropertyTreeItem::Container { name, changes } => {
+                println!("{}{}", "  ".repeat(tree_depth + 2), name.dimmed());
+                for (key, change) in changes {
+                    print_property_change(change, key, tree_depth + 3);
+                }
+            }
+        }
+    }
+}
+
+fn print_property_change(change: &PropertyChange, name: &str, indent_level: usize) {
+    println!("{}{}:", "  ".repeat(indent_level), name.yellow());
+    let value_indent = "  ".repeat(indent_level + 1);
+    if let Some(old) = &change.old_value {
+        println!(
+            "{}{} {}",
+            value_indent,
+            "-".red(),
+            format_property_value(old).red()
+        );
+    }
+    if let Some(new) = &change.new_value {
+        println!(
+            "{}{} {}",
+            value_indent,
+            "+".green(),
+            format_property_value(new).green()
+        );
     }
 }
 
@@ -219,23 +372,61 @@ fn format_property_value(v: &PropertyValue) -> String {
     }
 }
 
+/// One CFrame component, shortest round-trip. Rust's `{}` already emits the
+/// shortest exact representation (no trailing zeros); on top of that we snap
+/// components within 1e-6 of an integer so a rotation matrix's float dust
+/// (`5e-13`, `0.9999999`) reads as the clean `0`/`1`/`-1` it represents.
+/// Real values — a `-0.99984974` translation, `0.7071068`, `-512.8176` —
+/// are nowhere near an integer boundary and print exactly.
+fn fmt_component(v: f32) -> String {
+    let rounded = v.round();
+    let v = if (v - rounded).abs() < 1e-6 { rounded } else { v };
+    if v == 0.0 {
+        "0".to_string()
+    } else {
+        format!("{v}")
+    }
+}
+
+/// Matches `fmt_component`'s snap tolerance, so the collapse decision and the
+/// per-component rounding never disagree: a rotation block collapses only when
+/// every component would itself snap to the identity it represents. A genuine
+/// sub-degree rotation (e.g. a `0.00001` off-diagonal) stays and prints full.
+const ROTATION_EPSILON: f32 = 1e-6;
+
+/// True when the rotation block (components 3..12, row-major) is the identity
+/// within tolerance — i.e. a pure translation, no meaningful turn.
+fn rotation_is_identity(c: &[f32; 12]) -> bool {
+    (c[3] - 1.0).abs() < ROTATION_EPSILON
+        && (c[7] - 1.0).abs() < ROTATION_EPSILON
+        && (c[11] - 1.0).abs() < ROTATION_EPSILON
+        && [c[4], c[5], c[6], c[8], c[9], c[10]]
+            .iter()
+            .all(|n| n.abs() < ROTATION_EPSILON)
+}
+
+/// Trimmed CFrame: `-0` normalized, and the identity rotation matrix dropped
+/// so a pure translation reads as `CFrame(x, y, z)`. Used for every CFrame the
+/// diff prints — property values and rigid deltas alike.
 fn format_cframe_value(value: &CFrameValue) -> String {
-    let components = &value.components;
-    format!(
-        "CFrame({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-        components[0],
-        components[1],
-        components[2],
-        components[3],
-        components[4],
-        components[5],
-        components[6],
-        components[7],
-        components[8],
-        components[9],
-        components[10],
-        components[11],
-    )
+    let c = &value.components;
+    if rotation_is_identity(c) {
+        format!(
+            "CFrame({}, {}, {})",
+            fmt_component(c[0]),
+            fmt_component(c[1]),
+            fmt_component(c[2])
+        )
+    } else {
+        let parts: Vec<String> = c.iter().map(|&n| fmt_component(n)).collect();
+        format!("CFrame({})", parts.join(", "))
+    }
+}
+
+/// A rigid delta for the pivoted diff rows and the merge/normalization
+/// summaries: the same trimmed CFrame with a Δ marker.
+pub fn format_delta(value: &CFrameValue) -> String {
+    format!("\u{394} {}", format_cframe_value(value))
 }
 
 fn print_summary(diffs: &[DiffEntry]) {
@@ -378,4 +569,5 @@ mod tests {
         assert_eq!(json["type"], "c_frame");
         assert_eq!(json["value"].as_array().unwrap().len(), 12);
     }
+
 }
