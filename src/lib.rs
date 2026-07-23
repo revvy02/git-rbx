@@ -19,24 +19,26 @@ mod semantic_verify;
 mod value_compare;
 
 pub use conflict_file::{
-    finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_conflicts,
-    stamp_model_frame_plan, stamp_rigid_groups, ConflictEntry, CONFLICT_TAG, CONTAINER_NAME,
-    ENTRY_TAG, VIRTUAL_TREES_NAME,
+    finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_compact_conflicts,
+    stamp_conflicts, stamp_model_frame_plan, stamp_rigid_groups, ConflictEntry, CONFLICT_TAG,
+    CONTAINER_NAME, ENTRY_TAG, VIRTUAL_TREES_NAME,
 };
 pub use diff::{compute_diff, CFrameValue, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use diff_dom::DiffDom;
 pub use edit_script::{
-    apply_edit_script, compute_edit_script, Anchor, EditOp, EditScript, InstanceIdentity,
+    apply_edit_script, compute_edit_script, compute_semantic_changes, Anchor, EditOp, EditScript,
+    InstanceIdentity, SemanticChangeSet,
 };
 pub use merge::{
-    merge_doms, merge_doms_with_matches, ConflictKind, MergeConflict, MergeResult, MergeStats,
+    merge_compact_doms, merge_compact_doms_with_matches, merge_doms, merge_doms_with_matches,
+    ConflictKind, MergeConflict, MergeResult, MergeStats,
 };
 pub use model_normalize::{
     apply_model_frame, apply_model_frame_plan, apply_model_frame_to_dom, model_frames_close,
-    normalize_model_diff_frames, normalize_model_dom_to_base, normalize_model_merge_frames,
-    ModelFrame, ModelFrameApplication, ModelFrameChange, ModelFrameDecision, ModelFrameDiff,
-    ModelFrameMerge, ModelNormalization,
+    normalize_model_diff_frames, normalize_model_dom_to_base, normalize_model_merge_compact_frames,
+    normalize_model_merge_frames, ModelFrame, ModelFrameApplication, ModelFrameChange,
+    ModelFrameDecision, ModelFrameDiff, ModelFrameMerge, ModelNormalization,
 };
 pub use rigid_groups::{detect_rigid_groups, RigidGroup};
 pub use semantic_verify::{verify_mesh_geometry, SemanticMismatch};
@@ -55,9 +57,9 @@ pub fn diff_doms_with_config(
     new_dom: &WeakDom,
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
-    let old_hashes = hash::LazyHashCache::new_view(old_dom);
-    let new_hashes = hash::LazyHashCache::new_view(new_dom);
-    compute_diff(old_dom, new_dom, &old_hashes, &new_hashes, config)
+    let changes =
+        edit_script::compute_semantic_changes_with_identity(old_dom, new_dom, config, None);
+    diff::semantic_changes_to_diff(old_dom, new_dom, &changes)
 }
 
 /// Diff two model-asset DOMs using hierarchical frame factorization.
@@ -106,16 +108,13 @@ fn diff_model_views_with_config(
     config: &DiffConfig,
 ) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
     let normalization = model_normalize::normalize_model_diff_frames_view(old_dom, new_dom);
-    let old_hashes = hash::LazyHashCache::new_view(old_dom);
-    let new_hashes = hash::LazyHashCache::new_view(new_dom.as_view());
-    let diffs = diff::compute_diff_with_identity(
+    let changes = edit_script::compute_semantic_changes_with_identity(
         old_dom,
         new_dom.as_view(),
-        &old_hashes,
-        &new_hashes,
         config,
         normalization.as_ref().map(|state| &state.identity),
     );
+    let diffs = diff::semantic_changes_to_diff(old_dom, new_dom.as_view(), &changes);
 
     if let Some(normalization) = normalization {
         return finish_model_diff(new_dom.as_view(), diffs, normalization);

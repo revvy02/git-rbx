@@ -56,10 +56,10 @@ use rbx_types::{CFrame, Variant};
 use std::collections::{HashMap, HashSet};
 
 use crate::diff::DiffConfig;
-use crate::diff_dom::{DescendantRefs, DomView, DomViewMut};
+use crate::diff_dom::{DescendantRefs, DiffDom, DomView, DomViewMut};
 use crate::dom_utils::class_is_a;
 use crate::edit_script::{
-    compute_edit_script, compute_instance_identity, EditOp, EditScript, InstanceIdentity,
+    compute_instance_identity, compute_semantic_changes_with_identity, EditScript, InstanceIdentity,
 };
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
@@ -212,6 +212,34 @@ impl ModelFrameMerge {
             .collect();
         apply_model_frame_plan(dom, &frames);
     }
+
+    pub fn apply_automatic_to_compact_ours(&self, dom: &mut DiffDom) {
+        apply_automatic_to_branch(self, dom, true);
+    }
+
+    pub fn apply_automatic_to_compact_theirs(&self, dom: &mut DiffDom) {
+        apply_automatic_to_branch(self, dom, false);
+    }
+}
+
+fn apply_automatic_to_branch(merge: &ModelFrameMerge, dom: &mut dyn DomViewMut, ours: bool) {
+    let frames: Vec<_> = merge
+        .automatic_applications()
+        .into_iter()
+        .filter_map(|mut application| {
+            let frame = merge
+                .frames
+                .iter()
+                .find(|frame| frame.order == application.order)?;
+            application.target_ref = if ours {
+                frame.ours_ref?
+            } else {
+                frame.theirs_ref?
+            };
+            Some(application)
+        })
+        .collect();
+    apply_model_frame_plan_view(dom, &frames);
 }
 
 #[derive(Clone)]
@@ -662,26 +690,10 @@ fn raw_local_frame(boundary: &Boundary, root_prefix: Rigid) -> Rigid {
     }
 }
 
-fn script_moves(script: &EditScript) -> Vec<(Ref, Ref)> {
-    script
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            EditOp::Move { old_ref, .. } => script
-                .matched
-                .get(old_ref)
-                .copied()
-                .map(|new_ref| (*old_ref, new_ref)),
-            _ => None,
-        })
-        .collect()
-}
-
 fn script_identity(script: EditScript) -> InstanceIdentity {
-    let moves = script_moves(&script);
     InstanceIdentity {
         matched: script.matched,
-        moves,
+        moves: script.moves,
     }
 }
 
@@ -693,6 +705,10 @@ pub fn apply_model_frame(dom: &mut WeakDom, target: Ref, frame: &CFrame) {
 /// Compose local frame decisions, then write each world-space property once
 /// using the effective frame of its nearest participating boundary.
 pub fn apply_model_frame_plan(dom: &mut WeakDom, frames: &[ModelFrameApplication]) {
+    apply_model_frame_plan_view(dom, frames);
+}
+
+fn apply_model_frame_plan_view(dom: &mut dyn DomViewMut, frames: &[ModelFrameApplication]) {
     let mut ordered: Vec<_> = frames.iter().collect();
     ordered.sort_unstable_by_key(|frame| frame.order);
     let mut effective_by_order: HashMap<usize, Rigid> = HashMap::new();
@@ -708,10 +724,9 @@ pub fn apply_model_frame_plan(dom: &mut WeakDom, frames: &[ModelFrameApplication
     }
 
     let mut pending: Vec<(Ref, Option<Rigid>)> = dom
-        .root()
-        .children()
-        .iter()
-        .copied()
+        .get_by_ref(dom.root_ref())
+        .into_iter()
+        .flat_map(|root| root.children())
         .map(|referent| (referent, None))
         .collect();
     let mut refs = Vec::new();
@@ -720,13 +735,7 @@ pub fn apply_model_frame_plan(dom: &mut WeakDom, frames: &[ModelFrameApplication
         let Some(instance) = dom.get_by_ref(referent) else {
             continue;
         };
-        pending.extend(
-            instance
-                .children()
-                .iter()
-                .copied()
-                .map(|child| (child, active)),
-        );
+        pending.extend(instance.children().map(|child| (child, active)));
         if let Some(effective) = active {
             refs.push((referent, effective));
         }
@@ -885,6 +894,23 @@ pub fn normalize_model_merge_frames(
     ours: &mut WeakDom,
     theirs: &mut WeakDom,
 ) -> Option<ModelFrameMerge> {
+    normalize_model_merge_frames_view(base, ours, theirs)
+}
+
+/// Compact-branch variant of [`normalize_model_merge_frames`].
+pub fn normalize_model_merge_compact_frames(
+    base: &WeakDom,
+    ours: &mut DiffDom,
+    theirs: &mut DiffDom,
+) -> Option<ModelFrameMerge> {
+    normalize_model_merge_frames_view(base, ours, theirs)
+}
+
+fn normalize_model_merge_frames_view(
+    base: &dyn DomView,
+    ours: &mut dyn DomViewMut,
+    theirs: &mut dyn DomViewMut,
+) -> Option<ModelFrameMerge> {
     let ours_raw = snapshot_world_properties(ours);
     let theirs_raw = snapshot_world_properties(theirs);
     // First remove only serialized-root placement. This gives duplicate-heavy
@@ -898,8 +924,14 @@ pub fn normalize_model_merge_frames(
 
     // Rebuild matching after root alignment, then retain this mapping through
     // nested canonicalization and the merge itself.
-    let ours_script = compute_edit_script(base, ours, &DiffConfig::default());
-    let theirs_script = compute_edit_script(base, theirs, &DiffConfig::default());
+    let ours_script =
+        compute_semantic_changes_with_identity(base, ours.as_view(), &DiffConfig::default(), None);
+    let theirs_script = compute_semantic_changes_with_identity(
+        base,
+        theirs.as_view(),
+        &DiffConfig::default(),
+        None,
+    );
     let ours_identity = script_identity(ours_script);
     let theirs_identity = script_identity(theirs_script);
     let mut ours_detection = detect_hierarchy_from_identity(base, ours, &ours_identity.matched);

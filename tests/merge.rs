@@ -2,7 +2,9 @@
 //! conflict kind. The merged DOM is verified by diffing against a hand-built
 //! expected DOM (empty diff = exact merge).
 
-use rbx_diff::{diff_doms, merge_doms, ConflictKind, DiffConfig};
+use rbx_diff::{
+    diff_doms, merge_compact_doms, merge_doms, ConflictKind, DiffConfig, DiffDom, MergeResult,
+};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::Variant;
 
@@ -39,6 +41,21 @@ fn assert_merged_equals(merged: &WeakDom, expected: &WeakDom) {
         residual.is_empty(),
         "merged DOM differs from expected: {residual:#?}"
     );
+}
+
+fn conflict_signature(result: &MergeResult) -> Vec<(String, ConflictKind, usize, usize)> {
+    result
+        .conflicts
+        .iter()
+        .map(|conflict| {
+            (
+                conflict.path.clone(),
+                conflict.kind.clone(),
+                conflict.ours.len(),
+                conflict.theirs.len(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -303,4 +320,89 @@ fn rename_conflict() {
         "{:?}",
         result.conflicts
     );
+}
+
+#[test]
+fn compact_branches_match_weak_merge_planning_and_materialization() {
+    let ours = WeakDom::new(
+        folder("root")
+            .with_child(folder("A"))
+            .with_child(
+                folder("B")
+                    .with_child(part("P"))
+                    .with_child(part("FromOurs")),
+            ),
+    );
+    let theirs = WeakDom::new(
+        folder("root")
+            .with_child(folder("A").with_child(part_with("P", 0.5)))
+            .with_child(folder("B").with_child(part("FromTheirs"))),
+    );
+    let compact_ours = DiffDom::from_weak_dom(&ours);
+    let compact_theirs = DiffDom::from_weak_dom(&theirs);
+
+    let mut weak_base = base_dom();
+    let weak_result = merge_doms(
+        &mut weak_base,
+        &ours,
+        &theirs,
+        &DiffConfig::default(),
+    );
+    let mut compact_base = base_dom();
+    let compact_result = merge_compact_doms(
+        &mut compact_base,
+        &compact_ours,
+        &compact_theirs,
+        &DiffConfig::default(),
+    );
+
+    assert_eq!(
+        conflict_signature(&compact_result),
+        conflict_signature(&weak_result)
+    );
+    assert_eq!(compact_result.stats.ours_applied, weak_result.stats.ours_applied);
+    assert_eq!(
+        compact_result.stats.theirs_applied,
+        weak_result.stats.theirs_applied
+    );
+    assert_eq!(compact_result.stats.deduped, weak_result.stats.deduped);
+    assert_merged_equals(&compact_base, &weak_base);
+}
+
+#[test]
+fn compact_branches_preserve_conflict_ownership() {
+    let ours =
+        WeakDom::new(folder("root").with_child(folder("B").with_child(part("FromOurs"))));
+    let theirs = WeakDom::new(
+        folder("root")
+            .with_child(
+                folder("A")
+                    .with_child(part_with("P", 0.25))
+                    .with_child(part("FromTheirs")),
+            )
+            .with_child(folder("B")),
+    );
+    let compact_ours = DiffDom::from_weak_dom(&ours);
+    let compact_theirs = DiffDom::from_weak_dom(&theirs);
+
+    let mut weak_base = base_dom();
+    let weak_result = merge_doms(
+        &mut weak_base,
+        &ours,
+        &theirs,
+        &DiffConfig::default(),
+    );
+    let mut compact_base = base_dom();
+    let compact_result = merge_compact_doms(
+        &mut compact_base,
+        &compact_ours,
+        &compact_theirs,
+        &DiffConfig::default(),
+    );
+
+    assert_eq!(
+        conflict_signature(&compact_result),
+        conflict_signature(&weak_result)
+    );
+    assert_merged_equals(&compact_base, &weak_base);
 }

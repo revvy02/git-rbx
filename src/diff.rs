@@ -5,19 +5,16 @@
 //! Ref properties pointing to matched instances are considered equal (same logical target),
 //! with hash-based fallback for refs into pruned (identical) subtrees.
 
+use crate::diff_dom::{DomView, InstanceView};
+use crate::edit_script::{Anchor, EditOp, SemanticChangeSet};
+use crate::hash::{DeepHashCache, LazyHashCache};
+use crate::match_instances::get_instance_path;
+use crate::property_semantics::get_authored_properties;
+use crate::value_compare::non_ref_variants_equal;
 use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::{CFrame, ContentType, Variant};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use tracing::{info, info_span};
-
-use crate::diff_dom::{DomView, InstanceView};
-use crate::edit_script::InstanceIdentity;
-use crate::hash::{DeepHashCache, LazyHashCache};
-use crate::match_instances::{get_instance_path, Matcher};
-use crate::move_detect::detect_moves;
-use crate::property_semantics::get_authored_properties;
-use crate::value_compare::non_ref_variants_equal;
 
 /// A single difference found between two DOMs.
 #[derive(Debug, Clone, Serialize)]
@@ -231,270 +228,21 @@ impl Default for DiffConfig {
     }
 }
 
-/// Compute the diff between two DOMs.
-/// Phase 1: Build global ref mapping. Phase 2: Diff using the mapping.
+/// Compute a presentation diff through the shared semantic change planner.
+///
+/// The cache parameters remain for API compatibility; semantic planning owns
+/// the caches used by matching so diff and merge cannot choose different
+/// identities.
 pub fn compute_diff(
     old_dom: &WeakDom,
     new_dom: &WeakDom,
-    old_hashes: &LazyHashCache,
-    new_hashes: &LazyHashCache,
+    _old_hashes: &LazyHashCache,
+    _new_hashes: &LazyHashCache,
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
-    compute_diff_with_identity(old_dom, new_dom, old_hashes, new_hashes, config, None)
-}
-
-/// Compute a diff while preserving identity captured before a
-/// representation-only canonicalization.
-pub(crate) fn compute_diff_with_identity(
-    old_dom: &dyn DomView,
-    new_dom: &dyn DomView,
-    old_hashes: &LazyHashCache,
-    new_hashes: &LazyHashCache,
-    config: &DiffConfig,
-    identity: Option<&InstanceIdentity>,
-) -> Vec<DiffEntry> {
-    let _span = info_span!("compute_diff").entered();
-
-    let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
-    let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
-    let mut matcher = Matcher::new(
-        old_dom, new_dom, old_hashes, new_hashes, &old_deep, &new_deep,
-    );
-    if let Some(identity) = identity {
-        matcher = matcher.with_complete_identity(&identity.matched);
-    }
-
-    // Phase 1: Build global ref mapping (old_ref → new_ref) for matched instances,
-    // collecting removed/added subtree roots for global move detection
-    let mut ref_mapping = identity
-        .map(|identity| identity.matched.clone())
-        .unwrap_or_default();
-    let mut removed_roots = Vec::new();
-    let mut added_roots = Vec::new();
-    if identity.is_none() {
-        build_ref_mapping(
-            &matcher,
-            old_dom.root_ref(),
-            new_dom.root_ref(),
-            &mut ref_mapping,
-            &mut removed_roots,
-            &mut added_roots,
-        );
-    }
-    info!(matched_pairs = ref_mapping.len(), "ref mapping built");
-
-    // Phase 1.5: Pair removed/added roots globally into moves.
-    // Must happen before the diff pass so Ref properties pointing at moved
-    // instances compare through the mapping instead of reporting false changes.
-    let moves = identity.map_or_else(
-        || {
-            detect_moves(
-                old_dom,
-                new_dom,
-                removed_roots,
-                added_roots,
-                &old_deep,
-                &new_deep,
-            )
-        },
-        |identity| identity.moves.clone(),
-    );
-    let moved_old: HashSet<Ref> = moves.iter().map(|(o, _)| *o).collect();
-    let moved_new: HashSet<Ref> = moves.iter().map(|(_, n)| *n).collect();
-    for (old_root, new_root) in &moves {
-        ref_mapping.insert(*old_root, *new_root);
-        // Map matched descendants of edited moves too (pure moves prune via deep hash)
-        if old_deep.get(*old_root) != new_deep.get(*new_root) {
-            build_ref_mapping(
-                &matcher,
-                *old_root,
-                *new_root,
-                &mut ref_mapping,
-                &mut Vec::new(),
-                &mut Vec::new(),
-            );
-        }
-    }
-
-    // Phase 2: Diff using the mapping
-    let mut diffs = Vec::new();
-    diff_pass(
-        &matcher,
-        old_dom.root_ref(),
-        new_dom.root_ref(),
-        config,
-        &ref_mapping,
-        &moved_old,
-        &moved_new,
-        &mut diffs,
-    );
-
-    // Phase 3: Emit moves, then recurse into moved subtrees that also changed
-    for (old_root, new_root) in &moves {
-        let property_changes = diff_properties(
-            old_dom,
-            new_dom,
-            *old_root,
-            *new_root,
-            config,
-            &ref_mapping,
-            &old_deep,
-            &new_deep,
-        );
-        if let Some(inst) = new_dom.get_by_ref(*new_root) {
-            diffs.push(DiffEntry::Moved {
-                old_ref: format!("{}", *old_root),
-                new_ref: format!("{}", *new_root),
-                old_path: get_instance_path(old_dom, *old_root),
-                path: get_instance_path(new_dom, *new_root),
-                class: inst.class().to_string(),
-                property_changes,
-            });
-        }
-        if old_deep.get(*old_root) != new_deep.get(*new_root) {
-            diff_pass(
-                &matcher,
-                *old_root,
-                *new_root,
-                config,
-                &ref_mapping,
-                &moved_old,
-                &moved_new,
-                &mut diffs,
-            );
-        }
-    }
-
-    old_hashes.log_stats("old");
-    new_hashes.log_stats("new");
-    info!(diffs_found = diffs.len(), "diff complete");
-
-    diffs
-}
-
-/// Phase 1: Recursively match all instances, building the global ref mapping.
-/// Only recurses into non-pruned subtrees (where deep hashes differ).
-/// Collects removed/added subtree roots along the way for global move detection.
-pub(crate) fn build_ref_mapping(
-    matcher: &Matcher<'_>,
-    old_ref: Ref,
-    new_ref: Ref,
-    mapping: &mut HashMap<Ref, Ref>,
-    removed_roots: &mut Vec<Ref>,
-    added_roots: &mut Vec<Ref>,
-) {
-    let match_result = matcher.match_children(old_ref, new_ref);
-    removed_roots.extend_from_slice(&match_result.removed);
-    added_roots.extend_from_slice(&match_result.added);
-    for (old_child, new_child) in &match_result.matched {
-        mapping.insert(*old_child, *new_child);
-        // Only recurse into subtrees where deep hashes differ (same pruning as diff_pass)
-        if matcher.old_deep().get(*old_child) != matcher.new_deep().get(*new_child) {
-            build_ref_mapping(
-                matcher,
-                *old_child,
-                *new_child,
-                mapping,
-                removed_roots,
-                added_roots,
-            );
-        }
-    }
-}
-
-/// Phase 2: match children, compare properties, recurse into changed subtrees.
-fn diff_pass(
-    matcher: &Matcher<'_>,
-    old_ref: Ref,
-    new_ref: Ref,
-    config: &DiffConfig,
-    ref_mapping: &HashMap<Ref, Ref>,
-    moved_old: &HashSet<Ref>,
-    moved_new: &HashSet<Ref>,
-    diffs: &mut Vec<DiffEntry>,
-) {
-    let old_dom = matcher.old_dom();
-    let new_dom = matcher.new_dom();
-    let old_deep = matcher.old_deep();
-    let new_deep = matcher.new_deep();
-    let match_result = matcher.match_children(old_ref, new_ref);
-
-    // Report removed instances (skipping those reclassified as moves)
-    for removed_ref in &match_result.removed {
-        if moved_old.contains(removed_ref) {
-            continue;
-        }
-        if let Some(inst) = old_dom.get_by_ref(*removed_ref) {
-            if is_studio_artifact(old_dom, old_ref, inst) {
-                continue;
-            }
-            diffs.push(DiffEntry::Removed {
-                old_ref: format!("{}", *removed_ref),
-                path: get_instance_path(old_dom, *removed_ref),
-                class: inst.class().to_string(),
-            });
-        }
-    }
-
-    // Report added instances (skipping those reclassified as moves)
-    for added_ref in &match_result.added {
-        if moved_new.contains(added_ref) {
-            continue;
-        }
-        if let Some(inst) = new_dom.get_by_ref(*added_ref) {
-            if is_studio_artifact(new_dom, new_ref, inst) {
-                continue;
-            }
-            diffs.push(DiffEntry::Added {
-                new_ref: format!("{}", *added_ref),
-                path: get_instance_path(new_dom, *added_ref),
-                class: inst.class().to_string(),
-            });
-        }
-    }
-
-    // Process matched pairs — prune unchanged subtrees via deep hash
-    for (old_child_ref, new_child_ref) in &match_result.matched {
-        // Pruning: if deep hashes match, entire subtree is identical — skip
-        if old_deep.get(*old_child_ref) == new_deep.get(*new_child_ref) {
-            continue;
-        }
-
-        let property_changes = diff_properties(
-            old_dom,
-            new_dom,
-            *old_child_ref,
-            *new_child_ref,
-            config,
-            ref_mapping,
-            old_deep,
-            new_deep,
-        );
-
-        if !property_changes.is_empty() {
-            if let Some(inst) = new_dom.get_by_ref(*new_child_ref) {
-                diffs.push(DiffEntry::Modified {
-                    old_ref: format!("{}", *old_child_ref),
-                    new_ref: format!("{}", *new_child_ref),
-                    path: get_instance_path(new_dom, *new_child_ref),
-                    class: inst.class().to_string(),
-                    property_changes,
-                });
-            }
-        }
-
-        // Recurse into children
-        diff_pass(
-            matcher,
-            *old_child_ref,
-            *new_child_ref,
-            config,
-            ref_mapping,
-            moved_old,
-            moved_new,
-            diffs,
-        );
-    }
+    let changes =
+        crate::edit_script::compute_semantic_changes_with_identity(old_dom, new_dom, config, None);
+    semantic_changes_to_diff(old_dom, new_dom, &changes)
 }
 
 // ============================================================================
@@ -744,62 +492,184 @@ pub(crate) fn raw_property_changes(
     changes
 }
 
-/// Compare properties between two matched instances, for display.
-/// Detects name changes (inst.name is separate from inst.properties) and
-/// converts raw variants into display-oriented PropertyValues.
-pub(crate) fn diff_properties(
+/// Project storage-independent semantic changes into the presentation diff.
+///
+/// The change set is authoritative: this function does not rematch instances
+/// or compare properties again. Changes below a moved root are deferred until
+/// after that root's `Moved` row, preserving the tree-oriented output order.
+pub(crate) fn semantic_changes_to_diff(
     old_dom: &dyn DomView,
     new_dom: &dyn DomView,
-    old_ref: Ref,
-    new_ref: Ref,
-    config: &DiffConfig,
-    ref_mapping: &HashMap<Ref, Ref>,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
-) -> Vec<PropertyChange> {
-    let old_inst = old_dom.get_by_ref(old_ref).unwrap();
-    let new_inst = new_dom.get_by_ref(new_ref).unwrap();
+    changes: &SemanticChangeSet,
+) -> Vec<DiffEntry> {
+    let moved_old: HashSet<Ref> = changes.moves.iter().map(|(old, _)| *old).collect();
+    let mut modifications: HashMap<Ref, Vec<PropertyChange>> = HashMap::new();
 
-    let mut changes = Vec::new();
-
-    if old_inst.name() != new_inst.name() {
-        changes.push(PropertyChange {
-            name: "Name".to_string(),
-            old_value: Some(PropertyValue::String {
-                value: old_inst.name().to_string(),
-            }),
-            new_value: Some(PropertyValue::String {
-                value: new_inst.name().to_string(),
-            }),
-        });
-    }
-
-    for raw in raw_property_changes(
-        old_dom,
-        new_dom,
-        old_ref,
-        new_ref,
-        config,
-        ref_mapping,
-        old_deep,
-        new_deep,
-    ) {
-        let attribute = raw.name.starts_with("Attributes.");
-        let display_value = |value: &Variant| {
-            if attribute {
-                attribute_variant_to_property_value(value)
-            } else {
-                variant_to_property_value(value)
+    for op in &changes.ops {
+        match op {
+            EditOp::SetName { old_ref, name } => {
+                let Some(old_instance) = old_dom.get_by_ref(*old_ref) else {
+                    continue;
+                };
+                modifications
+                    .entry(*old_ref)
+                    .or_default()
+                    .push(PropertyChange {
+                        name: "Name".to_string(),
+                        old_value: Some(PropertyValue::String {
+                            value: old_instance.name().to_string(),
+                        }),
+                        new_value: Some(PropertyValue::String {
+                            value: name.clone(),
+                        }),
+                    });
             }
-        };
-        changes.push(PropertyChange {
-            name: raw.name,
-            old_value: raw.old.as_ref().map(display_value),
-            new_value: raw.new.as_ref().map(display_value),
-        });
+            EditOp::SetProperty {
+                old_ref,
+                name,
+                old_value,
+                value,
+            } => {
+                let attribute = name.starts_with("Attributes.");
+                let display = |value: &Variant| {
+                    if attribute {
+                        attribute_variant_to_property_value(value)
+                    } else {
+                        variant_to_property_value(value)
+                    }
+                };
+                modifications
+                    .entry(*old_ref)
+                    .or_default()
+                    .push(PropertyChange {
+                        name: name.clone(),
+                        old_value: old_value.as_ref().map(display),
+                        new_value: value.as_ref().map(display),
+                    });
+            }
+            _ => {}
+        }
     }
 
-    changes
+    let moved_ancestor = |mut referent: Ref| {
+        while let Some(instance) = old_dom.get_by_ref(referent) {
+            referent = instance.parent();
+            if moved_old.contains(&referent) {
+                return Some(referent);
+            }
+        }
+        None
+    };
+    let mut result = Vec::new();
+    let mut deferred: HashMap<Ref, Vec<DiffEntry>> = HashMap::new();
+    let mut emitted_modifications = HashSet::new();
+    let push = |entry: DiffEntry,
+                owner: Option<Ref>,
+                result: &mut Vec<DiffEntry>,
+                deferred: &mut HashMap<Ref, Vec<DiffEntry>>| {
+        if let Some(owner) = owner {
+            deferred.entry(owner).or_default().push(entry);
+        } else {
+            result.push(entry);
+        }
+    };
+
+    for op in &changes.ops {
+        match op {
+            EditOp::RemoveSubtree { old_ref } => {
+                let Some(instance) = old_dom.get_by_ref(*old_ref) else {
+                    continue;
+                };
+                push(
+                    DiffEntry::Removed {
+                        old_ref: old_ref.to_string(),
+                        path: get_instance_path(old_dom, *old_ref),
+                        class: instance.class().to_string(),
+                    },
+                    moved_ancestor(*old_ref),
+                    &mut result,
+                    &mut deferred,
+                );
+            }
+            EditOp::AddSubtree { parent, new_ref } => {
+                let Some(instance) = new_dom.get_by_ref(*new_ref) else {
+                    continue;
+                };
+                let owner = match parent {
+                    Anchor::Old(parent) => {
+                        if moved_old.contains(parent) {
+                            Some(*parent)
+                        } else {
+                            moved_ancestor(*parent)
+                        }
+                    }
+                    Anchor::Added(_) => None,
+                };
+                push(
+                    DiffEntry::Added {
+                        new_ref: new_ref.to_string(),
+                        path: get_instance_path(new_dom, *new_ref),
+                        class: instance.class().to_string(),
+                    },
+                    owner,
+                    &mut result,
+                    &mut deferred,
+                );
+            }
+            EditOp::SetName { old_ref, .. } | EditOp::SetProperty { old_ref, .. } => {
+                if !emitted_modifications.insert(*old_ref) || moved_old.contains(old_ref) {
+                    continue;
+                }
+                let Some(&new_ref) = changes.matched.get(old_ref) else {
+                    continue;
+                };
+                let Some(instance) = new_dom.get_by_ref(new_ref) else {
+                    continue;
+                };
+                let property_changes = modifications.remove(old_ref).unwrap_or_default();
+                if property_changes.is_empty() {
+                    continue;
+                }
+                push(
+                    DiffEntry::Modified {
+                        old_ref: old_ref.to_string(),
+                        new_ref: new_ref.to_string(),
+                        path: get_instance_path(new_dom, new_ref),
+                        class: instance.class().to_string(),
+                        property_changes,
+                    },
+                    moved_ancestor(*old_ref),
+                    &mut result,
+                    &mut deferred,
+                );
+            }
+            EditOp::Move { .. } => {}
+        }
+    }
+
+    for (old_ref, new_ref) in &changes.moves {
+        let Some(instance) = new_dom.get_by_ref(*new_ref) else {
+            continue;
+        };
+        result.push(DiffEntry::Moved {
+            old_ref: old_ref.to_string(),
+            new_ref: new_ref.to_string(),
+            old_path: get_instance_path(old_dom, *old_ref),
+            path: get_instance_path(new_dom, *new_ref),
+            class: instance.class().to_string(),
+            property_changes: modifications.remove(old_ref).unwrap_or_default(),
+        });
+        if let Some(mut descendants) = deferred.remove(old_ref) {
+            result.append(&mut descendants);
+        }
+    }
+
+    // Conservatively retain any deferred entries if malformed identity data
+    // omitted their owning move.
+    for mut entries in deferred.into_values() {
+        result.append(&mut entries);
+    }
+    result
 }
 
 /// Check if a property should be compared (is meaningful for diffing).

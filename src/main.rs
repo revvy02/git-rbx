@@ -12,9 +12,10 @@ use tracing_subscriber::{fmt, EnvFilter};
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
     detect_rigid_groups, diff_model_compact_doms_with_config, finalize, find_container,
-    list_entries, mark_entry, mark_entry_custom, merge_doms, merge_doms_with_matches,
-    normalize_model_merge_frames, stamp_conflicts, stamp_model_frame_plan, stamp_rigid_groups,
-    ConflictKind, DiffConfig, DiffDom, MergeConflict, ModelFrameDecision, CONTAINER_NAME,
+    list_entries, mark_entry, mark_entry_custom, merge_compact_doms,
+    merge_compact_doms_with_matches, normalize_model_merge_compact_frames, stamp_compact_conflicts,
+    stamp_model_frame_plan, stamp_rigid_groups, ConflictKind, DiffConfig, DiffDom, MergeConflict,
+    ModelFrameDecision, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -253,15 +254,15 @@ fn cmd_merge(
     eprintln!("Loading base {}...", base_path);
     let mut base = load_file(base_path)?;
     eprintln!("Loading ours {}...", ours_path);
-    let mut ours = load_file(ours_path)?;
+    let mut ours = load_diff_file(ours_path)?;
     eprintln!("Loading theirs {}...", theirs_path);
-    let mut theirs = load_file(theirs_path)?;
+    let mut theirs = load_diff_file(theirs_path)?;
 
     let model_frames = if is_model_asset_path(base_path)
         && is_model_asset_path(ours_path)
         && is_model_asset_path(theirs_path)
     {
-        let frames = normalize_model_merge_frames(&base, &mut ours, &mut theirs);
+        let frames = normalize_model_merge_compact_frames(&base, &mut ours, &mut theirs);
         if let Some(frames) = &frames {
             eprintln!(
                 "Factored {} hierarchical model frame(s) ({} ours / {} theirs boundaries detected)",
@@ -280,7 +281,7 @@ fn cmd_merge(
     eprintln!("Merging...");
     let start = Instant::now();
     let mut result = if let Some(frames) = &model_frames {
-        merge_doms_with_matches(
+        merge_compact_doms_with_matches(
             &mut base,
             &ours,
             &theirs,
@@ -289,7 +290,7 @@ fn cmd_merge(
             &frames.theirs_identity,
         )
     } else {
-        merge_doms(&mut base, &ours, &theirs, &config)
+        merge_compact_doms(&mut base, &ours, &theirs, &config)
     };
     if let Some(frames) = &model_frames {
         for frame in &frames.frames {
@@ -316,8 +317,8 @@ fn cmd_merge(
         // the entire ordered plan to finalization/Studio preview.
         if !frames.has_conflicts() {
             frames.apply_automatic_to_base(&mut base);
-            frames.apply_automatic_to_ours(&mut ours);
-            frames.apply_automatic_to_theirs(&mut theirs);
+            frames.apply_automatic_to_compact_ours(&mut ours);
+            frames.apply_automatic_to_compact_theirs(&mut theirs);
         }
     }
     eprintln!(
@@ -335,7 +336,7 @@ fn cmd_merge(
     let mut groups = Vec::new();
     if !result.conflicts.is_empty() {
         groups = detect_rigid_groups(&base, &result.conflicts);
-        stamp_conflicts(&mut base, &ours, &theirs, &result);
+        stamp_compact_conflicts(&mut base, &ours, &theirs, &result);
         if let Some(frames) = &model_frames {
             if frames.has_conflicts() {
                 stamp_model_frame_plan(&mut base, &frames.automatic_applications());

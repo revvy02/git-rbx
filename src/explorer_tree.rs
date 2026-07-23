@@ -9,6 +9,8 @@
 use rbx_dom_weak::{types::Ref, WeakDom};
 use std::collections::HashMap;
 
+use crate::diff_dom::DomView;
+
 #[derive(Debug)]
 pub(crate) struct ExplorerTreeNode {
     pub id: u32,
@@ -44,9 +46,9 @@ pub(crate) enum ExplorerVersion {
 
 impl ExplorerTrees {
     pub fn capture(
-        base: &WeakDom,
-        ours: &WeakDom,
-        theirs: &WeakDom,
+        base: &dyn DomView,
+        ours: &dyn DomView,
+        theirs: &dyn DomView,
         ours_matched: &HashMap<Ref, Ref>,
         theirs_matched: &HashMap<Ref, Ref>,
     ) -> Self {
@@ -145,7 +147,7 @@ fn reverse_matched_ids(
 }
 
 fn capture_tree(
-    dom: &WeakDom,
+    dom: &dyn DomView,
     known_ids: &HashMap<Ref, u32>,
     next_id: &mut u32,
 ) -> (ExplorerTree, HashMap<Ref, u32>) {
@@ -153,7 +155,7 @@ fn capture_tree(
     let mut ids = HashMap::new();
 
     fn visit(
-        dom: &WeakDom,
+        dom: &dyn DomView,
         referent: Ref,
         parent: Option<u32>,
         known_ids: &HashMap<Ref, u32>,
@@ -171,17 +173,18 @@ fn capture_tree(
         nodes.push(ExplorerTreeNode {
             id,
             parent,
-            name: instance.name.clone(),
-            class_name: instance.class.to_string(),
+            name: instance.name().to_string(),
+            class_name: instance.class().to_string(),
         });
-        for &child in instance.children() {
+        for child in instance.children() {
             visit(dom, child, Some(id), known_ids, next_id, nodes, ids);
         }
     }
 
     // WeakDom's root is the serialization wrapper. The roots written to an
     // rbxm/rbxl are its children, so those are the explorer roots.
-    for &root in dom.root().children() {
+    let root = dom.get_by_ref(dom.root_ref()).unwrap();
+    for root in root.children() {
         visit(dom, root, None, known_ids, next_id, &mut nodes, &mut ids);
     }
 

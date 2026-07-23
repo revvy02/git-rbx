@@ -12,8 +12,8 @@
 //!   eventual edit-plan materialization.
 //!
 //! The first integration stage builds this representation from a `WeakDom`.
-//! A future binary decoder can populate the same arenas directly without
-//! changing matching, diff, or merge semantics.
+//! Binary decoding populates these arenas directly. Both display diffing and
+//! merge planning use them; only result materialization requires `WeakDom`.
 
 #[cfg(test)]
 use rbx_dom_weak::InstanceBuilder;
@@ -910,10 +910,9 @@ impl Iterator for DescendantRefs<'_> {
 mod tests {
     use super::DiffDom;
     use crate::compact_diff::compute_compact_diff_with_identity;
-    use crate::diff::{compute_diff_with_identity, DiffConfig};
+    use crate::diff::{semantic_changes_to_diff, DiffConfig};
     use crate::diff_doms;
-    use crate::edit_script::compute_instance_identity;
-    use crate::hash::LazyHashCache;
+    use crate::edit_script::{compute_instance_identity, compute_semantic_changes_with_identity};
     use crate::property_semantics::get_authored_properties;
     use rbx_dom_weak::{InstanceBuilder, WeakDom};
     use rbx_types::{Ref, Variant};
@@ -1038,29 +1037,13 @@ mod tests {
                 .with_child(InstanceBuilder::new("SpotLight").with_name("Added")),
         );
         let config = DiffConfig::default();
-        let weak_old_hashes = LazyHashCache::new(&old);
-        let weak_new_hashes = LazyHashCache::new(&new);
-        let weak = compute_diff_with_identity(
-            &old,
-            &new,
-            &weak_old_hashes,
-            &weak_new_hashes,
-            &config,
-            None,
-        );
+        let weak = diff_doms(&old, &new);
 
         let compact_old = DiffDom::from_weak_dom(&old);
         let compact_new = DiffDom::from_weak_dom(&new);
-        let compact_old_hashes = LazyHashCache::new_view(&compact_old);
-        let compact_new_hashes = LazyHashCache::new_view(&compact_new);
-        let compact = compute_diff_with_identity(
-            &compact_old,
-            &compact_new,
-            &compact_old_hashes,
-            &compact_new_hashes,
-            &config,
-            None,
-        );
+        let compact_changes =
+            compute_semantic_changes_with_identity(&compact_old, &compact_new, &config, None);
+        let compact = semantic_changes_to_diff(&compact_old, &compact_new, &compact_changes);
         let identity = compute_instance_identity(&compact_old, &compact_new, &config);
         let dense =
             compute_compact_diff_with_identity(&compact_old, &compact_new, &identity, &config);

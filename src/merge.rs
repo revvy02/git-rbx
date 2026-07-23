@@ -12,9 +12,10 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::diff::DiffConfig;
+use crate::diff_dom::{DiffDom, DomView};
 use crate::edit_script::{
-    apply_ops, compute_edit_script, compute_edit_script_with_matches, Anchor, EditOp, EditScript,
-    InstanceIdentity,
+    apply_ops, compute_edit_script, compute_semantic_changes_with_identity, Anchor, EditOp,
+    EditScript, InstanceIdentity,
 };
 use crate::explorer_tree::ExplorerTrees;
 use crate::hash::DeepHashCache;
@@ -92,6 +93,21 @@ pub fn merge_doms(
     merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
 }
 
+/// Three-way merge with compact immutable branch inputs.
+///
+/// The base remains a `WeakDom` because it is the materialized result. Branch
+/// comparison and subtree payload access only require `DomView`.
+pub fn merge_compact_doms(
+    base: &mut WeakDom,
+    ours: &DiffDom,
+    theirs: &DiffDom,
+    config: &DiffConfig,
+) -> MergeResult {
+    let ours_script = compute_semantic_changes_with_identity(base, ours, config, None);
+    let theirs_script = compute_semantic_changes_with_identity(base, theirs, config, None);
+    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+}
+
 /// Three-way merge using instance identities captured before a
 /// representation-only normalization pass. This prevents canonical CFrames
 /// from making duplicate siblings reshuffle during the real merge.
@@ -103,16 +119,33 @@ pub fn merge_doms_with_matches(
     ours_identity: &InstanceIdentity,
     theirs_identity: &InstanceIdentity,
 ) -> MergeResult {
-    let ours_script = compute_edit_script_with_matches(base, ours, config, Some(ours_identity));
+    let ours_script =
+        compute_semantic_changes_with_identity(base, ours, config, Some(ours_identity));
     let theirs_script =
-        compute_edit_script_with_matches(base, theirs, config, Some(theirs_identity));
+        compute_semantic_changes_with_identity(base, theirs, config, Some(theirs_identity));
+    merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
+}
+
+/// Compact-branch variant of [`merge_doms_with_matches`].
+pub fn merge_compact_doms_with_matches(
+    base: &mut WeakDom,
+    ours: &DiffDom,
+    theirs: &DiffDom,
+    config: &DiffConfig,
+    ours_identity: &InstanceIdentity,
+    theirs_identity: &InstanceIdentity,
+) -> MergeResult {
+    let ours_script =
+        compute_semantic_changes_with_identity(base, ours, config, Some(ours_identity));
+    let theirs_script =
+        compute_semantic_changes_with_identity(base, theirs, config, Some(theirs_identity));
     merge_scripts(base, ours, theirs, &ours_script, &theirs_script, config)
 }
 
 fn merge_scripts(
     base: &mut WeakDom,
-    ours_dom: &WeakDom,
-    theirs_dom: &WeakDom,
+    ours_dom: &dyn DomView,
+    theirs_dom: &dyn DomView,
     ours: &EditScript,
     theirs: &EditScript,
     config: &DiffConfig,
@@ -244,11 +277,13 @@ fn merge_scripts(
                         old_ref: a,
                         name: an,
                         value: av,
+                        ..
                     },
                     EditOp::SetProperty {
                         old_ref: b,
                         name: bn,
                         value: bv,
+                        ..
                     },
                 ) if a == b && an == bn => {
                     if values_equal(av, bv, &ours_to_base, &theirs_to_base) {
@@ -374,6 +409,13 @@ fn merge_scripts(
         }
     }
 
+    // Conflict entry names are persisted in the file and may be selected by
+    // CLI automation. Planner hash-table order must not renumber them.
+    conflicts.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| conflict_kind_key(&left.kind).cmp(&conflict_kind_key(&right.kind)))
+    });
     stats.conflicted = conflicts.len();
 
     // ---- Apply survivors: ours first, then theirs (targets are disjoint now)
@@ -425,17 +467,27 @@ fn merge_scripts(
     MergeResult {
         conflicts,
         stats,
-        ours_matched: ours.matched.clone(),
-        theirs_matched: theirs.matched.clone(),
+        ours_matched: ours.matched.as_ref().clone(),
+        theirs_matched: theirs.matched.as_ref().clone(),
         explorer_trees,
+    }
+}
+
+fn conflict_kind_key(kind: &ConflictKind) -> (u8, &str) {
+    match kind {
+        ConflictKind::Property { name } => (0, name),
+        ConflictKind::PropertyBundle { name, .. } => (1, name),
+        ConflictKind::DeleteVsEdit => (2, ""),
+        ConflictKind::MoveTarget => (3, ""),
+        ConflictKind::ModelFrame { .. } => (4, ""),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn group_property_bundle_conflicts(
     base: &WeakDom,
-    ours_dom: &WeakDom,
-    theirs_dom: &WeakDom,
+    ours_dom: &dyn DomView,
+    theirs_dom: &dyn DomView,
     ours: &EditScript,
     theirs: &EditScript,
     conflicted_ours: &mut HashSet<usize>,
@@ -500,7 +552,7 @@ fn group_property_bundle_conflicts(
             continue;
         };
 
-        if semantic_bundle_values_equal(our_instance, their_instance, *bundle) {
+        if semantic_bundle_values_equal(&our_instance, &their_instance, *bundle) {
             for &index in their_indices {
                 dropped_theirs.insert(index);
             }

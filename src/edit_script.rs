@@ -1,19 +1,19 @@
-//! Applicable edit scripts: the difference between two DOMs as a sequence of
-//! operations that transform the old DOM into the new one.
+//! Semantic change sets: storage-independent differences between two DOMs,
+//! plus materialization helpers that apply them to a mutable result.
 //!
 //! This is the layer the future merge combiner consumes. Basis ops are
 //! AddSubtree / RemoveSubtree / SetName / SetProperty; Move is the derived
 //! identity op (a paired remove+add). Ops address existing instances by their
 //! ref in the OLD dom and subtree payloads by their ref in the NEW dom.
 //!
-//! Unlike the display diff, the builder walks the full tree without deep-hash
-//! pruning so the identity mapping covers every matched instance — Ref-valued
-//! properties can then always be remapped at apply time without heuristics.
-//! This trades some speed for correctness; display diffing keeps its pruning.
+//! Merge planning walks the complete identity tree so Ref-valued properties
+//! can always be remapped at materialization time. Compact display diffing
+//! produces the same semantic records through a dense changed-subtree pass.
 
 use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
 use rbx_types::Variant;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::diff::{is_studio_artifact, raw_property_changes, DiffConfig};
@@ -47,27 +47,40 @@ pub enum EditOp {
     SetProperty {
         old_ref: Ref,
         name: String,
+        /// Previous semantic value in old-DOM terms. Retained so display
+        /// diffs and conflict impacts project from the same change record.
+        old_value: Option<Variant>,
         value: Option<Variant>,
     },
 }
 
-/// An applicable difference between two DOMs.
-pub struct EditScript {
+/// Storage-independent semantic changes between two DOMs.
+///
+/// Planning only depends on [`DomView`]. A mutable [`WeakDom`] is required
+/// later, when the changes are materialized. Keeping those phases separate
+/// lets the two-way diff and three-way merge planners consume compact DOMs
+/// without pulling editing concerns into matching and comparison.
+pub struct SemanticChangeSet {
     pub ops: Vec<EditOp>,
     /// Identity mapping (old_ref → new_ref) for every matched instance,
     /// including moved pairs and instances inside unchanged subtrees.
-    pub matched: HashMap<Ref, Ref>,
+    pub matched: Arc<HashMap<Ref, Ref>>,
     /// New-DOM refs that are Move destinations. A destination can sit inside
     /// an added subtree (moved into a new group); cloning that subtree must
     /// skip these positions — the Move op supplies the real instance.
     pub moved_destinations: HashSet<Ref>,
+    /// Paired moved roots in identity-detection order.
+    pub moves: Vec<(Ref, Ref)>,
 }
+
+/// Backwards-compatible name for the applicable semantic change set.
+pub type EditScript = SemanticChangeSet;
 
 /// Complete cross-DOM identity captured before a representation-only
 /// canonicalization, including the exact roots recognized as moves.
 #[derive(Debug, Clone)]
 pub struct InstanceIdentity {
-    pub matched: HashMap<Ref, Ref>,
+    pub matched: Arc<HashMap<Ref, Ref>>,
     pub moves: Vec<(Ref, Ref)>,
 }
 
@@ -77,7 +90,16 @@ pub fn compute_edit_script(
     new_dom: &WeakDom,
     config: &DiffConfig,
 ) -> EditScript {
-    compute_edit_script_with_matches(old_dom, new_dom, config, None)
+    compute_semantic_changes(old_dom, new_dom, config)
+}
+
+/// Compute the storage-independent changes from `old_dom` to `new_dom`.
+pub fn compute_semantic_changes(
+    old_dom: &WeakDom,
+    new_dom: &WeakDom,
+    config: &DiffConfig,
+) -> SemanticChangeSet {
+    compute_semantic_changes_with_identity(old_dom, new_dom, config, None)
 }
 
 /// Establish complete cross-DOM identity without constructing property ops.
@@ -141,7 +163,10 @@ fn discover_identity_once(
             &mut Vec::new(),
         );
     }
-    InstanceIdentity { matched, moves }
+    InstanceIdentity {
+        matched: Arc::new(matched),
+        moves,
+    }
 }
 
 fn discover_identity(
@@ -182,19 +207,22 @@ fn discover_identity(
             &mut Vec::new(),
         );
     }
-    InstanceIdentity { matched, moves }
+    InstanceIdentity {
+        matched: Arc::new(matched),
+        moves,
+    }
 }
 
 /// Compute an edit script while preserving identity established before a
 /// representation-only DOM canonicalization.
-pub(crate) fn compute_edit_script_with_matches(
-    old_dom: &WeakDom,
-    new_dom: &WeakDom,
+pub(crate) fn compute_semantic_changes_with_identity(
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
     config: &DiffConfig,
     pinned: Option<&InstanceIdentity>,
-) -> EditScript {
-    let old_hashes = LazyHashCache::new(old_dom);
-    let new_hashes = LazyHashCache::new(new_dom);
+) -> SemanticChangeSet {
+    let old_hashes = LazyHashCache::new_view(old_dom);
+    let new_hashes = LazyHashCache::new_view(new_dom);
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
     let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
     let mut matcher = Matcher::new(
@@ -213,7 +241,7 @@ pub(crate) fn compute_edit_script_with_matches(
         // This is a complete identity map captured before representation-only
         // canonicalization. Derive moves from parent identity directly rather
         // than asking content hashes to rediscover them after transforms.
-        (pinned.matched.clone(), pinned.moves.clone())
+        (Arc::clone(&pinned.matched), pinned.moves.clone())
     } else {
         let identity = discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep);
         (identity.matched, identity.moves)
@@ -247,7 +275,7 @@ pub(crate) fn compute_edit_script_with_matches(
     let ctx = BuildCtx {
         matcher: &matcher,
         config,
-        matched: &matched,
+        matched: matched.as_ref(),
         moved_old: &moved_old,
         moved_new: &moved_new,
     };
@@ -262,10 +290,11 @@ pub(crate) fn compute_edit_script_with_matches(
         matched = matched.len(),
         "edit script built"
     );
-    EditScript {
+    SemanticChangeSet {
         ops,
         matched,
         moved_destinations: moved_new,
+        moves,
     }
 }
 
@@ -415,6 +444,7 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
         ops.push(EditOp::SetProperty {
             old_ref,
             name: change.name,
+            old_value: change.old,
             value: change.new,
         });
     }
@@ -442,7 +472,7 @@ pub fn apply_edit_script(target: &mut WeakDom, new_dom: &WeakDom, script: &EditS
 /// combiner to apply each branch's surviving ops from its own source DOM.
 pub(crate) fn apply_ops(
     target: &mut WeakDom,
-    source_dom: &WeakDom,
+    source_dom: &dyn DomView,
     ops: &[EditOp],
     matched: &HashMap<Ref, Ref>,
     moved_destinations: &HashSet<Ref>,
@@ -499,6 +529,7 @@ pub(crate) fn apply_ops(
             EditOp::SetProperty {
                 old_ref,
                 name,
+                old_value: _,
                 value,
             } => {
                 if let Some(inst) = target.get_by_ref_mut(*old_ref) {
@@ -579,20 +610,19 @@ fn remap_ref_value(
 /// Move destinations are skipped: their content is an existing instance the
 /// Move op relocates here, not new content to duplicate.
 fn build_subtree(
-    new_dom: &WeakDom,
+    new_dom: &dyn DomView,
     referent: Ref,
     moved_destinations: &HashSet<Ref>,
 ) -> InstanceBuilder {
     let inst = new_dom.get_by_ref(referent).unwrap();
-    let mut builder = InstanceBuilder::new(inst.class.as_str()).with_name(inst.name.as_str());
-    for (name, value) in &inst.properties {
-        builder = builder.with_property(name.as_str(), value.clone());
+    let mut builder = InstanceBuilder::new(inst.class()).with_name(inst.name());
+    for (name, value) in inst.properties() {
+        builder = builder.with_property(name, value.clone());
     }
     let children: Vec<InstanceBuilder> = inst
         .children()
-        .iter()
         .filter(|child| !moved_destinations.contains(child))
-        .map(|&child| build_subtree(new_dom, child, moved_destinations))
+        .map(|child| build_subtree(new_dom, child, moved_destinations))
         .collect();
     builder.with_children(children)
 }
@@ -602,7 +632,7 @@ fn build_subtree(
 /// source order minus skipped move destinations, so pairing filters the same
 /// refs to stay positional.
 fn record_created(
-    new_dom: &WeakDom,
+    new_dom: &dyn DomView,
     new_ref: Ref,
     target: &WeakDom,
     created_ref: Ref,
@@ -614,8 +644,6 @@ fn record_created(
         .get_by_ref(new_ref)
         .unwrap()
         .children()
-        .iter()
-        .copied()
         .filter(|c| !moved_destinations.contains(c));
     let target_children = target
         .get_by_ref(created_ref)

@@ -35,6 +35,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::diff::{attribute_variant_to_property_value, variant_to_property_value, PropertyValue};
+use crate::diff_dom::{DiffDom, DomView};
 use crate::dom_utils::class_is_a;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
 use crate::explorer_tree::{ExplorerTree, ExplorerTrees, ExplorerVersion};
@@ -57,6 +58,25 @@ pub fn stamp_conflicts(
     base: &mut WeakDom,
     ours_dom: &WeakDom,
     theirs_dom: &WeakDom,
+    result: &MergeResult,
+) {
+    stamp_conflicts_from_views(base, ours_dom, theirs_dom, result);
+}
+
+/// Stamp conflicts while retaining compact immutable branch inputs.
+pub fn stamp_compact_conflicts(
+    base: &mut WeakDom,
+    ours_dom: &DiffDom,
+    theirs_dom: &DiffDom,
+    result: &MergeResult,
+) {
+    stamp_conflicts_from_views(base, ours_dom, theirs_dom, result);
+}
+
+fn stamp_conflicts_from_views(
+    base: &mut WeakDom,
+    ours_dom: &dyn DomView,
+    theirs_dom: &dyn DomView,
     result: &MergeResult,
 ) {
     if result.conflicts.is_empty() {
@@ -346,7 +366,7 @@ fn stamp_side(
     side_name: &str,
     side_ops: &[EditOp],
     base_ref: Ref,
-    branch_dom: &WeakDom,
+    branch_dom: &dyn DomView,
     base_to_branch: &HashMap<Ref, Ref>,
     branch_to_base: &HashMap<Ref, Ref>,
     trees: &ExplorerTrees,
@@ -449,7 +469,7 @@ fn stamp_impact(base: &mut WeakDom, side_folder: Ref, impact: &ImpactSide) {
     );
 }
 
-fn patch_value(dom: &WeakDom, property: &str, value: Option<&Variant>) -> PropertyValue {
+fn patch_value(dom: &dyn DomView, property: &str, value: Option<&Variant>) -> PropertyValue {
     match value {
         None => PropertyValue::Nil,
         Some(Variant::Ref(r)) if r.is_none() => PropertyValue::Nil,
@@ -466,18 +486,9 @@ fn patch_value(dom: &WeakDom, property: &str, value: Option<&Variant>) -> Proper
     }
 }
 
-fn property_at(dom: &WeakDom, referent: Ref, name: &str) -> Option<Variant> {
-    let instance = dom.get_by_ref(referent)?;
-    if is_sub_property(name) {
-        get_sub_property(instance, name)
-    } else {
-        instance.properties.get(&name.into()).cloned()
-    }
-}
-
 fn impact_for_ops(
     base: &WeakDom,
-    branch: &WeakDom,
+    branch: &dyn DomView,
     ops: &[EditOp],
     base_to_branch: &HashMap<Ref, Ref>,
     trees: &ExplorerTrees,
@@ -500,11 +511,11 @@ fn impact_for_ops(
             EditOp::SetProperty {
                 old_ref,
                 name,
+                old_value,
                 value,
             } => {
                 property_count += 1;
                 let id = trees.id_for(ExplorerVersion::Base, *old_ref);
-                let old_value = property_at(base, *old_ref, name);
                 (
                     "Property",
                     id,
@@ -678,7 +689,7 @@ fn model_frame_impact(
 /// branch identity into the live merged DOM (or nulled when identity is
 /// unknown).
 fn clone_from_branch(
-    branch_dom: &WeakDom,
+    branch_dom: &dyn DomView,
     branch_ref: Ref,
     branch_to_base: &HashMap<Ref, Ref>,
     deep: bool,
@@ -695,31 +706,31 @@ fn clone_from_branch(
 }
 
 fn allocate_clone_refs(
-    branch_dom: &WeakDom,
+    branch_dom: &dyn DomView,
     branch_ref: Ref,
     deep: bool,
     branch_to_clone: &mut HashMap<Ref, Ref>,
 ) {
     branch_to_clone.insert(branch_ref, Ref::new());
     if deep {
-        for &child in branch_dom.get_by_ref(branch_ref).unwrap().children() {
+        for child in branch_dom.get_by_ref(branch_ref).unwrap().children() {
             allocate_clone_refs(branch_dom, child, true, branch_to_clone);
         }
     }
 }
 
 fn build_branch_clone(
-    branch_dom: &WeakDom,
+    branch_dom: &dyn DomView,
     branch_ref: Ref,
     branch_to_base: &HashMap<Ref, Ref>,
     branch_to_clone: &HashMap<Ref, Ref>,
     deep: bool,
 ) -> InstanceBuilder {
     let inst = branch_dom.get_by_ref(branch_ref).unwrap();
-    let mut builder = InstanceBuilder::new(inst.class.as_str())
+    let mut builder = InstanceBuilder::new(inst.class())
         .with_referent(branch_to_clone[&branch_ref])
-        .with_name(inst.name.as_str());
-    for (name, value) in &inst.properties {
+        .with_name(inst.name());
+    for (name, value) in inst.properties() {
         let value = match value {
             Variant::Ref(r) if !r.is_none() => Variant::Ref(
                 branch_to_clone
@@ -730,13 +741,12 @@ fn build_branch_clone(
             ),
             other => other.clone(),
         };
-        builder = builder.with_property(name.as_str(), value);
+        builder = builder.with_property(name, value);
     }
     if deep {
         let children: Vec<InstanceBuilder> = inst
             .children()
-            .iter()
-            .map(|&child| {
+            .map(|child| {
                 build_branch_clone(branch_dom, child, branch_to_base, branch_to_clone, true)
             })
             .collect();
