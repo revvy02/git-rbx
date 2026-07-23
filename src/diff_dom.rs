@@ -25,6 +25,8 @@ use std::ops::Range;
 use std::slice;
 use std::sync::Arc;
 
+use crate::property_semantics::get_authored_properties;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct NodeId(u32);
 
@@ -88,6 +90,18 @@ struct Node {
 struct Property {
     name: Ustr,
     value: Variant,
+    authored: bool,
+}
+
+type AuthoredPropertyCache = HashMap<Ustr, &'static HashSet<String>>;
+
+fn authored_properties_for(
+    cache: &mut AuthoredPropertyCache,
+    class: Ustr,
+) -> &'static HashSet<String> {
+    *cache
+        .entry(class)
+        .or_insert_with(|| get_authored_properties(class.as_str()))
 }
 
 /// Dense, read-mostly DOM used by matching and diff computation.
@@ -145,6 +159,7 @@ struct DiffDomDecodeTarget {
     strings: StringTable,
     by_source_ref: HashMap<Ref, NodeId>,
     unique_ids: HashSet<UniqueId>,
+    authored_properties: AuthoredPropertyCache,
 }
 
 impl DiffDomDecodeTarget {
@@ -170,6 +185,7 @@ impl DiffDomDecodeTarget {
             strings,
             by_source_ref,
             unique_ids: HashSet::new(),
+            authored_properties: HashMap::new(),
         }
     }
 }
@@ -212,6 +228,7 @@ impl rbx_binary::DecodeTarget for DiffDomDecodeTarget {
         instance
             .properties
             .sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        let authored = authored_properties_for(&mut self.authored_properties, instance.class);
         let properties_start =
             u32::try_from(self.properties.len()).expect("DiffDom property arena exceeded u32::MAX");
         for (name, value) in instance.properties {
@@ -226,7 +243,12 @@ impl rbx_binary::DecodeTarget for DiffDomDecodeTarget {
             if let Some(property) = duplicate {
                 property.value = value;
             } else {
-                self.properties.push(Property { name, value });
+                let is_authored = authored.contains(name.as_str());
+                self.properties.push(Property {
+                    name,
+                    value,
+                    authored: is_authored,
+                });
             }
         }
         let properties_end =
@@ -303,6 +325,7 @@ impl DiffDom {
         let mut nodes = Vec::with_capacity(source_refs.len());
         let mut children = Vec::with_capacity(source_refs.len().saturating_sub(1));
         let mut properties = Vec::new();
+        let mut authored_properties = HashMap::new();
 
         for &source_ref in &source_refs {
             let instance = dom
@@ -326,6 +349,7 @@ impl DiffDom {
                 .map(|(name, value)| (name.as_str(), value))
                 .collect();
             instance_properties.sort_unstable_by_key(|(name, _)| *name);
+            let authored = authored_properties_for(&mut authored_properties, instance.class);
 
             let properties_start =
                 u32::try_from(properties.len()).expect("DiffDom property arena exceeded u32::MAX");
@@ -333,6 +357,7 @@ impl DiffDom {
                 properties.push(Property {
                     name: (*name).into(),
                     value: value.clone(),
+                    authored: authored.contains(name),
                 });
             }
             let properties_end =
@@ -387,6 +412,7 @@ impl DiffDom {
         let mut nodes = Vec::with_capacity(source_refs.len());
         let mut children = Vec::with_capacity(source_refs.len().saturating_sub(1));
         let mut properties = Vec::with_capacity(property_count);
+        let mut authored_properties = HashMap::new();
 
         for source_ref in source_refs {
             let instance = instances
@@ -407,6 +433,7 @@ impl DiffDom {
             let parent = by_source_ref.get(&instance.parent()).copied();
             let name = strings.intern(&instance.name);
             let class = instance.class;
+            let authored = authored_properties_for(&mut authored_properties, class);
             let mut instance_properties: Vec<_> = instance.properties.into_iter().collect();
             instance_properties
                 .sort_unstable_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
@@ -414,9 +441,11 @@ impl DiffDom {
             let properties_start =
                 u32::try_from(properties.len()).expect("DiffDom property arena exceeded u32::MAX");
             for (property_name, value) in instance_properties {
+                let is_authored = authored.contains(property_name.as_str());
                 properties.push(Property {
                     name: property_name,
                     value,
+                    authored: is_authored,
                 });
             }
             let properties_end =
@@ -558,10 +587,19 @@ impl<'a> DiffNode<'a> {
         self.raw().properties.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn properties(self) -> impl ExactSizeIterator<Item = (&'a str, &'a Variant)> + 'a {
         let range = self.raw().properties.clone();
         self.dom.properties[range.start as usize..range.end as usize]
             .iter()
+            .map(|property| (property.name.as_str(), &property.value))
+    }
+
+    pub(crate) fn authored_properties(self) -> impl Iterator<Item = (&'a str, &'a Variant)> + 'a {
+        let range = self.raw().properties.clone();
+        self.dom.properties[range.start as usize..range.end as usize]
+            .iter()
+            .filter(|property| property.authored)
             .map(|property| (property.name.as_str(), &property.value))
     }
 }
@@ -633,6 +671,21 @@ impl<'a> InstanceView<'a> {
         }
     }
 
+    pub(crate) fn authored_properties(self) -> AuthoredPropertyIter<'a> {
+        match self {
+            Self::Weak(instance) => AuthoredPropertyIter(AuthoredPropertyIterInner::Weak {
+                inner: instance.properties.iter(),
+                authored: get_authored_properties(instance.class.as_str()),
+            }),
+            Self::Compact(instance) => {
+                let range = instance.raw().properties.clone();
+                AuthoredPropertyIter(AuthoredPropertyIterInner::Compact {
+                    inner: instance.dom.properties[range.start as usize..range.end as usize].iter(),
+                })
+            }
+        }
+    }
+
     pub(crate) fn children(self) -> ChildRefIter<'a> {
         match self {
             Self::Weak(instance) => ChildRefIter::Weak(instance.children().iter()),
@@ -677,6 +730,33 @@ impl<'a> Iterator for PropertyIter<'a> {
 }
 
 impl ExactSizeIterator for PropertyIter<'_> {}
+
+pub(crate) struct AuthoredPropertyIter<'a>(AuthoredPropertyIterInner<'a>);
+
+enum AuthoredPropertyIterInner<'a> {
+    Weak {
+        inner: std::collections::hash_map::Iter<'a, Ustr, Variant>,
+        authored: &'static HashSet<String>,
+    },
+    Compact {
+        inner: slice::Iter<'a, Property>,
+    },
+}
+
+impl<'a> Iterator for AuthoredPropertyIter<'a> {
+    type Item = (&'a str, &'a Variant);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.0 {
+            AuthoredPropertyIterInner::Weak { inner, authored } => inner
+                .find(|(name, _)| authored.contains(name.as_str()))
+                .map(|(name, value)| (name.as_str(), value)),
+            AuthoredPropertyIterInner::Compact { inner } => inner
+                .find(|property| property.authored)
+                .map(|property| (property.name.as_str(), &property.value)),
+        }
+    }
+}
 
 pub(crate) enum ChildRefIter<'a> {
     Weak(slice::Iter<'a, Ref>),
@@ -834,6 +914,7 @@ mod tests {
     use crate::diff_doms;
     use crate::edit_script::compute_instance_identity;
     use crate::hash::LazyHashCache;
+    use crate::property_semantics::get_authored_properties;
     use rbx_dom_weak::{InstanceBuilder, WeakDom};
     use rbx_types::{Ref, Variant};
 
@@ -878,6 +959,22 @@ mod tests {
         );
         assert!(!compact.is_empty());
         assert_eq!(compact.len(), stats.nodes);
+    }
+
+    #[test]
+    fn authored_property_metadata_matches_semantic_policy() {
+        let compact = DiffDom::from_weak_dom(&fixture());
+
+        for node in compact.nodes() {
+            let authored = get_authored_properties(node.class());
+            let expected: Vec<_> = node
+                .properties()
+                .filter(|(name, _)| authored.contains(*name))
+                .map(|(name, _)| name)
+                .collect();
+            let actual: Vec<_> = node.authored_properties().map(|(name, _)| name).collect();
+            assert_eq!(actual, expected, "authored metadata for {}", node.class());
+        }
     }
 
     #[test]

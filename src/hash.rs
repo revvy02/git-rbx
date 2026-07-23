@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::diff_dom::{DomView, InstanceView};
-use crate::property_semantics::{get_authored_properties, normalize_asset_uri};
+use crate::property_semantics::normalize_asset_uri;
 
 macro_rules! n_hash {
     ($hash:ident, $($num:expr),*) => {
@@ -151,7 +151,6 @@ fn hash_instance(
     ignore_properties: Option<&HashSet<String>>,
     policy: HashPolicy,
 ) -> Hasher {
-    let authored = get_authored_properties(inst.class());
     let mut hasher = Hasher::new();
 
     if policy.include_name {
@@ -162,7 +161,6 @@ fn hash_instance(
     let mut hash_property = |name: &str, value: &Variant| {
         if ignore_properties.is_some_and(|ignored| ignored.contains(name))
             || (!policy.include_refs && matches!(value, Variant::Ref(_)))
-            || !authored.contains(name)
         {
             return;
         }
@@ -173,11 +171,11 @@ fn hash_instance(
     if matches!(inst, InstanceView::Compact(_)) {
         // DiffDom property ranges are sorted during construction, so hashing
         // them directly avoids one temporary Vec and sort per hashed node.
-        for (name, value) in inst.properties() {
+        for (name, value) in inst.authored_properties() {
             hash_property(name, value);
         }
     } else {
-        let mut properties: Vec<_> = inst.properties().collect();
+        let mut properties: Vec<_> = inst.authored_properties().collect();
         properties.sort_unstable_by_key(|(name, _)| *name);
         for (name, value) in properties {
             hash_property(name, value);

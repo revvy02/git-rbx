@@ -12,7 +12,6 @@ use crate::diff_dom::{DiffDom, DiffNode, DomView, InstanceView, NodeId};
 use crate::edit_script::InstanceIdentity;
 use crate::hash::DeepHashCache;
 use crate::match_instances::get_instance_path;
-use crate::property_semantics::get_authored_properties;
 use crate::value_compare::non_ref_variants_equal;
 
 struct DenseIdentity {
@@ -113,11 +112,9 @@ fn frozen_variants_equal(
 
 fn next_comparable_property<'a>(
     properties: &mut impl Iterator<Item = (&'a str, &'a Variant)>,
-    authored: &HashSet<String>,
     config: &DiffConfig,
 ) -> Option<(&'a str, &'a Variant)> {
-    properties
-        .find(|(name, _)| !config.ignore_properties.contains(*name) && authored.contains(*name))
+    properties.find(|(name, _)| !config.ignore_properties.contains(*name))
 }
 
 fn compact_instance_equal(
@@ -132,16 +129,15 @@ fn compact_instance_equal(
         return false;
     }
 
-    let authored = get_authored_properties(old.class());
     let database = rbx_reflection_database::get().unwrap();
     let defaults = database
         .classes
         .get(new.class())
         .map(|class| &class.default_properties);
-    let mut old_properties = old.properties();
-    let mut new_properties = new.properties();
-    let mut old_property = next_comparable_property(&mut old_properties, authored, config);
-    let mut new_property = next_comparable_property(&mut new_properties, authored, config);
+    let mut old_properties = old.authored_properties();
+    let mut new_properties = new.authored_properties();
+    let mut old_property = next_comparable_property(&mut old_properties, config);
+    let mut new_property = next_comparable_property(&mut new_properties, config);
 
     loop {
         match (old_property, new_property) {
@@ -150,13 +146,13 @@ fn compact_instance_equal(
                 if !property_is_semantically_absent(defaults, old_name, old_value) {
                     return false;
                 }
-                old_property = next_comparable_property(&mut old_properties, authored, config);
+                old_property = next_comparable_property(&mut old_properties, config);
             }
             (None, Some((new_name, new_value))) => {
                 if !property_is_semantically_absent(defaults, new_name, new_value) {
                     return false;
                 }
-                new_property = next_comparable_property(&mut new_properties, authored, config);
+                new_property = next_comparable_property(&mut new_properties, config);
             }
             (Some((old_name, old_value)), Some((new_name, new_value))) => {
                 match old_name.cmp(new_name) {
@@ -164,15 +160,13 @@ fn compact_instance_equal(
                         if !property_is_semantically_absent(defaults, old_name, old_value) {
                             return false;
                         }
-                        old_property =
-                            next_comparable_property(&mut old_properties, authored, config);
+                        old_property = next_comparable_property(&mut old_properties, config);
                     }
                     Ordering::Greater => {
                         if !property_is_semantically_absent(defaults, new_name, new_value) {
                             return false;
                         }
-                        new_property =
-                            next_comparable_property(&mut new_properties, authored, config);
+                        new_property = next_comparable_property(&mut new_properties, config);
                     }
                     Ordering::Equal => {
                         let equal = if old_name == "Attributes" || old_name == "Tags" {
@@ -183,10 +177,8 @@ fn compact_instance_equal(
                         if !equal {
                             return false;
                         }
-                        old_property =
-                            next_comparable_property(&mut old_properties, authored, config);
-                        new_property =
-                            next_comparable_property(&mut new_properties, authored, config);
+                        old_property = next_comparable_property(&mut old_properties, config);
+                        new_property = next_comparable_property(&mut new_properties, config);
                     }
                 }
             }

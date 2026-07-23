@@ -26,7 +26,7 @@ use tracing::{debug, info};
 
 use crate::diff_dom::{DomView, InstanceView};
 use crate::hash::{hash_variant, DeepHashCache};
-use crate::property_semantics::{get_authored_properties, pairing_compatible, PairingBasis};
+use crate::property_semantics::{pairing_compatible, PairingBasis};
 
 /// Minimum similarity score for a Pass B pairing to count as a move.
 const SIMILARITY_THRESHOLD: f32 = 0.5;
@@ -479,15 +479,10 @@ fn property_similarity(
     old_inst: InstanceView<'_>,
     new_inst: InstanceView<'_>,
 ) -> Option<f32> {
-    let authored = get_authored_properties(old_inst.class());
-
     let mut total = 0usize;
     let mut equal = 0usize;
 
-    for (name, old_value) in old_inst.properties() {
-        if !authored.contains(name) {
-            continue;
-        }
+    for (name, old_value) in old_inst.authored_properties() {
         total += 1;
         if let Some(new_value) = new_inst.property(name) {
             if variant_hash_eq(old_dom, old_value, new_dom, new_value) {
@@ -496,8 +491,8 @@ fn property_similarity(
         }
     }
     // Properties only on the new side count against similarity
-    for (name, _) in new_inst.properties() {
-        if authored.contains(name) && old_inst.property(name).is_none() {
+    for (name, _) in new_inst.authored_properties() {
+        if old_inst.property(name).is_none() {
             total += 1;
         }
     }

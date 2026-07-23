@@ -18,18 +18,14 @@ use tracing::{debug, info};
 
 use crate::diff_dom::{DomView, InstanceView};
 use crate::hash::{DeepHashCache, LazyHashCache};
-use crate::property_semantics::{
-    get_authored_properties, pairing_compatible, strong_content_key, PairingBasis,
-};
+use crate::property_semantics::{pairing_compatible, strong_content_key, PairingBasis};
 use crate::value_compare::non_ref_variants_equal;
 
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
 
 fn tolerant_non_ref_properties_equal(old: InstanceView<'_>, new: InstanceView<'_>) -> bool {
-    let authored = get_authored_properties(old.class());
-
-    for (name, old_value) in old.properties() {
-        if !authored.contains(name) || matches!(old_value, rbx_types::Variant::Ref(_)) {
+    for (name, old_value) in old.authored_properties() {
+        if matches!(old_value, rbx_types::Variant::Ref(_)) {
             continue;
         }
         let Some(new_value) = new.property(name) else {
@@ -41,8 +37,8 @@ fn tolerant_non_ref_properties_equal(old: InstanceView<'_>, new: InstanceView<'_
             return false;
         }
     }
-    for (name, new_value) in new.properties() {
-        if !authored.contains(name) || matches!(new_value, rbx_types::Variant::Ref(_)) {
+    for (name, new_value) in new.authored_properties() {
+        if matches!(new_value, rbx_types::Variant::Ref(_)) {
             continue;
         }
         if old.property(name).is_none() {
