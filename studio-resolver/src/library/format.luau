@@ -198,7 +198,7 @@ function format.sideSummary(kind: string, property: string?, info: SideInfo?): s
 			return `keep → {format.escapeRich(info.destinationPath)}`
 		end
 		return "keep"
-	elseif kind == "ModelFrame" then
+	elseif kind == "Pivot" then
 		return if info.delta then format.formatDelta(info.delta) else nil
 	end
 	return nil
@@ -218,8 +218,8 @@ function format.baseSummary(kind: string, base: Base): string
 		return format.formatValue(base.value)
 	elseif kind == "PropertyBundle" then
 		return "keep base bundle"
-	elseif kind == "ModelFrame" then
-		return "canonical frame"
+	elseif kind == "Pivot" then
+		return "canonical placement"
 	elseif kind == "MoveTarget" then
 		local parent = base.parent
 		return if parent then `→ {format.escapeRich(format.relPath(parent))}` else "→ ?"

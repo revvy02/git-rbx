@@ -34,7 +34,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
     let mut removed = Vec::new();
     let mut modified = Vec::new();
     let mut moved = Vec::new();
-    let mut model_frames = Vec::new();
+    let mut pivoted = Vec::new();
 
     for diff in diffs {
         match diff {
@@ -42,15 +42,15 @@ fn print_pretty(diffs: &[DiffEntry]) {
             DiffEntry::Removed { .. } => removed.push(diff),
             DiffEntry::Modified { .. } => modified.push(diff),
             DiffEntry::Moved { .. } => moved.push(diff),
-            DiffEntry::ModelFrame { .. } => model_frames.push(diff),
+            DiffEntry::Pivoted { .. } => pivoted.push(diff),
         }
     }
 
     // Print inferred rigid movement before residual property edits.
-    if !model_frames.is_empty() {
-        println!("\n{}", "Model frames:".cyan().bold());
-        for diff in &model_frames {
-            if let DiffEntry::ModelFrame {
+    if !pivoted.is_empty() {
+        println!("\n{}", "Pivoted:".cyan().bold());
+        for diff in &pivoted {
+            if let DiffEntry::Pivoted {
                 path, class, delta, ..
             } = diff
             {
@@ -128,7 +128,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
 
     // Print summary
     println!();
-    print_summary_line(&added, &removed, &modified, &moved, &model_frames);
+    print_summary_line(&added, &removed, &modified, &moved, &pivoted);
 }
 
 fn print_property_changes(property_changes: &[crate::diff::PropertyChange]) {
@@ -249,7 +249,7 @@ fn print_summary(diffs: &[DiffEntry]) {
     let mut removed = 0;
     let mut modified = 0;
     let mut moved = 0;
-    let mut model_frames = 0;
+    let mut pivoted = 0;
 
     for diff in diffs {
         match diff {
@@ -257,20 +257,20 @@ fn print_summary(diffs: &[DiffEntry]) {
             DiffEntry::Removed { .. } => removed += 1,
             DiffEntry::Modified { .. } => modified += 1,
             DiffEntry::Moved { .. } => moved += 1,
-            DiffEntry::ModelFrame { .. } => model_frames += 1,
+            DiffEntry::Pivoted { .. } => pivoted += 1,
         }
     }
 
-    if added == 0 && removed == 0 && modified == 0 && moved == 0 && model_frames == 0 {
+    if added == 0 && removed == 0 && modified == 0 && moved == 0 && pivoted == 0 {
         println!("No differences found.");
     } else {
         println!(
-            "{} added, {} removed, {} modified, {} moved, {} model frames",
+            "{} added, {} removed, {} modified, {} moved, {} pivoted",
             added.to_string().green(),
             removed.to_string().red(),
             modified.to_string().yellow(),
             moved.to_string().cyan(),
-            model_frames.to_string().cyan(),
+            pivoted.to_string().cyan(),
         );
     }
 }
@@ -280,16 +280,16 @@ fn print_summary_line(
     removed: &[&DiffEntry],
     modified: &[&DiffEntry],
     moved: &[&DiffEntry],
-    model_frames: &[&DiffEntry],
+    pivoted: &[&DiffEntry],
 ) {
     println!(
-        "{}: {} added, {} removed, {} modified, {} moved, {} model frames",
+        "{}: {} added, {} removed, {} modified, {} moved, {} pivoted",
         "Summary".bold(),
         added.len().to_string().green(),
         removed.len().to_string().red(),
         modified.len().to_string().yellow(),
         moved.len().to_string().cyan(),
-        model_frames.len().to_string().cyan(),
+        pivoted.len().to_string().cyan(),
     );
 }
 
@@ -307,7 +307,7 @@ fn print_json(diffs: &[DiffEntry]) {
         removed: usize,
         modified: usize,
         moved: usize,
-        model_frames: usize,
+        pivoted: usize,
     }
 
     let added = diffs
@@ -326,9 +326,9 @@ fn print_json(diffs: &[DiffEntry]) {
         .iter()
         .filter(|d| matches!(d, DiffEntry::Moved { .. }))
         .count();
-    let model_frames = diffs
+    let pivoted = diffs
         .iter()
-        .filter(|d| matches!(d, DiffEntry::ModelFrame { .. }))
+        .filter(|d| matches!(d, DiffEntry::Pivoted { .. }))
         .count();
 
     let output = Output {
@@ -338,7 +338,7 @@ fn print_json(diffs: &[DiffEntry]) {
             removed,
             modified,
             moved,
-            model_frames,
+            pivoted,
         },
     };
 

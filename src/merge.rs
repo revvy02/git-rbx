@@ -20,7 +20,7 @@ use crate::edit_script::{
 use crate::explorer_tree::ExplorerTrees;
 use crate::hash::DeepHashCache;
 use crate::match_instances::get_instance_path;
-use crate::model_normalize::model_frames_close;
+use crate::model_normalize::pivot_deltas_close;
 use crate::placement::PivotOp;
 use crate::property_semantics::{
     semantic_bundle_values_equal, semantic_property_bundle, SemanticPropertyBundle,
@@ -43,7 +43,7 @@ pub enum ConflictKind {
     /// Both branches placed an otherwise canonical hierarchy boundary
     /// differently. A root delta is world-relative; a nested delta is
     /// relative to the nearest participating ancestor placement.
-    ModelFrame {
+    Pivot {
         ours: CFrame,
         theirs: CFrame,
         /// Stable top-down order among hierarchical frame boundaries.
@@ -663,13 +663,13 @@ fn merge_pivots(
         consumed_theirs.insert(ours_pivot.target_ref);
         debug_assert_eq!(ours_pivot.order, theirs_pivot.order);
         debug_assert_eq!(ours_pivot.parent_order, theirs_pivot.parent_order);
-        if model_frames_close(&ours_pivot.delta, &theirs_pivot.delta) {
+        if pivot_deltas_close(&ours_pivot.delta, &theirs_pivot.delta) {
             merged.push(ours_pivot.clone());
             stats.ours_applied += 1;
             stats.deduped += 1;
         } else {
             conflicts.push(MergeConflict {
-                kind: ConflictKind::ModelFrame {
+                kind: ConflictKind::Pivot {
                     ours: ours_pivot.delta,
                     theirs: theirs_pivot.delta,
                     order: ours_pivot.order,
@@ -719,7 +719,7 @@ fn conflict_kind_key(kind: &ConflictKind) -> (u8, &str) {
         ConflictKind::PropertyBundle { name, .. } => (1, name),
         ConflictKind::DeleteVsEdit => (2, ""),
         ConflictKind::MoveTarget => (3, ""),
-        ConflictKind::ModelFrame { .. } => (4, ""),
+        ConflictKind::Pivot { .. } => (4, ""),
     }
 }
 

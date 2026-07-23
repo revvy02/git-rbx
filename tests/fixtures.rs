@@ -50,7 +50,7 @@ fn counts(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
             DiffEntry::Removed { .. } => c.1 += 1,
             DiffEntry::Modified { .. } => c.2 += 1,
             DiffEntry::Moved { .. } => c.3 += 1,
-            DiffEntry::ModelFrame { .. } => {}
+            DiffEntry::Pivoted { .. } => {}
         }
     }
     c
@@ -170,7 +170,7 @@ fn save_vs_save_tree_move_is_cframe_changes_only() {
 
 #[test]
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
-fn police_station_and_nested_moves_collapse_to_three_frames() {
+fn police_station_and_nested_moves_collapse_to_three_pivots() {
     let Some(base) = load_compact("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
         return;
     };

@@ -15,9 +15,9 @@
 //!       <clone of our version>      (shallow for property conflicts,
 //!                                    full subtree for delete-vs-edit)
 //!     Theirs                        Folder; same shape
-//!   FramePlan                       Folder; automatic hierarchical frames
-//!     Frame_1                       Folder; attrs: FrameOrder,
-//!                                   FrameParentOrder?, Path, Delta
+//!   PivotPlan                       Folder; automatic hierarchical pivots
+//!     Pivot_1                       Folder; attrs: PivotOrder,
+//!                                   PivotParentOrder?, Path, Delta
 //!       Target                      ObjectValue -> live boundary instance
 //! ```
 //!
@@ -41,8 +41,7 @@ use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, An
 use crate::explorer_tree::{ExplorerTree, ExplorerTrees, ExplorerVersion};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
-use crate::model_normalize::{apply_model_frame_plan, ModelFrameApplication};
-use crate::placement::PivotOp;
+use crate::placement::{apply_pivot_plan, PivotApplication, PivotOp};
 use crate::rigid_groups::{Rigid, RigidGroup};
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
@@ -97,7 +96,7 @@ fn stamp_conflicts_from_views(
                 "Attributes",
                 Variant::Attributes(
                     Attributes::new()
-                        .with("Version", Variant::Float64(4.0))
+                        .with("Version", Variant::Float64(5.0))
                         .with(
                             "ConflictCount",
                             Variant::Float64(result.conflicts.len() as f64),
@@ -145,7 +144,7 @@ fn stamp_conflicts_from_views(
                 .with_property("Value", Variant::Ref(conflict.base_ref)),
         );
 
-        if let ConflictKind::ModelFrame {
+        if let ConflictKind::Pivot {
             ours,
             theirs,
             order,
@@ -157,10 +156,10 @@ fn stamp_conflicts_from_views(
                     Some(Variant::Attributes(attrs)) => attrs.clone(),
                     _ => Attributes::new(),
                 };
-                attrs.insert("FrameOrder".to_string(), Variant::Float64(*order as f64));
+                attrs.insert("PivotOrder".to_string(), Variant::Float64(*order as f64));
                 if let Some(parent_order) = parent_order {
                     attrs.insert(
-                        "FrameParentOrder".to_string(),
+                        "PivotParentOrder".to_string(),
                         Variant::Float64(*parent_order as f64),
                     );
                 }
@@ -168,10 +167,10 @@ fn stamp_conflicts_from_views(
                     .properties
                     .insert("Attributes".into(), Variant::Attributes(attrs));
             }
-            let ours_impact = model_frame_impact(base, conflict.base_ref, explorer_trees, ours);
-            let theirs_impact = model_frame_impact(base, conflict.base_ref, explorer_trees, theirs);
-            stamp_model_frame_side(base, entry, "Ours", ours, &ours_impact);
-            stamp_model_frame_side(base, entry, "Theirs", theirs, &theirs_impact);
+            let ours_impact = pivot_impact(base, conflict.base_ref, explorer_trees, ours);
+            let theirs_impact = pivot_impact(base, conflict.base_ref, explorer_trees, theirs);
+            stamp_pivot_side(base, entry, "Ours", ours, &ours_impact);
+            stamp_pivot_side(base, entry, "Theirs", theirs, &theirs_impact);
         } else {
             stamp_side(
                 base,
@@ -205,13 +204,13 @@ fn stamp_conflicts_from_views(
     }
 }
 
-/// Persist automatic local frame applications when at least one hierarchical
-/// frame remains conflicted. These records have no `Kind`, so they are not
+/// Persist automatic local pivots when at least one hierarchical pivot remains
+/// conflicted. These records have no `Kind`, so they are not
 /// resolver decisions and do not affect the conflict count. Finalization and
-/// Studio combine them with selected ModelFrame entries and apply the complete
-/// plan in `FrameOrder` after ordinary resolutions.
-pub fn stamp_model_frame_plan(base: &mut WeakDom, frames: &[ModelFrameApplication]) {
-    if frames.is_empty() {
+/// Studio combine them with selected Pivot entries and apply the complete
+/// plan in `PivotOrder` after ordinary resolutions.
+pub fn stamp_pivot_plan(base: &mut WeakDom, pivots: &[PivotApplication]) {
+    if pivots.is_empty() {
         return;
     }
     let Some(container) = find_container(base) else {
@@ -219,27 +218,27 @@ pub fn stamp_model_frame_plan(base: &mut WeakDom, frames: &[ModelFrameApplicatio
     };
     let plan = base.insert(
         container,
-        InstanceBuilder::new("Folder").with_name("FramePlan"),
+        InstanceBuilder::new("Folder").with_name("PivotPlan"),
     );
-    for (index, frame) in frames.iter().enumerate() {
+    for (index, pivot) in pivots.iter().enumerate() {
         let mut attrs = Attributes::new()
-            .with("FrameOrder", Variant::Float64(frame.order as f64))
-            .with("Path", Variant::String(frame.path.clone()))
-            .with("Delta", Variant::CFrame(frame.delta));
-        if let Some(parent_order) = frame.parent_order {
-            attrs = attrs.with("FrameParentOrder", Variant::Float64(parent_order as f64));
+            .with("PivotOrder", Variant::Float64(pivot.order as f64))
+            .with("Path", Variant::String(pivot.path.clone()))
+            .with("Delta", Variant::CFrame(pivot.delta));
+        if let Some(parent_order) = pivot.parent_order {
+            attrs = attrs.with("PivotParentOrder", Variant::Float64(parent_order as f64));
         }
         let entry = base.insert(
             plan,
             InstanceBuilder::new("Folder")
-                .with_name(format!("Frame_{}", index + 1))
+                .with_name(format!("Pivot_{}", index + 1))
                 .with_property("Attributes", Variant::Attributes(attrs)),
         );
         base.insert(
             entry,
             InstanceBuilder::new("ObjectValue")
                 .with_name("Target")
-                .with_property("Value", Variant::Ref(frame.target_ref)),
+                .with_property("Value", Variant::Ref(pivot.target_ref)),
         );
     }
 }
@@ -337,7 +336,7 @@ fn utf8_chunks(value: &str, max_bytes: usize) -> impl Iterator<Item = &str> {
     })
 }
 
-fn stamp_model_frame_side(
+fn stamp_pivot_side(
     base: &mut WeakDom,
     entry: Ref,
     side_name: &str,
@@ -460,10 +459,10 @@ fn stamp_conditional_pivots(
             continue;
         };
         let mut attrs = Attributes::new()
-            .with("FrameOrder", Variant::Float64(pivot.order as f64))
+            .with("PivotOrder", Variant::Float64(pivot.order as f64))
             .with("Delta", Variant::CFrame(pivot.delta));
         if let Some(parent_order) = pivot.parent_order {
-            attrs = attrs.with("FrameParentOrder", Variant::Float64(parent_order as f64));
+            attrs = attrs.with("PivotParentOrder", Variant::Float64(parent_order as f64));
         }
         let entry = base.insert(
             plan,
@@ -682,10 +681,10 @@ fn impact_for_ops_and_pivots(
 ) -> ImpactSide {
     let mut impact = impact_for_ops(base, branch, ops, base_to_branch, trees, version);
     for pivot in pivots {
-        let pivot_impact = model_frame_impact(base, pivot.target_ref, trees, &pivot.delta);
-        impact.operations.extend(pivot_impact.operations);
-        impact.affected_ids.extend(pivot_impact.affected_ids);
-        impact.property_count += pivot_impact.property_count;
+        let operation_impact = pivot_impact(base, pivot.target_ref, trees, &pivot.delta);
+        impact.operations.extend(operation_impact.operations);
+        impact.affected_ids.extend(operation_impact.affected_ids);
+        impact.property_count += operation_impact.property_count;
     }
     impact.affected_ids.sort_unstable();
     impact.affected_ids.dedup();
@@ -693,7 +692,7 @@ fn impact_for_ops_and_pivots(
     impact
 }
 
-fn model_frame_impact(
+fn pivot_impact(
     base: &WeakDom,
     target: Ref,
     trees: &ExplorerTrees,
@@ -847,7 +846,7 @@ fn kind_str(kind: &ConflictKind) -> &'static str {
         ConflictKind::PropertyBundle { .. } => "PropertyBundle",
         ConflictKind::DeleteVsEdit => "DeleteVsEdit",
         ConflictKind::MoveTarget => "MoveTarget",
-        ConflictKind::ModelFrame { .. } => "ModelFrame",
+        ConflictKind::Pivot { .. } => "Pivot",
     }
 }
 
@@ -901,9 +900,9 @@ pub struct ConflictEntry {
     pub property: Option<String>,
     /// Atomic serialized fields for PropertyBundle entries.
     pub properties: Vec<String>,
-    /// Hierarchical ModelFrame application order (ancestors first).
-    pub frame_order: Option<usize>,
-    pub frame_parent_order: Option<usize>,
+    /// Hierarchical pivot application order (ancestors first).
+    pub pivot_order: Option<usize>,
+    pub pivot_parent_order: Option<usize>,
     pub resolved: Option<String>,
     /// Rigid-group entry name this conflict belongs to, if grouped.
     pub group: Option<String>,
@@ -944,14 +943,14 @@ pub fn list_entries(dom: &WeakDom, container: Ref) -> Vec<ConflictEntry> {
                             .collect()
                     })
                     .unwrap_or_default(),
-                frame_order: match attrs.get("FrameOrder") {
+                pivot_order: match attrs.get("PivotOrder") {
                     Some(Variant::Float64(value)) if *value >= 0.0 => Some(*value as usize),
                     Some(Variant::Float32(value)) if *value >= 0.0 => Some(*value as usize),
                     Some(Variant::Int32(value)) if *value >= 0 => Some(*value as usize),
                     Some(Variant::Int64(value)) if *value >= 0 => Some(*value as usize),
                     _ => None,
                 },
-                frame_parent_order: numeric_attr(attrs, "FrameParentOrder")
+                pivot_parent_order: numeric_attr(attrs, "PivotParentOrder")
                     .filter(|value| *value >= 0.0)
                     .map(|value| value as usize),
                 resolved: get_str("Resolved").filter(|s| !s.is_empty()),
@@ -1238,59 +1237,59 @@ pub fn finalize(dom: &mut WeakDom) -> Result<usize> {
     }
 
     let count = entries.len();
-    let frame_actions = read_frame_actions(dom, container, &entries)?;
+    let pivot_actions = read_pivot_actions(dom, container, &entries)?;
 
-    // Every ordinary resolution is expressed in canonical boundary frames.
-    // The complete frame plan (automatic plus selected decisions) is applied
+    // Every ordinary resolution is expressed in canonical boundary coordinates.
+    // The complete pivot plan (automatic plus selected decisions) is applied
     // afterwards in explicit top-down order. This is semantically necessary
     // for nested rotations; overlapping rigid transforms do not commute.
-    for entry in entries.iter().filter(|entry| entry.kind != "ModelFrame") {
+    for entry in entries.iter().filter(|entry| entry.kind != "Pivot") {
         apply_entry(dom, entry)?;
     }
-    for action in &frame_actions {
+    for action in &pivot_actions {
         untag_instance(dom, action.target_ref, CONFLICT_TAG);
     }
-    apply_model_frame_plan(dom, &frame_actions);
+    apply_pivot_plan(dom, &pivot_actions);
 
     dom.destroy(container);
     Ok(count)
 }
 
-fn read_frame_actions(
+fn read_pivot_actions(
     dom: &WeakDom,
     container: Ref,
     entries: &[ConflictEntry],
-) -> Result<Vec<ModelFrameApplication>> {
+) -> Result<Vec<PivotApplication>> {
     let mut actions = Vec::new();
 
-    if let Some(plan) = child_by_name(dom, container, "FramePlan") {
+    if let Some(plan) = child_by_name(dom, container, "PivotPlan") {
         let children = dom
             .get_by_ref(plan)
             .map(|instance| instance.children().to_vec())
             .unwrap_or_default();
-        for frame in children {
-            let Some(instance) = dom.get_by_ref(frame) else {
+        for pivot in children {
+            let Some(instance) = dom.get_by_ref(pivot) else {
                 continue;
             };
             let Some(Variant::Attributes(attrs)) = instance.properties.get(&"Attributes".into())
             else {
                 continue;
             };
-            let order = numeric_attr(attrs, "FrameOrder").ok_or_else(|| {
-                anyhow::anyhow!("{}: automatic frame has no FrameOrder", instance.name)
+            let order = numeric_attr(attrs, "PivotOrder").ok_or_else(|| {
+                anyhow::anyhow!("{}: automatic pivot has no PivotOrder", instance.name)
             })? as usize;
             let delta = match attrs.get("Delta") {
                 Some(Variant::CFrame(delta)) => *delta,
-                _ => bail!("{}: automatic frame has no Delta", instance.name),
+                _ => bail!("{}: automatic pivot has no Delta", instance.name),
             };
-            let target = child_object_value(dom, frame, "Target").ok_or_else(|| {
-                anyhow::anyhow!("{}: automatic frame has no Target", instance.name)
+            let target = child_object_value(dom, pivot, "Target").ok_or_else(|| {
+                anyhow::anyhow!("{}: automatic pivot has no Target", instance.name)
             })?;
-            actions.push(ModelFrameApplication {
+            actions.push(PivotApplication {
                 target_ref: target,
                 path: attr_string(attrs, "Path").unwrap_or_else(|| instance.name.clone()),
                 order,
-                parent_order: numeric_attr(attrs, "FrameParentOrder")
+                parent_order: numeric_attr(attrs, "PivotParentOrder")
                     .filter(|value| *value >= 0.0)
                     .map(|value| value as usize),
                 delta,
@@ -1298,7 +1297,7 @@ fn read_frame_actions(
         }
     }
 
-    for entry in entries.iter().filter(|entry| entry.kind == "ModelFrame") {
+    for entry in entries.iter().filter(|entry| entry.kind == "Pivot") {
         let side = entry.resolved.as_deref().unwrap();
         let side_folder_name = if side == "ours" { "Ours" } else { "Theirs" };
         let target = child_object_value(dom, entry.entry_ref, "Target")
@@ -1308,13 +1307,13 @@ fn read_frame_actions(
                 anyhow::anyhow!("{}: missing {} folder", entry.path, side_folder_name)
             })?;
         let delta = side_attr_cframe(dom, side_folder, "Delta").ok_or_else(|| {
-            anyhow::anyhow!("{}: {} frame has no Delta", entry.path, side_folder_name)
+            anyhow::anyhow!("{}: {} pivot has no Delta", entry.path, side_folder_name)
         })?;
-        actions.push(ModelFrameApplication {
+        actions.push(PivotApplication {
             target_ref: target,
             path: entry.path.clone(),
-            order: entry.frame_order.unwrap_or(usize::MAX),
-            parent_order: entry.frame_parent_order,
+            order: entry.pivot_order.unwrap_or(usize::MAX),
+            parent_order: entry.pivot_parent_order,
             delta,
         });
     }
@@ -1343,8 +1342,8 @@ fn read_frame_actions(
             else {
                 continue;
             };
-            let order = numeric_attr(attrs, "FrameOrder").ok_or_else(|| {
-                anyhow::anyhow!("{}: conditional pivot has no FrameOrder", instance.name)
+            let order = numeric_attr(attrs, "PivotOrder").ok_or_else(|| {
+                anyhow::anyhow!("{}: conditional pivot has no PivotOrder", instance.name)
             })? as usize;
             let delta = match attrs.get("Delta") {
                 Some(Variant::CFrame(delta)) => *delta,
@@ -1353,11 +1352,11 @@ fn read_frame_actions(
             let target = child_object_value(dom, pivot, "Target").ok_or_else(|| {
                 anyhow::anyhow!("{}: conditional pivot has no Target", instance.name)
             })?;
-            actions.push(ModelFrameApplication {
+            actions.push(PivotApplication {
                 target_ref: target,
                 path: entry.path.clone(),
                 order,
-                parent_order: numeric_attr(attrs, "FrameParentOrder")
+                parent_order: numeric_attr(attrs, "PivotParentOrder")
                     .filter(|value| *value >= 0.0)
                     .map(|value| value as usize),
                 delta,
@@ -1550,9 +1549,9 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             }
             dom.transfer_within(target, dest);
         }
-        "ModelFrame" => {
+        "Pivot" => {
             bail!(
-                "{}: ModelFrame must be applied through its frame plan",
+                "{}: Pivot must be applied through its pivot plan",
                 entry.path
             );
         }

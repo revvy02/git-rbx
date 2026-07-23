@@ -103,8 +103,8 @@ type ConflictRecord = {
 	group: string?,
 	target: Instance,
 	entry: Instance,
-	frameOrder: number?,
-	frameParentOrder: number?,
+	pivotOrder: number?,
+	pivotParentOrder: number?,
 	impactOurs: cts.ImpactSide?,
 	impactTheirs: cts.ImpactSide?,
 }
@@ -153,8 +153,8 @@ for _, entry in container:GetChildren() do
 			group = entry:GetAttribute("Group") :: string?,
 			target = (entry:FindFirstChild("Target") :: ObjectValue).Value :: Instance,
 			entry = entry,
-			frameOrder = entry:GetAttribute("FrameOrder") :: number?,
-			frameParentOrder = entry:GetAttribute("FrameParentOrder") :: number?,
+			pivotOrder = entry:GetAttribute("PivotOrder") :: number?,
+			pivotParentOrder = entry:GetAttribute("PivotParentOrder") :: number?,
 			impactOurs = readImpact(entry, "Ours"),
 			impactTheirs = readImpact(entry, "Theirs"),
 		})
@@ -188,11 +188,11 @@ for index, record in records do
 	world:set(entity, cts.Path, record.path)
 	world:set(entity, cts.Target, record.target)
 	world:set(entity, cts.Entry, record.entry)
-	if record.frameOrder then
-		world:set(entity, cts.FrameOrder, record.frameOrder)
+	if record.pivotOrder then
+		world:set(entity, cts.PivotOrder, record.pivotOrder)
 	end
-	if record.frameParentOrder then
-		world:set(entity, cts.FrameParentOrder, record.frameParentOrder)
+	if record.pivotParentOrder then
+		world:set(entity, cts.PivotParentOrder, record.pivotParentOrder)
 	end
 	if record.property then
 		world:set(entity, cts.Property, record.property)
@@ -220,17 +220,17 @@ end
 world:set(cts.Conflicts, cts.Conflicts, conflictEntities)
 world:set(cts.Container, cts.Container, container)
 
-local framePlan: { cts.FrameApplication } = {}
-local framePlanFolder = container:FindFirstChild("FramePlan")
-if framePlanFolder then
-	for _, entry in framePlanFolder:GetChildren() do
+local pivotPlan: { cts.PivotApplication } = {}
+local pivotPlanFolder = container:FindFirstChild("PivotPlan")
+if pivotPlanFolder then
+	for _, entry in pivotPlanFolder:GetChildren() do
 		local targetValue = entry:FindFirstChild("Target")
 		local target = if targetValue and targetValue:IsA("ObjectValue") then targetValue.Value else nil
-		local order = entry:GetAttribute("FrameOrder") :: number?
-		local parentOrder = entry:GetAttribute("FrameParentOrder") :: number?
+		local order = entry:GetAttribute("PivotOrder") :: number?
+		local parentOrder = entry:GetAttribute("PivotParentOrder") :: number?
 		local delta = entry:GetAttribute("Delta") :: CFrame?
 		if target and order and delta then
-			table.insert(framePlan, {
+			table.insert(pivotPlan, {
 				target = target,
 				order = order,
 				parentOrder = parentOrder,
@@ -238,11 +238,11 @@ if framePlanFolder then
 			})
 		end
 	end
-	table.sort(framePlan, function(a, b)
+	table.sort(pivotPlan, function(a, b)
 		return a.order < b.order
 	end)
 end
-world:set(cts.FramePlan, cts.FramePlan, framePlan)
+world:set(cts.PivotPlan, cts.PivotPlan, pivotPlan)
 
 -- Rust captures these complete hierarchies before mutating base into the
 -- partial merge. They are compact data, not cloned Roblox instances; logical

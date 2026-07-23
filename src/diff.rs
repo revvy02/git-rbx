@@ -51,16 +51,16 @@ pub enum DiffEntry {
         class: String,
         property_changes: Vec<PropertyChange>,
     },
-    /// A Model boundary and its world-space descendants moved together.
+    /// A Model boundary and its world-space descendants were pivoted together.
     /// This is an inferred rigid transform, not a Roblox property change;
     /// `WorldPivotData` edits that differ from the content still appear as
     /// ordinary property changes.
-    ModelFrame {
+    Pivoted {
         old_ref: String,
         new_ref: String,
         path: String,
         class: String,
-        /// Stable top-down order among model-frame entries.
+        /// Stable top-down order among pivot operations.
         order: usize,
         /// `order` of the nearest ancestor frame, when nested.
         parent_order: Option<usize>,
@@ -70,7 +70,7 @@ pub enum DiffEntry {
     },
 }
 
-/// Serializable representation of a rigid CFrame used by model-frame diffs.
+/// Serializable representation of a rigid CFrame used by pivot diffs.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CFrameValue {
     pub position: [f32; 3],
@@ -497,7 +497,7 @@ pub(crate) fn semantic_changes_to_diff(
         let Some(instance) = new_dom.get_by_ref(pivot.side_ref) else {
             continue;
         };
-        result.push(DiffEntry::ModelFrame {
+        result.push(DiffEntry::Pivoted {
             old_ref: pivot.target_ref.to_string(),
             new_ref: pivot.side_ref.to_string(),
             path: get_instance_path(new_dom, pivot.side_ref),

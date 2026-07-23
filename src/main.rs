@@ -14,8 +14,8 @@ use rbx_diff::{
     apply_pivot_ops, apply_pivot_ops_to_compact_branch, detect_rigid_groups,
     diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
     mark_entry_custom, merge_compact_doms, merge_compact_doms_with_matches_and_pivots,
-    normalize_model_merge_compact_frames, stamp_compact_conflicts, stamp_model_frame_plan,
-    stamp_rigid_groups, ConflictKind, DiffConfig, DiffDom, ModelFrameApplication, CONTAINER_NAME,
+    normalize_model_merge_compact_pivots, stamp_compact_conflicts, stamp_pivot_plan,
+    stamp_rigid_groups, ConflictKind, DiffConfig, DiffDom, PivotApplication, CONTAINER_NAME,
 };
 
 #[derive(Parser)]
@@ -206,13 +206,13 @@ fn cmd_diff(
     // Unlike the old root-only model normalization, hierarchical framing
     // reports every inferred movement explicitly. It is therefore safe and
     // useful for place files too: authored placement remains visible as one
-    // ModelFrame entry instead of thousands of descendant CFrame changes.
-    let (diffs, frames) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
-    if let Some(frames) = frames {
+    // Pivoted entry instead of thousands of descendant CFrame changes.
+    let (diffs, pivots) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
+    if let Some(pivots) = pivots {
         eprintln!(
-            "Factored {} hierarchical model frame(s) ({} boundaries detected)",
-            frames.pivots.len(),
-            frames.detected,
+            "Factored {} hierarchical pivot(s) ({} boundaries detected)",
+            pivots.pivots.len(),
+            pivots.detected,
         );
     }
     let diff_time = diff_start.elapsed();
@@ -258,20 +258,20 @@ fn cmd_merge(
     eprintln!("Loading theirs {}...", theirs_path);
     let mut theirs = load_diff_file(theirs_path)?;
 
-    let model_frames = if is_model_asset_path(base_path)
+    let pivot_merge = if is_model_asset_path(base_path)
         && is_model_asset_path(ours_path)
         && is_model_asset_path(theirs_path)
     {
-        let frames = normalize_model_merge_compact_frames(&base, &mut ours, &mut theirs);
-        if let Some(frames) = &frames {
+        let pivots = normalize_model_merge_compact_pivots(&base, &mut ours, &mut theirs);
+        if let Some(pivots) = &pivots {
             eprintln!(
-                "Factored {} hierarchical model frame(s) ({} ours / {} theirs boundaries detected)",
-                frames.affected_boundaries(),
-                frames.ours_detected,
-                frames.theirs_detected,
+                "Factored {} hierarchical pivot(s) ({} ours / {} theirs boundaries detected)",
+                pivots.affected_boundaries(),
+                pivots.ours_detected,
+                pivots.theirs_detected,
             );
         }
-        frames
+        pivots
     } else {
         None
     };
@@ -280,22 +280,22 @@ fn cmd_merge(
 
     eprintln!("Merging...");
     let start = Instant::now();
-    let result = if let Some(frames) = &model_frames {
+    let result = if let Some(pivots) = &pivot_merge {
         merge_compact_doms_with_matches_and_pivots(
             &mut base,
             &ours,
             &theirs,
             &config,
-            &frames.ours_identity,
-            &frames.theirs_identity,
-            frames.ours_pivots(),
-            frames.theirs_pivots(),
+            &pivots.ours_identity,
+            &pivots.theirs_identity,
+            pivots.ours_pivots(),
+            pivots.theirs_pivots(),
         )
     } else {
         merge_compact_doms(&mut base, &ours, &theirs, &config)
     };
     let has_pivot_conflicts = result.conflicts.iter().any(|conflict| {
-        matches!(conflict.kind, ConflictKind::ModelFrame { .. })
+        matches!(conflict.kind, ConflictKind::Pivot { .. })
             || !conflict.ours.pivots.is_empty()
             || !conflict.theirs.pivots.is_empty()
     });
@@ -331,11 +331,11 @@ fn cmd_merge(
             let applications: Vec<_> = result
                 .pivots
                 .iter()
-                .map(|pivot| ModelFrameApplication {
+                .map(|pivot| PivotApplication {
                     target_ref: pivot.target_ref,
-                    path: model_frames
+                    path: pivot_merge
                         .as_ref()
-                        .and_then(|frames| frames.path_for(pivot.target_ref))
+                        .and_then(|pivots| pivots.path_for(pivot.target_ref))
                         .map(str::to_string)
                         .unwrap_or_else(|| pivot.target_ref.to_string()),
                     order: pivot.order,
@@ -343,7 +343,7 @@ fn cmd_merge(
                     delta: pivot.delta,
                 })
                 .collect();
-            stamp_model_frame_plan(&mut base, &applications);
+            stamp_pivot_plan(&mut base, &applications);
         }
         stamp_rigid_groups(&mut base, &groups);
     }
@@ -383,7 +383,7 @@ fn cmd_merge(
             }
             ConflictKind::DeleteVsEdit => "delete vs edit".to_string(),
             ConflictKind::MoveTarget => "conflicting move destinations".to_string(),
-            ConflictKind::ModelFrame { .. } => "model frame".to_string(),
+            ConflictKind::Pivot { .. } => "pivot".to_string(),
         };
         eprintln!("  ! {} — {} (base content kept)", conflict.path, kind);
     }

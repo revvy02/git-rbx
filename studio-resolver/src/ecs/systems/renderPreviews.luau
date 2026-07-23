@@ -20,7 +20,7 @@ type Base = types.Base
 
 return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	local conflictList = (world:get(cts.Conflicts, cts.Conflicts) :: { any }?) or {}
-	local automaticFramePlan = (world:get(cts.FramePlan, cts.FramePlan) :: { types.FrameApplication }?) or {}
+	local automaticPivotPlan = (world:get(cts.PivotPlan, cts.PivotPlan) :: { types.PivotApplication }?) or {}
 
 	local function eachPart(root: Instance, fn: (BasePart) -> ())
 		if root:IsA("BasePart") then
@@ -61,12 +61,12 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				if child.Name == "Destination" and child:IsA("ObjectValue") then
 					info.destination = child.Value
 				elseif child.Name == "PivotPlan" then
-					local pivots: { types.FrameApplication } = {}
+					local pivots: { types.PivotApplication } = {}
 					for _, pivot in child:GetChildren() do
 						local targetValue = pivot:FindFirstChild("Target")
 						local target = if targetValue and targetValue:IsA("ObjectValue") then targetValue.Value else nil
-						local order = pivot:GetAttribute("FrameOrder") :: number?
-						local parentOrder = pivot:GetAttribute("FrameParentOrder") :: number?
+						local order = pivot:GetAttribute("PivotOrder") :: number?
+						local parentOrder = pivot:GetAttribute("PivotParentOrder") :: number?
 						local delta = pivot:GetAttribute("Delta") :: CFrame?
 						if target and order and delta then
 							table.insert(pivots, {
@@ -112,7 +112,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			canonicalFrameModels[model] = canonicalFrameModels[model] or model.WorldPivot
 		end)
 	end
-	for _, application in automaticFramePlan do
+	for _, application in automaticPivotPlan do
 		captureFrameTarget(application.target)
 	end
 
@@ -148,7 +148,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			base.parts = capturePartTransparencies(target)
 		elseif kind == "MoveTarget" then
 			base.parent = target.Parent
-		elseif kind == "ModelFrame" then
+		elseif kind == "Pivot" then
 			captureFrameTarget(target)
 		end
 		world:set(entity, cts.Base, base)
@@ -254,8 +254,8 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		end
 	end
 
-	local function applyFramePlan()
-		local applications: { types.FrameApplication } = table.clone(automaticFramePlan)
+	local function applyPivotPlan()
+		local applications: { types.PivotApplication } = table.clone(automaticPivotPlan)
 		for _, entity in conflictList do
 			local staged = world:get(entity, cts.Resolution) :: string?
 			local info = if staged == "ours"
@@ -263,11 +263,11 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				elseif staged == "theirs" then world:get(entity, cts.Theirs) :: SideInfo
 				else nil
 			if info then
-				if world:get(entity, cts.Kind) == "ModelFrame" and info.delta then
+				if world:get(entity, cts.Kind) == "Pivot" and info.delta then
 					table.insert(applications, {
 						target = world:get(entity, cts.Target) :: Instance,
-						order = (world:get(entity, cts.FrameOrder) :: number?) or math.huge,
-						parentOrder = world:get(entity, cts.FrameParentOrder) :: number?,
+						order = (world:get(entity, cts.PivotOrder) :: number?) or math.huge,
+						parentOrder = world:get(entity, cts.PivotParentOrder) :: number?,
 						delta = info.delta,
 					})
 				end
@@ -341,11 +341,11 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 				-- plan then runs once in parent-before-child order.
 				restoreCanonicalFrames()
 				for _, entity in conflictList do
-					if world:get(entity, cts.Kind) ~= "ModelFrame" then
+					if world:get(entity, cts.Kind) ~= "Pivot" then
 						applyPreview(entity)
 					end
 				end
-				applyFramePlan()
+				applyPivotPlan()
 				for _, entity in conflictList do
 					local staged = (world:get(entity, cts.Resolution) :: string?) or "unresolved"
 					world:set(entity, cts.Rendered, staged)

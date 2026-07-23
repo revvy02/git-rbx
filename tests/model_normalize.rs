@@ -2,8 +2,8 @@ use rbx_diff::{
     apply_pivot_ops, diff_doms, diff_model_compact_doms_with_config,
     diff_model_compact_old_with_config, diff_model_doms_with_config, finalize, find_container,
     list_entries, mark_entry, merge_compact_doms_with_matches_and_pivots, merge_doms,
-    normalize_model_dom_to_base, normalize_model_merge_compact_frames,
-    normalize_model_merge_frames, stamp_compact_conflicts, ConflictKind, DiffConfig, DiffDom,
+    normalize_model_dom_to_base, normalize_model_merge_compact_pivots,
+    normalize_model_merge_pivots, stamp_compact_conflicts, ConflictKind, DiffConfig, DiffDom,
     DiffEntry,
 };
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
@@ -191,14 +191,14 @@ fn normalization_removes_global_cframe_conflicts_but_keeps_pivot_edits() {
 }
 
 #[test]
-fn frame_free_merge_preparation_does_not_rewrite_either_branch() {
+fn pivot_free_merge_preparation_does_not_rewrite_either_branch() {
     let base = asset(0.0, 0.0, 0.0, None, false);
     let mut ours = asset(0.0, 0.0, 0.0, Some("ours"), false);
     let mut theirs = asset(0.0, 0.0, 0.0, Some("theirs"), false);
     let ours_before = asset(0.0, 0.0, 0.0, Some("ours"), false);
     let theirs_before = asset(0.0, 0.0, 0.0, Some("theirs"), false);
 
-    assert!(normalize_model_merge_frames(&base, &mut ours, &mut theirs).is_none());
+    assert!(normalize_model_merge_pivots(&base, &mut ours, &mut theirs).is_none());
     assert!(diff_doms(&ours_before, &ours).is_empty());
     assert!(diff_doms(&theirs_before, &theirs).is_empty());
 }
@@ -208,7 +208,7 @@ fn core_merge_planner_owns_primitive_pivot_decisions() {
     let mut base = asset(0.0, 0.0, 0.0, None, false);
     let mut ours = DiffDom::from_weak_dom_owned(asset(100.0, 100.0, 0.0, None, false));
     let mut theirs = DiffDom::from_weak_dom_owned(asset(-50.0, -50.0, 0.0, None, false));
-    let preparation = normalize_model_merge_compact_frames(&base, &mut ours, &mut theirs).unwrap();
+    let preparation = normalize_model_merge_compact_pivots(&base, &mut ours, &mut theirs).unwrap();
     let ours_pivots = preparation.ours_pivots();
     let theirs_pivots = preparation.theirs_pivots();
 
@@ -229,8 +229,13 @@ fn core_merge_planner_owns_primitive_pivot_decisions() {
     assert_eq!(result.conflicts.len(), 1);
     assert!(matches!(
         result.conflicts[0].kind,
-        ConflictKind::ModelFrame { .. }
+        ConflictKind::Pivot { .. }
     ));
+    stamp_compact_conflicts(&mut base, &ours, &theirs, &result);
+    let entries = list_entries(&base, find_container(&base).unwrap());
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, "Pivot");
+    assert_eq!(entries[0].pivot_order, Some(0));
 }
 
 #[test]
@@ -239,7 +244,7 @@ fn core_merge_planner_materializes_one_sided_pivot_op() {
     let expected = asset(100.0, 100.0, 0.0, None, false);
     let mut ours = DiffDom::from_weak_dom_owned(asset(100.0, 100.0, 0.0, None, false));
     let mut theirs = DiffDom::from_weak_dom_owned(asset(0.0, 0.0, 0.0, None, false));
-    let preparation = normalize_model_merge_compact_frames(&base, &mut ours, &mut theirs).unwrap();
+    let preparation = normalize_model_merge_compact_pivots(&base, &mut ours, &mut theirs).unwrap();
     let result = merge_compact_doms_with_matches_and_pivots(
         &mut base,
         &ours,
@@ -266,7 +271,7 @@ fn delete_vs_pivot_is_one_reconstructable_structural_conflict() {
             InstanceBuilder::new("DataModel").with_name("root"),
         ));
         let preparation =
-            normalize_model_merge_compact_frames(&base, &mut ours, &mut theirs).unwrap();
+            normalize_model_merge_compact_pivots(&base, &mut ours, &mut theirs).unwrap();
         let result = merge_compact_doms_with_matches_and_pivots(
             &mut base,
             &ours,
@@ -304,12 +309,12 @@ fn delete_vs_pivot_is_one_reconstructable_structural_conflict() {
 }
 
 #[test]
-fn nested_model_move_becomes_its_own_local_frame() {
+fn nested_model_move_becomes_its_own_local_pivot() {
     let mut base = nested_majority_asset(0.0);
     let mut ours = nested_majority_asset(100.0);
     let mut theirs = nested_majority_asset(0.0);
 
-    let frames = normalize_model_merge_frames(&base, &mut ours, &mut theirs)
+    let frames = normalize_model_merge_pivots(&base, &mut ours, &mut theirs)
         .expect("nested model establishes a local frame");
     assert_eq!(frames.affected_boundaries(), 1);
     assert_eq!(
@@ -341,7 +346,7 @@ fn nested_model_move_becomes_its_own_local_frame() {
 }
 
 #[test]
-fn two_way_diff_collapses_nested_movement_into_one_frame_entry() {
+fn two_way_diff_collapses_nested_movement_into_one_pivoted_entry() {
     let base = nested_majority_asset(0.0);
     let mut side = nested_majority_asset(100.0);
 
@@ -351,14 +356,14 @@ fn two_way_diff_collapses_nested_movement_into_one_frame_entry() {
     assert_eq!(normalization.pivots.len(), 1);
     assert_eq!(diffs.len(), 1, "{diffs:#?}");
     match &diffs[0] {
-        DiffEntry::ModelFrame {
+        DiffEntry::Pivoted {
             path, delta, class, ..
         } => {
             assert!(path.ends_with("Asset.Nested"), "{path}");
             assert_eq!(class, "Model");
             assert!((delta.position[0] - 100.0).abs() < 1e-4, "{delta:?}");
         }
-        other => panic!("expected one model frame, got {other:#?}"),
+        other => panic!("expected one pivot, got {other:#?}"),
     }
 }
 
@@ -414,14 +419,14 @@ fn compact_old_side_preserves_hierarchical_diff_semantics() {
 }
 
 #[test]
-fn two_way_diff_keeps_pivot_edit_separate_from_content_frame() {
+fn two_way_diff_keeps_world_pivot_edit_separate_from_content_pivot() {
     let base = asset(0.0, 0.0, 0.0, None, false);
     // All content moves +100, while the pivot moves +125.
     let mut side = asset(100.0, 125.0, 0.0, None, false);
 
     let (diffs, _) = diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
     assert_eq!(diffs.len(), 2, "{diffs:#?}");
-    assert!(matches!(&diffs[0], DiffEntry::ModelFrame { delta, .. }
+    assert!(matches!(&diffs[0], DiffEntry::Pivoted { delta, .. }
         if (delta.position[0] - 100.0).abs() < 1e-4));
     assert!(diffs.iter().any(|diff| matches!(
         diff,
@@ -432,7 +437,7 @@ fn two_way_diff_keeps_pivot_edit_separate_from_content_frame() {
 }
 
 #[test]
-fn two_way_diff_collapses_a_thousand_cframes_into_one_frame_entry() {
+fn two_way_diff_collapses_a_thousand_cframes_into_one_pivoted_entry() {
     let base = large_asset(0.0, 1_000);
     let mut side = large_asset(250.0, 1_000);
 
@@ -440,7 +445,7 @@ fn two_way_diff_collapses_a_thousand_cframes_into_one_frame_entry() {
         diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
     assert_eq!(normalization.unwrap().pivots.len(), 1);
     assert_eq!(diffs.len(), 1, "{diffs:#?}");
-    assert!(matches!(diffs[0], DiffEntry::ModelFrame { .. }));
+    assert!(matches!(diffs[0], DiffEntry::Pivoted { .. }));
 }
 
 #[test]
@@ -534,7 +539,7 @@ fn translated_far_model_ignores_studio_rotation_normalization_residue() {
     assert_eq!(diffs.len(), 1, "{diffs:#?}");
     assert!(matches!(
         &diffs[0],
-        DiffEntry::ModelFrame { delta, .. }
+        DiffEntry::Pivoted { delta, .. }
             if (delta.position[0] + 1.0).abs() < 1e-4
                 && delta.position[1].abs() < 1e-4
                 && delta.position[2].abs() < 1e-4
@@ -578,6 +583,6 @@ fn frame_consensus_averages_f32_translation_quantization() {
     assert_eq!(diffs.len(), 1, "{diffs:#?}");
     assert!(matches!(
         &diffs[0],
-        DiffEntry::ModelFrame { delta, .. } if (delta.position[0] + 1.0).abs() < 1e-4
+        DiffEntry::Pivoted { delta, .. } if (delta.position[0] + 1.0).abs() < 1e-4
     ));
 }

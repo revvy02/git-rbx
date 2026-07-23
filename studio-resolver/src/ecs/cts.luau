@@ -22,8 +22,8 @@ export type SideInfo = {
 	deleted: boolean?, -- this side removes the subtree (stamped Deleted attribute)
 	destination: Instance?, -- the parent this side moves the target to
 	destinationPath: string?,
-	delta: CFrame?, -- ModelFrame: canonical/base content -> this side's world frame
-	pivots: { FrameApplication }?, -- conditional placements selected with this side
+	delta: CFrame?, -- Pivot: canonical/base content -> this side's world placement
+	pivots: { PivotApplication }?, -- conditional pivots selected with this side
 }
 
 -- Canonical direct patch emitted by Rust for one side of a decision.
@@ -85,7 +85,7 @@ export type VersionTreeNode = {
 
 export type VersionTrees = { [string]: { VersionTreeNode } }
 
-export type FrameApplication = {
+export type PivotApplication = {
 	target: Instance,
 	order: number,
 	parentOrder: number?,
@@ -118,15 +118,15 @@ local cts = {
 	VirtualSubjectIds = world:component(), -- live result Instance -> logical id
 
 	-- Conflict entities, one per stamped container entry.
-	Kind = world:component(), -- "Property" | "PropertyBundle" | "MoveTarget" | "DeleteVsEdit" | "ModelFrame"
+	Kind = world:component(), -- "Property" | "PropertyBundle" | "MoveTarget" | "DeleteVsEdit" | "Pivot"
 	Path = world:component(), -- display path of the contested instance
 	Property = world:component(), -- Property kind: the contested property name
 	Properties = world:component(), -- PropertyBundle: atomic serialized property names
 	Target = world:component(), -- the contested live Instance
 	Entry = world:component(), -- the stamped container entry (Name = CLI --entry)
 	Order = world:component(), -- stable list position (entry-name sort)
-	FrameOrder = world:component(), -- hierarchical frame order (ancestors first)
-	FrameParentOrder = world:component(), -- nearest ancestor frame decision
+	PivotOrder = world:component(), -- hierarchical pivot order (ancestors first)
+	PivotParentOrder = world:component(), -- nearest ancestor pivot decision
 	Ours = world:component(), -- SideInfo
 	Theirs = world:component(), -- SideInfo
 	ImpactOurs = world:component(), -- ImpactSide
@@ -146,7 +146,7 @@ local cts = {
 	Conflicts = world:component(), -- boot-sorted conflict entity array (immutable after boot)
 	Cards = world:component(), -- display list: group entities + ungrouped conflicts
 	Container = world:component(), -- the stamped __RbxDiffMerge container
-	FramePlan = world:component(), -- automatic local frames deferred by a frame conflict
+	PivotPlan = world:component(), -- automatic local pivots deferred by a pivot conflict
 	ViewTab = world:component(), -- "base" | "ours" | "theirs" | "result"
 	SelectedConflict = world:component(), -- conflict entity
 	SelectedInstance = world:component(), -- Instance the explorer/props focus on

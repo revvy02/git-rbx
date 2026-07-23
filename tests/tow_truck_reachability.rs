@@ -167,7 +167,7 @@ fn human_merge_is_reachable_from_binary_conflict_decisions() {
         // Absolute `.rbxm` save placement is not semantic. Align the candidate
         // to the expected asset frame; residual part and pivot edits remain.
         normalize_model_dom_to_base(&expected, &mut candidate)
-            .expect("candidate should have a dominant model frame");
+            .expect("candidate should have a dominant pivot");
         if diff_doms(&expected, &candidate).is_empty()
             && verify_mesh_geometry(&candidate, &expected).is_empty()
         {

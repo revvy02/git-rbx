@@ -1,4 +1,4 @@
-//! End-to-end regression for model-asset frame conflicts. Normalized diffs
+//! End-to-end regression for hierarchical pivot conflicts. Normalized diffs
 //! cannot prove this behavior: they deliberately erase the placement being
 //! tested. These assertions compare the raw serialized CFrames after each
 //! resolution against the corresponding original branch.
@@ -281,7 +281,7 @@ fn assert_raw_spatial_match(actual_path: &Path, expected_path: &Path) {
 }
 
 #[test]
-fn two_way_diff_factors_rotated_parent_and_child_frames() {
+fn two_way_diff_factors_rotated_parent_and_child_pivots() {
     let identity = translated(0.0);
     let parent = CFrame::new(Vector3::new(45.0, -12.0, 8.0), rotation_z(0.55));
     let child = CFrame::new(Vector3::new(3.0, 7.0, -2.0), rotation_z(-0.35));
@@ -305,9 +305,9 @@ fn two_way_diff_factors_rotated_parent_and_child_frames() {
     assert_eq!(diffs.len(), 2, "{diffs:#?}");
     assert!(diffs
         .iter()
-        .all(|diff| matches!(diff, DiffEntry::ModelFrame { .. })));
+        .all(|diff| matches!(diff, DiffEntry::Pivoted { .. })));
     let parent_order = match &diffs[0] {
-        DiffEntry::ModelFrame {
+        DiffEntry::Pivoted {
             path,
             order,
             parent_order,
@@ -319,7 +319,7 @@ fn two_way_diff_factors_rotated_parent_and_child_frames() {
         }
         _ => unreachable!(),
     };
-    assert!(matches!(&diffs[1], DiffEntry::ModelFrame {
+    assert!(matches!(&diffs[1], DiffEntry::Pivoted {
         path,
         parent_order: Some(order),
         ..
@@ -327,14 +327,12 @@ fn two_way_diff_factors_rotated_parent_and_child_frames() {
 }
 
 #[test]
-fn two_way_diff_cli_json_reports_frames_instead_of_descendant_cframes() {
+fn two_way_diff_cli_json_reports_pivots_instead_of_descendant_cframes() {
     let identity = translated(0.0);
     let parent = CFrame::new(Vector3::new(45.0, -12.0, 8.0), rotation_z(0.55));
     let child = CFrame::new(Vector3::new(3.0, 7.0, -2.0), rotation_z(-0.35));
-    let scratch = std::env::temp_dir().join(format!(
-        "rbx-diff-model-frame-diff-test-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("rbx-diff-pivot-diff-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let base_path = scratch.join("base.rbxm");
     let side_path = scratch.join("side.rbxm");
@@ -358,8 +356,8 @@ fn two_way_diff_cli_json_reports_frames_instead_of_descendant_cframes() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let changes = json["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2, "{json:#}");
-    assert!(changes.iter().all(|change| change["type"] == "model_frame"));
-    assert_eq!(json["summary"]["model_frames"], 2);
+    assert!(changes.iter().all(|change| change["type"] == "pivoted"));
+    assert_eq!(json["summary"]["pivoted"], 2);
     assert_eq!(json["summary"]["modified"], 0);
 
     std::fs::remove_dir_all(scratch).unwrap();
@@ -377,7 +375,7 @@ fn run(binary: &str, args: &[&str], expected_success: bool) {
 }
 
 #[test]
-fn tow_truck_independent_frame_and_pivot_choices_reconstruct_each_raw_branch() {
+fn tow_truck_content_and_property_pivot_choices_reconstruct_each_raw_branch() {
     let fixture = Path::new("tests-new/tow-truck-rotation");
     if !fixture.join("base.rbxm").exists() {
         eprintln!("SKIP: tow-truck-rotation fixture not present");
@@ -385,8 +383,7 @@ fn tow_truck_independent_frame_and_pivot_choices_reconstruct_each_raw_branch() {
     }
 
     let binary = env!("CARGO_BIN_EXE_rbx-diff");
-    let scratch =
-        std::env::temp_dir().join(format!("rbx-diff-model-frame-test-{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("rbx-diff-pivot-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let conflicted = scratch.join("conflicted.rbxm");
 
@@ -445,12 +442,10 @@ fn tow_truck_independent_frame_and_pivot_choices_reconstruct_each_raw_branch() {
 }
 
 #[test]
-fn one_sided_frame_move_is_automatic_and_carries_the_other_sides_edit() {
+fn one_sided_pivot_is_automatic_and_carries_the_other_sides_edit() {
     let binary = env!("CARGO_BIN_EXE_rbx-diff");
-    let scratch = std::env::temp_dir().join(format!(
-        "rbx-diff-model-frame-auto-test-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("rbx-diff-pivot-auto-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let base_path = scratch.join("base.rbxm");
     let ours_path = scratch.join("ours.rbxm");
@@ -500,10 +495,8 @@ fn one_sided_frame_move_is_automatic_and_carries_the_other_sides_edit() {
 #[test]
 fn overlapping_nested_moves_compose_without_a_conflict() {
     let binary = env!("CARGO_BIN_EXE_rbx-diff");
-    let scratch = std::env::temp_dir().join(format!(
-        "rbx-diff-nested-model-frame-test-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("rbx-diff-nested-pivot-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let base_path = scratch.join("base.rbxm");
     let ours_path = scratch.join("ours.rbxm");
@@ -535,7 +528,7 @@ fn overlapping_nested_moves_compose_without_a_conflict() {
 }
 
 #[test]
-fn nested_rotated_frame_choices_reconstruct_and_compose_in_top_down_order() {
+fn nested_rotated_pivot_choices_reconstruct_and_compose_in_top_down_order() {
     let binary = env!("CARGO_BIN_EXE_rbx-diff");
     let scratch = std::env::temp_dir().join(format!(
         "rbx-diff-nested-rotation-frame-test-{}",
@@ -611,7 +604,7 @@ fn nested_rotated_frame_choices_reconstruct_and_compose_in_top_down_order() {
 }
 
 #[test]
-fn automatic_rotated_parent_is_deferred_with_a_child_frame_conflict() {
+fn automatic_rotated_parent_is_deferred_with_a_child_pivot_conflict() {
     let binary = env!("CARGO_BIN_EXE_rbx-diff");
     let scratch = std::env::temp_dir().join(format!(
         "rbx-diff-deferred-parent-frame-test-{}",

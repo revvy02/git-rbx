@@ -805,7 +805,7 @@ pub(crate) trait DomView {
     }
 }
 
-/// Narrow mutation contract needed by model-frame canonicalization.
+/// Narrow mutation contract needed by pivot canonicalization.
 ///
 /// Frame factoring only rewrites existing world-space properties; it does not
 /// need general tree editing. Keeping that distinction lets comparison stay

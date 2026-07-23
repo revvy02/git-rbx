@@ -46,10 +46,10 @@
 //!   required for rotations because rigid transforms do not commute.
 //!
 //! Two-way model-asset diffs use the same hierarchy. Each non-identity local
-//! frame becomes one explicit `model_frame` diff entry, while canonicalized
+//! frame becomes one explicit `pivoted` diff entry, while canonicalized
 //! descendants contribute only their residual authored property edits. The
 //! CLI also uses this for place files: world placement remains authored and
-//! visible as the explicit frame entry instead of disappearing into thousands
+//! visible as the explicit pivot operation instead of disappearing into thousands
 //! of descendant CFrame edits.
 
 use rbx_dom_weak::{types::Ref, WeakDom};
@@ -62,10 +62,7 @@ use crate::dom_utils::class_is_a;
 use crate::edit_script::{compute_instance_identity, InstanceIdentity};
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
-use crate::placement::{
-    apply_pivot_plan, transform_world_properties_below, transform_world_refs, PivotApplication,
-    PivotOp,
-};
+use crate::placement::{transform_world_properties_below, transform_world_refs, PivotOp};
 use crate::rigid_groups::Rigid;
 use crate::value_compare::cframes_equal;
 
@@ -85,7 +82,7 @@ pub struct ModelNormalization {
 
 /// Canonicalization state for an ordinary two-way model-asset diff.
 #[derive(Debug, Clone)]
-pub struct ModelFrameDiff {
+pub struct PivotDiff {
     pub pivots: Vec<PivotOp>,
     /// Number of boundaries that independently established a frame.
     pub detected: usize,
@@ -94,17 +91,14 @@ pub struct ModelFrameDiff {
     pub identity: InstanceIdentity,
 }
 
-impl ModelFrameDiff {
+impl PivotDiff {
     pub fn pivot_ops(&self) -> &[PivotOp] {
         &self.pivots
     }
 }
 
-/// Backwards-compatible name for a resolved primitive placement.
-pub type ModelFrameApplication = PivotApplication;
-
 #[derive(Debug, Clone)]
-pub struct ModelFrameMerge {
+pub struct PivotMerge {
     /// Primitive branch placements, in top-down order.
     pub ours_pivots: Vec<PivotOp>,
     pub theirs_pivots: Vec<PivotOp>,
@@ -118,7 +112,7 @@ pub struct ModelFrameMerge {
     pub theirs_identity: InstanceIdentity,
 }
 
-impl ModelFrameMerge {
+impl PivotMerge {
     pub fn ours_pivots(&self) -> &[PivotOp] {
         &self.ours_pivots
     }
@@ -596,27 +590,7 @@ fn raw_local_frame(boundary: &Boundary, root_prefix: Rigid) -> Rigid {
     }
 }
 
-/// Apply a frame to every world-space property in one boundary subtree.
-pub fn apply_model_frame(dom: &mut WeakDom, target: Ref, frame: &CFrame) {
-    transform_world_properties_below(dom, target, Rigid::from_cframe(frame));
-}
-
-/// Compose local frame decisions, then write each world-space property once
-/// using the effective frame of its nearest participating boundary.
-pub fn apply_model_frame_plan(dom: &mut WeakDom, frames: &[ModelFrameApplication]) {
-    apply_pivot_plan(dom, frames);
-}
-
-/// Legacy whole-DOM helper retained for callers that explicitly have one
-/// asset-wide frame. Hierarchical merge code applies boundary plans instead.
-pub fn apply_model_frame_to_dom(dom: &mut WeakDom, frame: &CFrame) {
-    let roots: Vec<Ref> = dom.root().children().to_vec();
-    for root in roots {
-        apply_model_frame(dom, root, frame);
-    }
-}
-
-pub fn model_frames_close(a: &CFrame, b: &CFrame) -> bool {
+pub fn pivot_deltas_close(a: &CFrame, b: &CFrame) -> bool {
     Rigid::close(&Rigid::from_cframe(a), &Rigid::from_cframe(b))
 }
 
@@ -632,8 +606,8 @@ fn identity_frame() -> CFrame {
 /// far apart, and duplicate-heavy content needs a common frame before stable
 /// identity can be established. The resulting identity is then frozen while
 /// nested frames are removed.
-pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option<ModelFrameDiff> {
-    let state = prepare_model_diff_frames_view(base, side);
+pub fn normalize_model_diff_pivots(base: &WeakDom, side: &mut WeakDom) -> Option<PivotDiff> {
+    let state = prepare_model_diff_pivots_view(base, side);
     (!state.pivots.is_empty()).then_some(state)
 }
 
@@ -641,11 +615,11 @@ pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option
 ///
 /// Compact diffing consumes the identity even when no frame was inferred, so
 /// the internal result is deliberately not optional. The public API retains
-/// its existing `None` result when there are no model frames.
-pub(crate) fn prepare_model_diff_frames_view(
+/// its existing `None` result when there are no inferred pivots.
+pub(crate) fn prepare_model_diff_pivots_view(
     base: &dyn DomView,
     side: &mut dyn DomViewMut,
-) -> ModelFrameDiff {
+) -> PivotDiff {
     let PreparedFrameSide {
         identity,
         mut detection,
@@ -654,18 +628,18 @@ pub(crate) fn prepare_model_diff_frames_view(
     } = prepare_frame_side(base, side);
 
     let identity_frame = identity_frame();
-    let mut nearest_frame = vec![None; detection.boundaries.len()];
+    let mut nearest_pivot = vec![None; detection.boundaries.len()];
     let mut pivots = Vec::new();
     for (order, boundary) in detection.boundaries.iter().enumerate() {
         let local = raw_local_frame(boundary, prefixes[order]).to_cframe();
-        let parent_order = boundary.parent.and_then(|parent| nearest_frame[parent]);
-        if model_frames_close(&local, &identity_frame) {
-            nearest_frame[order] = parent_order;
+        let parent_order = boundary.parent.and_then(|parent| nearest_pivot[parent]);
+        if pivot_deltas_close(&local, &identity_frame) {
+            nearest_pivot[order] = parent_order;
             continue;
         }
         let Some(side_ref) = boundary.side_ref else {
             restore_root_alignment(side, raw);
-            return ModelFrameDiff {
+            return PivotDiff {
                 pivots: Vec::new(),
                 detected: detection
                     .boundaries
@@ -682,12 +656,12 @@ pub(crate) fn prepare_model_diff_frames_view(
             parent_order,
             delta: local,
         });
-        nearest_frame[order] = Some(order);
+        nearest_pivot[order] = Some(order);
     }
 
     if pivots.is_empty() {
         restore_root_alignment(side, raw);
-        return ModelFrameDiff {
+        return PivotDiff {
             pivots,
             detected: detection
                 .boundaries
@@ -707,7 +681,7 @@ pub(crate) fn prepare_model_diff_frames_view(
     restore_root_alignment(side, raw);
     canonicalize_side(side, &detection);
 
-    ModelFrameDiff {
+    PivotDiff {
         pivots,
         detected: detection
             .boundaries
@@ -720,28 +694,28 @@ pub(crate) fn prepare_model_diff_frames_view(
 
 /// Canonicalize both branches and return independently mergeable placements
 /// for every affected boundary.
-pub fn normalize_model_merge_frames(
+pub fn normalize_model_merge_pivots(
     base: &WeakDom,
     ours: &mut WeakDom,
     theirs: &mut WeakDom,
-) -> Option<ModelFrameMerge> {
-    normalize_model_merge_frames_view(base, ours, theirs)
+) -> Option<PivotMerge> {
+    normalize_model_merge_pivots_view(base, ours, theirs)
 }
 
-/// Compact-branch variant of [`normalize_model_merge_frames`].
-pub fn normalize_model_merge_compact_frames(
+/// Compact-branch variant of [`normalize_model_merge_pivots`].
+pub fn normalize_model_merge_compact_pivots(
     base: &WeakDom,
     ours: &mut DiffDom,
     theirs: &mut DiffDom,
-) -> Option<ModelFrameMerge> {
-    normalize_model_merge_frames_view(base, ours, theirs)
+) -> Option<PivotMerge> {
+    normalize_model_merge_pivots_view(base, ours, theirs)
 }
 
-fn normalize_model_merge_frames_view(
+fn normalize_model_merge_pivots_view(
     base: &dyn DomView,
     ours: &mut dyn DomViewMut,
     theirs: &mut dyn DomViewMut,
-) -> Option<ModelFrameMerge> {
+) -> Option<PivotMerge> {
     // Each side is matched once in the common case. A serialized-root move is
     // temporarily removed and rematched because duplicate-heavy assets need a
     // shared coordinate system before their identity can be frozen.
@@ -772,7 +746,7 @@ fn normalize_model_merge_frames_view(
         let mut theirs_pivots = Vec::new();
         let mut paths = HashMap::new();
         let mut affected_boundaries = 0;
-        let mut nearest_frame = vec![None; ours_detection.boundaries.len()];
+        let mut nearest_pivot = vec![None; ours_detection.boundaries.len()];
         for (order, (ours_boundary, theirs_boundary)) in ours_detection
             .boundaries
             .iter()
@@ -784,11 +758,11 @@ fn normalize_model_merge_frames_view(
             let theirs_local = raw_local_frame(theirs_boundary, theirs_prefixes[order]).to_cframe();
             let parent_order = ours_boundary
                 .parent
-                .and_then(|parent| nearest_frame[parent]);
-            if model_frames_close(&ours_local, &identity)
-                && model_frames_close(&theirs_local, &identity)
+                .and_then(|parent| nearest_pivot[parent]);
+            if pivot_deltas_close(&ours_local, &identity)
+                && pivot_deltas_close(&theirs_local, &identity)
             {
-                nearest_frame[order] = parent_order;
+                nearest_pivot[order] = parent_order;
                 continue;
             }
             affected_boundaries += 1;
@@ -796,7 +770,7 @@ fn normalize_model_merge_frames_view(
                 ours_boundary.base_ref,
                 get_instance_path(base, ours_boundary.base_ref),
             );
-            if !model_frames_close(&ours_local, &identity) {
+            if !pivot_deltas_close(&ours_local, &identity) {
                 if let Some(side_ref) = ours_boundary.side_ref {
                     ours_pivots.push(PivotOp {
                         target_ref: ours_boundary.base_ref,
@@ -807,7 +781,7 @@ fn normalize_model_merge_frames_view(
                     });
                 }
             }
-            if !model_frames_close(&theirs_local, &identity) {
+            if !pivot_deltas_close(&theirs_local, &identity) {
                 if let Some(side_ref) = theirs_boundary.side_ref {
                     theirs_pivots.push(PivotOp {
                         target_ref: theirs_boundary.base_ref,
@@ -818,7 +792,7 @@ fn normalize_model_merge_frames_view(
                     });
                 }
             }
-            nearest_frame[order] = Some(order);
+            nearest_pivot[order] = Some(order);
         }
 
         if affected_boundaries == 0 {
@@ -834,7 +808,7 @@ fn normalize_model_merge_frames_view(
             boundary.effective = theirs_prefixes[index].mul(boundary.effective);
         }
 
-        let merge = ModelFrameMerge {
+        let merge = PivotMerge {
             ours_pivots,
             theirs_pivots,
             paths,

@@ -359,7 +359,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         still_remaining.retain(|&new_idx| !new_matched[new_idx]);
 
         // Pass 4: Tolerance-aware content matching. Exact hashes intentionally
-        // retain every finite bit, but model-frame normalization can introduce
+        // retain every finite bit, but pivot normalization can introduce
         // harmless float noise. Resolve only mutual-unique pairs here; truly
         // identical twins remain for the positional fallback.
         if old_candidates
