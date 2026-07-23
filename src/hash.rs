@@ -159,17 +159,29 @@ fn hash_instance(
     }
     hasher.update(inst.class().as_bytes());
 
-    let mut props: Vec<_> = inst.properties().collect();
-    props.sort_unstable_by_key(|(name, _)| *name);
-    for (name, value) in props {
+    let mut hash_property = |name: &str, value: &Variant| {
         if ignore_properties.is_some_and(|ignored| ignored.contains(name))
             || (!policy.include_refs && matches!(value, Variant::Ref(_)))
             || !authored.contains(name)
         {
-            continue;
+            return;
         }
         hasher.update(name.as_bytes());
         hash_variant(dom, &mut hasher, value);
+    };
+
+    if matches!(inst, InstanceView::Compact(_)) {
+        // DiffDom property ranges are sorted during construction, so hashing
+        // them directly avoids one temporary Vec and sort per hashed node.
+        for (name, value) in inst.properties() {
+            hash_property(name, value);
+        }
+    } else {
+        let mut properties: Vec<_> = inst.properties().collect();
+        properties.sort_unstable_by_key(|(name, _)| *name);
+        for (name, value) in properties {
+            hash_property(name, value);
+        }
     }
 
     hasher
