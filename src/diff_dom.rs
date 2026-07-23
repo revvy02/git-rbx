@@ -18,8 +18,9 @@
 #[cfg(test)]
 use rbx_dom_weak::InstanceBuilder;
 use rbx_dom_weak::{types::Ref, Instance, Ustr, WeakDom};
-use rbx_types::Variant;
-use std::collections::HashMap;
+use rbx_types::{UniqueId, Variant};
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::ops::Range;
 use std::slice;
 use std::sync::Arc;
@@ -98,6 +99,177 @@ pub struct DiffDom {
     by_source_ref: HashMap<Ref, NodeId>,
 }
 
+struct BinaryInstance {
+    source_ref: Ref,
+    name: String,
+    class: Ustr,
+    properties: Vec<(Ustr, Variant)>,
+}
+
+impl rbx_binary::DecodeInstance for BinaryInstance {
+    fn new(class: Ustr, _property_capacity: usize) -> Self {
+        Self {
+            source_ref: Ref::new(),
+            name: class.to_string(),
+            class,
+            // The reflection default-property count is only a loose upper
+            // bound for serialized properties and substantially over-reserves
+            // on large places. Grow from the actual PROP chunks instead.
+            properties: Vec::new(),
+        }
+    }
+
+    fn referent(&self) -> Ref {
+        self.source_ref
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn has_property(&self, name: Ustr) -> bool {
+        self.properties
+            .iter()
+            .any(|(property_name, _)| *property_name == name)
+    }
+
+    fn add_property(&mut self, name: Ustr, value: Variant) {
+        self.properties.push((name, value));
+    }
+}
+
+struct DiffDomDecodeTarget {
+    nodes: Vec<Node>,
+    children: Vec<NodeId>,
+    properties: Vec<Property>,
+    strings: StringTable,
+    by_source_ref: HashMap<Ref, NodeId>,
+    unique_ids: HashSet<UniqueId>,
+}
+
+impl DiffDomDecodeTarget {
+    fn new() -> Self {
+        let root_ref = Ref::new();
+        let mut strings = StringTable::default();
+        let root_name = strings.intern("DataModel");
+        let root_id = NodeId::from_index(0);
+        let mut by_source_ref = HashMap::new();
+        by_source_ref.insert(root_ref, root_id);
+
+        Self {
+            nodes: vec![Node {
+                source_ref: root_ref,
+                parent: None,
+                name: root_name,
+                class: "DataModel".into(),
+                children: 0..0,
+                properties: 0..0,
+            }],
+            children: Vec::new(),
+            properties: Vec::new(),
+            strings,
+            by_source_ref,
+            unique_ids: HashSet::new(),
+        }
+    }
+}
+
+impl rbx_binary::DecodeTarget for DiffDomDecodeTarget {
+    type Instance = BinaryInstance;
+    type Output = DiffDom;
+
+    fn reserve(&mut self, additional: usize) {
+        self.nodes.reserve(additional);
+        self.children.reserve(additional);
+        self.by_source_ref.reserve(additional);
+    }
+
+    fn root_ref(&self) -> Ref {
+        self.nodes[0].source_ref
+    }
+
+    fn insert(&mut self, parent: Ref, mut instance: Self::Instance) {
+        let parent_id = self.by_source_ref[&parent];
+        let id = NodeId::from_index(self.nodes.len());
+
+        let child_index =
+            u32::try_from(self.children.len()).expect("DiffDom child arena exceeded u32::MAX");
+        let parent_children = &mut self.nodes[parent_id.index()].children;
+        if parent_children.start == parent_children.end {
+            *parent_children = child_index..child_index + 1;
+        } else {
+            assert_eq!(
+                parent_children.end, child_index,
+                "binary decoder did not emit siblings contiguously"
+            );
+            parent_children.end += 1;
+        }
+        self.children.push(id);
+
+        // InstanceBuilder-to-WeakDom collection gives the final duplicate
+        // property precedence. Stable sorting plus replacement preserves that
+        // behavior while producing the sorted range DiffDom needs.
+        instance
+            .properties
+            .sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        let properties_start =
+            u32::try_from(self.properties.len()).expect("DiffDom property arena exceeded u32::MAX");
+        for (name, value) in instance.properties {
+            let has_current_property = self.properties.len() > properties_start as usize;
+            let duplicate = if has_current_property {
+                self.properties
+                    .last_mut()
+                    .filter(|property| property.name == name)
+            } else {
+                None
+            };
+            if let Some(property) = duplicate {
+                property.value = value;
+            } else {
+                self.properties.push(Property { name, value });
+            }
+        }
+        let properties_end =
+            u32::try_from(self.properties.len()).expect("DiffDom property arena exceeded u32::MAX");
+
+        if let Some(property) = self.properties[properties_start as usize..properties_end as usize]
+            .iter_mut()
+            .find(|property| property.name.as_str() == "UniqueId")
+        {
+            if let Variant::UniqueId(unique_id) = &mut property.value {
+                if !self.unique_ids.insert(*unique_id) {
+                    let replacement =
+                        UniqueId::now().expect("system clock could not generate a UniqueId");
+                    self.unique_ids.insert(replacement);
+                    *unique_id = replacement;
+                }
+            }
+        }
+
+        self.nodes.push(Node {
+            source_ref: instance.source_ref,
+            parent: Some(parent_id),
+            name: self.strings.intern(&instance.name),
+            class: instance.class,
+            children: 0..0,
+            properties: properties_start..properties_end,
+        });
+        let replaced = self.by_source_ref.insert(instance.source_ref, id);
+        assert!(replaced.is_none(), "binary decoder emitted a duplicate Ref");
+    }
+
+    fn finish(mut self) -> Self::Output {
+        self.strings.finish();
+        DiffDom {
+            nodes: self.nodes,
+            children: self.children,
+            properties: self.properties,
+            strings: self.strings,
+            by_source_ref: self.by_source_ref,
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DiffDomStats {
@@ -108,6 +280,11 @@ pub(crate) struct DiffDomStats {
 }
 
 impl DiffDom {
+    /// Decode a binary Roblox model or place directly into compact storage.
+    pub fn from_binary_reader<R: Read>(reader: R) -> Result<Self, rbx_binary::DecodeError> {
+        rbx_binary::Deserializer::new().deserialize_into(reader, DiffDomDecodeTarget::new())
+    }
+
     pub fn from_weak_dom(dom: &WeakDom) -> Self {
         // WeakDom descendants include the synthetic root as their first item.
         let source_refs: Vec<_> = dom
@@ -696,6 +873,23 @@ mod tests {
 
         let materialized = compact.to_weak_dom();
         assert!(diff_doms(&dom, &materialized).is_empty());
+    }
+
+    #[test]
+    fn binary_decode_target_matches_weak_dom_compaction() {
+        let source = fixture();
+        let mut encoded = Vec::new();
+        rbx_binary::to_writer(&mut encoded, &source, source.root().children()).unwrap();
+
+        let weak = rbx_binary::from_reader(encoded.as_slice()).unwrap();
+        let via_weak = DiffDom::from_weak_dom_owned(weak);
+        let direct = DiffDom::from_binary_reader(encoded.as_slice()).unwrap();
+
+        assert_eq!(direct.stats(), via_weak.stats());
+        assert!(
+            diff_doms(&via_weak.to_weak_dom(), &direct.to_weak_dom()).is_empty(),
+            "direct binary decoding must preserve names, classes, properties, references, and topology"
+        );
     }
 
     #[test]

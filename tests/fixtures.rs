@@ -25,6 +25,19 @@ fn load(path: &str) -> Option<WeakDom> {
     })
 }
 
+fn load_compact(path: &str) -> Option<DiffDom> {
+    if !Path::new(path).exists() {
+        eprintln!("SKIP: fixture {path} not present");
+        return None;
+    }
+    let file = BufReader::new(File::open(path).unwrap());
+    Some(if path.ends_with(".rbxm") || path.ends_with(".rbxl") {
+        DiffDom::from_binary_reader(file).unwrap()
+    } else {
+        DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(file).unwrap())
+    })
+}
+
 fn diff_files(old: &str, new: &str) -> Option<Vec<DiffEntry>> {
     Some(diff_doms(&load(old)?, &load(new)?))
 }
@@ -158,16 +171,14 @@ fn save_vs_save_tree_move_is_cframe_changes_only() {
 #[test]
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn police_station_and_nested_moves_collapse_to_three_frames() {
-    let Some(base) = load("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
+    let Some(base) = load_compact("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
         return;
     };
-    let base = DiffDom::from_weak_dom_owned(base);
-    let Some(side) = load(
+    let Some(mut side) = load_compact(
         "tests-new/models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl",
     ) else {
         return;
     };
-    let mut side = DiffDom::from_weak_dom_owned(side);
 
     let (diffs, frames) =
         diff_model_compact_doms_with_config(&base, &mut side, &DiffConfig::default());

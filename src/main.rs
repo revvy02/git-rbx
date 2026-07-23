@@ -186,8 +186,7 @@ fn cmd_diff(
     eprintln!("Loading {}...", old_file);
     let old_dom = {
         let _span = info_span!("load_old_file", file = %old_file).entered();
-        let loaded = load_file(old_file)?;
-        DiffDom::from_weak_dom_owned(loaded)
+        load_diff_file(old_file)?
     };
     let old_load_time = load_start.elapsed();
 
@@ -195,7 +194,7 @@ fn cmd_diff(
     eprintln!("Loading {}...", new_file);
     let mut new_dom = {
         let _span = info_span!("load_new_file", file = %new_file).entered();
-        DiffDom::from_weak_dom_owned(load_file(new_file)?)
+        load_diff_file(new_file)?
     };
     let new_load_time = load_start.elapsed();
 
@@ -623,6 +622,20 @@ fn load_file(path: &str) -> Result<rbx_dom_weak::WeakDom> {
     match ext.as_str() {
         "rbxm" | "rbxl" => Ok(rbx_binary::from_reader(file)?),
         "rbxmx" | "rbxlx" => Ok(rbx_xml::from_reader_default(file)?),
+        _ => bail!("Unknown file extension: {ext}. Expected .rbxm, .rbxmx, .rbxl, or .rbxlx"),
+    }
+}
+
+/// Load directly into the compact comparison DOM when the source format
+/// supports it. XML still uses WeakDom as its parser output.
+fn load_diff_file(path: &str) -> Result<DiffDom> {
+    let ext = extension(path)?;
+    let file = BufReader::new(File::open(path).with_context(|| format!("opening {path}"))?);
+    match ext.as_str() {
+        "rbxm" | "rbxl" => Ok(DiffDom::from_binary_reader(file)?),
+        "rbxmx" | "rbxlx" => Ok(DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(
+            file,
+        )?)),
         _ => bail!("Unknown file extension: {ext}. Expected .rbxm, .rbxmx, .rbxl, or .rbxlx"),
     }
 }
