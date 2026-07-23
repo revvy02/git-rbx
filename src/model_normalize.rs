@@ -236,23 +236,23 @@ struct Candidate {
 struct HierarchyDetection {
     boundaries: Vec<Boundary>,
     side_boundary_by_ref: HashMap<Ref, usize>,
-    matched_parts: Vec<Ref>,
+    matched_parts: usize,
 }
 
 fn collect_matches(
     matcher: &Matcher<'_>,
     base_parent: Ref,
     side_parent: Ref,
-    matches: &mut Vec<(Ref, Ref)>,
+    matches: &mut HashMap<Ref, Ref>,
 ) {
     let result = matcher.match_children(base_parent, side_parent);
     for &(base_ref, side_ref) in &result.matched {
-        matches.push((base_ref, side_ref));
+        matches.insert(base_ref, side_ref);
         collect_matches(matcher, base_ref, side_ref, matches);
     }
 }
 
-fn matched_refs(base: &dyn DomView, side: &dyn DomView) -> Vec<(Ref, Ref)> {
+fn matched_refs(base: &dyn DomView, side: &dyn DomView) -> HashMap<Ref, Ref> {
     let base_hashes = LazyHashCache::new_view(base);
     let side_hashes = LazyHashCache::new_view(side);
     let ignored = HashSet::new();
@@ -266,7 +266,7 @@ fn matched_refs(base: &dyn DomView, side: &dyn DomView) -> Vec<(Ref, Ref)> {
         &base_deep,
         &side_deep,
     );
-    let mut matches = Vec::new();
+    let mut matches = HashMap::new();
     collect_matches(&matcher, base.root_ref(), side.root_ref(), &mut matches);
     matches
 }
@@ -287,80 +287,6 @@ fn pivot_property(dom: &dyn DomView, referent: Ref) -> Option<CFrame> {
     match instance.property("WorldPivotData") {
         Some(Variant::OptionalCFrame(Some(cframe))) => Some(*cframe),
         _ => None,
-    }
-}
-
-fn is_model_boundary(dom: &dyn DomView, referent: Ref) -> bool {
-    dom.get_by_ref(referent).is_some_and(|instance| {
-        class_is_a(instance.class(), "Model") && !class_is_a(instance.class(), "WorldRoot")
-    })
-}
-
-fn add_boundary_subtree(
-    dom: &dyn DomView,
-    referent: Ref,
-    parent_boundary: Option<usize>,
-    boundaries: &mut Vec<Boundary>,
-    boundary_by_base_ref: &mut HashMap<Ref, usize>,
-    force_boundary: bool,
-) {
-    let creates_boundary = force_boundary || is_model_boundary(dom, referent);
-    let active = if creates_boundary {
-        let index = boundaries.len();
-        boundaries.push(Boundary {
-            base_ref: referent,
-            side_ref: None,
-            parent: parent_boundary,
-            children: Vec::new(),
-            direct_parts: Vec::new(),
-            pivot_delta: None,
-            candidate: None,
-            effective: Rigid::identity(),
-            local: Rigid::identity(),
-        });
-        boundary_by_base_ref.insert(referent, index);
-        if let Some(parent) = parent_boundary {
-            boundaries[parent].children.push(index);
-        }
-        Some(index)
-    } else {
-        parent_boundary
-    };
-
-    let Some(instance) = dom.get_by_ref(referent) else {
-        return;
-    };
-    for child in instance.children() {
-        add_boundary_subtree(dom, child, active, boundaries, boundary_by_base_ref, false);
-    }
-}
-
-fn boundary_definitions(base: &dyn DomView) -> (Vec<Boundary>, HashMap<Ref, usize>) {
-    let mut boundaries = Vec::new();
-    let mut by_ref = HashMap::new();
-    let Some(root) = base.get_by_ref(base.root_ref()) else {
-        return (boundaries, by_ref);
-    };
-    for child in root.children() {
-        add_boundary_subtree(base, child, None, &mut boundaries, &mut by_ref, true);
-    }
-    (boundaries, by_ref)
-}
-
-fn nearest_boundary(
-    base: &dyn DomView,
-    mut referent: Ref,
-    boundary_by_ref: &HashMap<Ref, usize>,
-) -> Option<usize> {
-    loop {
-        if let Some(&boundary) = boundary_by_ref.get(&referent) {
-            return Some(boundary);
-        }
-        let parent = base.get_by_ref(referent)?.parent();
-        if parent.is_none() {
-            return None;
-        }
-        referent = parent;
     }
 }
 
@@ -444,60 +370,93 @@ fn select_candidate(
     })
 }
 
-fn detect_hierarchy_from_matches(
+fn detect_hierarchy_from_identity(
     base: &dyn DomView,
     side: &dyn DomView,
-    matches: Vec<(Ref, Ref)>,
+    base_to_side: &HashMap<Ref, Ref>,
 ) -> HierarchyDetection {
-    let base_to_side: HashMap<Ref, Ref> = matches.iter().copied().collect();
-    let (mut boundaries, boundary_by_base_ref) = boundary_definitions(base);
+    let mut boundaries = Vec::new();
     let mut side_boundary_by_ref = HashMap::new();
+    let mut matched_parts = 0;
 
-    for (index, boundary) in boundaries.iter_mut().enumerate() {
-        boundary.side_ref = base_to_side.get(&boundary.base_ref).copied();
-        if let Some(side_ref) = boundary.side_ref {
-            side_boundary_by_ref.insert(side_ref, index);
-            if let (Some(base_pivot), Some(side_pivot)) = (
-                pivot_property(base, boundary.base_ref),
-                pivot_property(side, side_ref),
-            ) {
-                boundary.pivot_delta = Some(if cframes_equal(base_pivot, side_pivot) {
+    // Build boundaries and assign their directly-owned BaseParts together.
+    // Carrying the active boundary through one preorder traversal avoids
+    // materializing an ordered match vector, rebuilding the identity map,
+    // and walking every matched part back up through its ancestors.
+    let mut pending = base
+        .get_by_ref(base.root_ref())
+        .into_iter()
+        .flat_map(|root| root.children().rev())
+        .map(|referent| (referent, None, true))
+        .collect::<Vec<_>>();
+    while let Some((base_ref, parent_boundary, force_boundary)) = pending.pop() {
+        let Some(base_instance) = base.get_by_ref(base_ref) else {
+            continue;
+        };
+        let creates_boundary = force_boundary
+            || (class_is_a(base_instance.class(), "Model")
+                && !class_is_a(base_instance.class(), "WorldRoot"));
+        let active_boundary = if creates_boundary {
+            let side_ref = base_to_side.get(&base_ref).copied();
+            let pivot_delta = side_ref.and_then(|side_ref| {
+                let base_pivot = pivot_property(base, base_ref)?;
+                let side_pivot = pivot_property(side, side_ref)?;
+                Some(if cframes_equal(base_pivot, side_pivot) {
                     Rigid::identity()
                 } else {
                     Rigid::delta_cframes(&side_pivot, &base_pivot)
-                });
+                })
+            });
+            let index = boundaries.len();
+            boundaries.push(Boundary {
+                base_ref,
+                side_ref,
+                parent: parent_boundary,
+                children: Vec::new(),
+                direct_parts: Vec::new(),
+                pivot_delta,
+                candidate: None,
+                effective: Rigid::identity(),
+                local: Rigid::identity(),
+            });
+            if let Some(parent) = parent_boundary {
+                boundaries[parent].children.push(index);
+            }
+            if let Some(side_ref) = side_ref {
+                side_boundary_by_ref.insert(side_ref, index);
+            }
+            Some(index)
+        } else {
+            parent_boundary
+        };
+
+        if let (Some(owner), Some(&side_ref)) = (active_boundary, base_to_side.get(&base_ref)) {
+            if let Some(side_instance) = side.get_by_ref(side_ref) {
+                if class_is_a(base_instance.class(), "BasePart")
+                    && class_is_a(side_instance.class(), "BasePart")
+                {
+                    if let (Some(base_cframe), Some(side_cframe)) = (
+                        cframe_property(base, base_ref),
+                        cframe_property(side, side_ref),
+                    ) {
+                        let delta = if cframes_equal(base_cframe, side_cframe) {
+                            Rigid::identity()
+                        } else {
+                            Rigid::delta_cframes(&side_cframe, &base_cframe)
+                        };
+                        boundaries[owner].direct_parts.push((delta, base_ref));
+                        matched_parts += 1;
+                    }
+                }
             }
         }
-    }
 
-    let mut matched_parts = Vec::new();
-    for (base_ref, side_ref) in matches {
-        let (Some(base_instance), Some(side_instance)) =
-            (base.get_by_ref(base_ref), side.get_by_ref(side_ref))
-        else {
-            continue;
-        };
-        if !class_is_a(base_instance.class(), "BasePart")
-            || !class_is_a(side_instance.class(), "BasePart")
-        {
-            continue;
-        }
-        let (Some(base_cframe), Some(side_cframe)) = (
-            cframe_property(base, base_ref),
-            cframe_property(side, side_ref),
-        ) else {
-            continue;
-        };
-        let Some(owner) = nearest_boundary(base, base_ref, &boundary_by_base_ref) else {
-            continue;
-        };
-        let delta = if cframes_equal(base_cframe, side_cframe) {
-            Rigid::identity()
-        } else {
-            Rigid::delta_cframes(&side_cframe, &base_cframe)
-        };
-        boundaries[owner].direct_parts.push((delta, base_ref));
-        matched_parts.push(base_ref);
+        pending.extend(
+            base_instance
+                .children()
+                .rev()
+                .map(|child| (child, active_boundary, false)),
+        );
     }
 
     // Boundaries are emitted in preorder, so reverse order is bottom-up.
@@ -539,18 +498,8 @@ fn detect_hierarchy_from_matches(
 }
 
 fn detect_hierarchy(base: &dyn DomView, side: &dyn DomView) -> HierarchyDetection {
-    detect_hierarchy_from_matches(base, side, matched_refs(base, side))
-}
-
-fn ordered_matches(base: &dyn DomView, matched: &HashMap<Ref, Ref>) -> Vec<(Ref, Ref)> {
-    DescendantRefs::new(base)
-        .filter_map(|referent| {
-            matched
-                .get(&referent)
-                .copied()
-                .map(|side_ref| (referent, side_ref))
-        })
-        .collect()
+    let identity = matched_refs(base, side);
+    detect_hierarchy_from_identity(base, side, &identity)
 }
 
 fn transform_world_refs(dom: &mut dyn DomViewMut, refs: Vec<(Ref, Rigid)>) {
@@ -819,11 +768,7 @@ pub(crate) fn normalize_model_diff_frames_view(
     side: &mut dyn DomViewMut,
 ) -> Option<ModelFrameDiff> {
     let initial_identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
-    let initial = detect_hierarchy_from_matches(
-        base,
-        side.as_view(),
-        ordered_matches(base, &initial_identity.matched),
-    );
+    let initial = detect_hierarchy_from_identity(base, side.as_view(), &initial_identity.matched);
     let prefixes = root_prefixes(&initial);
     let roots_changed = initial
         .boundaries
@@ -841,11 +786,7 @@ pub(crate) fn normalize_model_diff_frames_view(
         let raw = snapshot_world_properties(side.as_view());
         canonicalize_roots(side, &initial, &prefixes);
         let identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
-        let detection = detect_hierarchy_from_matches(
-            base,
-            side.as_view(),
-            ordered_matches(base, &identity.matched),
-        );
+        let detection = detect_hierarchy_from_identity(base, side.as_view(), &identity.matched);
         (identity, detection, Some(raw))
     } else {
         (initial_identity, initial, None)
@@ -931,13 +872,9 @@ pub fn normalize_model_merge_frames(
     let theirs_script = compute_edit_script(base, theirs, &DiffConfig::default());
     let ours_identity = script_identity(ours_script);
     let theirs_identity = script_identity(theirs_script);
-    let mut ours_detection =
-        detect_hierarchy_from_matches(base, ours, ordered_matches(base, &ours_identity.matched));
-    let mut theirs_detection = detect_hierarchy_from_matches(
-        base,
-        theirs,
-        ordered_matches(base, &theirs_identity.matched),
-    );
+    let mut ours_detection = detect_hierarchy_from_identity(base, ours, &ours_identity.matched);
+    let mut theirs_detection =
+        detect_hierarchy_from_identity(base, theirs, &theirs_identity.matched);
     if ours_detection.boundaries.len() != theirs_detection.boundaries.len() {
         return None;
     }
@@ -1045,9 +982,8 @@ pub fn normalize_model_dom_to_base(
     let side_root = root.side_ref?;
 
     transform_world_properties_below(side, side_root, candidate.delta.inverse());
-    let matched_parts = detection.matched_parts.len();
     Some(ModelNormalization {
-        matched_parts,
+        matched_parts: detection.matched_parts,
         supporting_parts: candidate.supporting_parts,
         side_delta: candidate.delta.to_cframe(),
         base_target_ref: root.base_ref,
