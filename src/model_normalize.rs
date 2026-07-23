@@ -58,9 +58,7 @@ use std::collections::{HashMap, HashSet};
 use crate::diff::DiffConfig;
 use crate::diff_dom::{DescendantRefs, DiffDom, DomView, DomViewMut};
 use crate::dom_utils::class_is_a;
-use crate::edit_script::{
-    compute_instance_identity, compute_semantic_changes_with_identity, EditScript, InstanceIdentity,
-};
+use crate::edit_script::{compute_instance_identity, InstanceIdentity};
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::{get_instance_path, Matcher};
 use crate::rigid_groups::Rigid;
@@ -273,8 +271,8 @@ fn collect_matches(
     side_parent: Ref,
     matches: &mut HashMap<Ref, Ref>,
 ) {
-    let result = matcher.match_children(base_parent, side_parent);
-    for &(base_ref, side_ref) in &result.matched {
+    let result = matcher.match_children_once(base_parent, side_parent);
+    for (base_ref, side_ref) in result.matched {
         matches.insert(base_ref, side_ref);
         collect_matches(matcher, base_ref, side_ref, matches);
     }
@@ -690,10 +688,6 @@ fn raw_local_frame(boundary: &Boundary, root_prefix: Rigid) -> Rigid {
     }
 }
 
-fn script_identity(script: EditScript) -> InstanceIdentity {
-    script.identity
-}
-
 /// Apply a frame to every world-space property in one boundary subtree.
 pub fn apply_model_frame(dom: &mut WeakDom, target: Ref, frame: &CFrame) {
     transform_world_properties_below(dom, target, Rigid::from_cframe(frame));
@@ -921,16 +915,9 @@ fn normalize_model_merge_frames_view(
 
     // Rebuild matching after root alignment, then retain this mapping through
     // nested canonicalization and the merge itself.
-    let ours_script =
-        compute_semantic_changes_with_identity(base, ours.as_view(), &DiffConfig::default(), None);
-    let theirs_script = compute_semantic_changes_with_identity(
-        base,
-        theirs.as_view(),
-        &DiffConfig::default(),
-        None,
-    );
-    let ours_identity = script_identity(ours_script);
-    let theirs_identity = script_identity(theirs_script);
+    let config = DiffConfig::default();
+    let ours_identity = compute_instance_identity(base, ours.as_view(), &config);
+    let theirs_identity = compute_instance_identity(base, theirs.as_view(), &config);
     let mut ours_detection = detect_hierarchy_from_identity(base, ours, &ours_identity.matched);
     let mut theirs_detection =
         detect_hierarchy_from_identity(base, theirs, &theirs_identity.matched);

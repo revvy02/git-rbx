@@ -188,47 +188,6 @@ fn discover_identity_once(
     InstanceIdentity::new(matched, moves)
 }
 
-fn discover_identity(
-    matcher: &Matcher<'_>,
-    old_dom: &dyn DomView,
-    new_dom: &dyn DomView,
-    old_deep: &DeepHashCache,
-    new_deep: &DeepHashCache,
-) -> InstanceIdentity {
-    let mut matched = HashMap::new();
-    let mut removed_roots = Vec::new();
-    let mut added_roots = Vec::new();
-    build_full_mapping(
-        matcher,
-        old_dom.root_ref(),
-        new_dom.root_ref(),
-        &mut matched,
-        &mut removed_roots,
-        &mut added_roots,
-    );
-
-    let moves = detect_moves(
-        old_dom,
-        new_dom,
-        removed_roots,
-        added_roots,
-        old_deep,
-        new_deep,
-    );
-    for (old_root, new_root) in &moves {
-        matched.insert(*old_root, *new_root);
-        build_full_mapping(
-            matcher,
-            *old_root,
-            *new_root,
-            &mut matched,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        );
-    }
-    InstanceIdentity::new(matched, moves)
-}
-
 /// Compute an edit script while preserving identity established before a
 /// representation-only DOM canonicalization.
 pub(crate) fn compute_semantic_changes_with_identity(
@@ -237,29 +196,23 @@ pub(crate) fn compute_semantic_changes_with_identity(
     config: &DiffConfig,
     pinned: Option<&InstanceIdentity>,
 ) -> SemanticChangeSet {
-    let old_hashes = LazyHashCache::new_view(old_dom);
-    let new_hashes = LazyHashCache::new_view(new_dom);
     let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
     let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
-    let mut matcher = Matcher::new(
-        old_dom,
-        new_dom,
-        &old_hashes,
-        &new_hashes,
-        &old_deep,
-        &new_deep,
-    );
-    if let Some(pinned) = pinned {
-        matcher = matcher.with_complete_identity(&pinned.matched);
-    }
 
     let identity = if let Some(pinned) = pinned {
-        // This is a complete identity map captured before representation-only
-        // canonicalization. Derive moves from parent identity directly rather
-        // than asking content hashes to rediscover them after transforms.
         pinned.clone()
     } else {
-        discover_identity(&matcher, old_dom, new_dom, &old_deep, &new_deep)
+        let old_hashes = LazyHashCache::new_view(old_dom);
+        let new_hashes = LazyHashCache::new_view(new_dom);
+        let matcher = Matcher::new(
+            old_dom,
+            new_dom,
+            &old_hashes,
+            &new_hashes,
+            &old_deep,
+            &new_deep,
+        );
+        discover_identity_once(&matcher, old_dom, new_dom, &old_deep, &new_deep)
     };
 
     let mut ops = Vec::new();
@@ -285,11 +238,12 @@ pub(crate) fn compute_semantic_changes_with_identity(
 
     // Structural + property ops from the matched walk
     let ctx = BuildCtx {
-        matcher: &matcher,
+        old_dom,
+        new_dom,
         config,
-        matched: &identity.matched,
-        moved_old: &identity.moved_old,
-        moved_new: &identity.moved_new,
+        identity: &identity,
+        old_deep: &old_deep,
+        new_deep: &new_deep,
     };
     emit_ops(&ctx, old_dom.root_ref(), new_dom.root_ref(), &mut ops);
     for (old_root, new_root) in identity.moves.iter() {
@@ -306,39 +260,14 @@ pub(crate) fn compute_semantic_changes_with_identity(
 }
 
 struct BuildCtx<'a> {
-    matcher: &'a Matcher<'a>,
+    old_dom: &'a dyn DomView,
+    new_dom: &'a dyn DomView,
     config: &'a DiffConfig,
-    matched: &'a HashMap<Ref, Ref>,
-    moved_old: &'a HashSet<Ref>,
-    moved_new: &'a HashSet<Ref>,
+    identity: &'a InstanceIdentity,
+    old_deep: &'a DeepHashCache<'a>,
+    new_deep: &'a DeepHashCache<'a>,
 }
 
-fn build_full_mapping(
-    matcher: &Matcher<'_>,
-    old_ref: Ref,
-    new_ref: Ref,
-    mapping: &mut HashMap<Ref, Ref>,
-    removed_roots: &mut Vec<Ref>,
-    added_roots: &mut Vec<Ref>,
-) {
-    let result = matcher.match_children(old_ref, new_ref);
-    removed_roots.extend_from_slice(&result.removed);
-    added_roots.extend_from_slice(&result.added);
-    for (old_child, new_child) in &result.matched {
-        mapping.insert(*old_child, *new_child);
-        build_full_mapping(
-            matcher,
-            *old_child,
-            *new_child,
-            mapping,
-            removed_roots,
-            added_roots,
-        );
-    }
-}
-
-/// One-shot variant used by frame discovery. Unlike `build_full_mapping`, it
-/// does not populate the matcher's parent-pair cache.
 fn build_full_mapping_once(
     matcher: &Matcher<'_>,
     old_ref: Ref,
@@ -383,53 +312,83 @@ fn anchor_for(new_ref: Ref, reverse_matched: &HashMap<Ref, Ref>) -> Anchor {
 }
 
 fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
-    let old_dom = ctx.matcher.old_dom();
-    let new_dom = ctx.matcher.new_dom();
-    let result = ctx.matcher.match_children(old_ref, new_ref);
+    let old_parent = ctx.old_dom.get_by_ref(old_ref).unwrap();
+    let new_parent = ctx.new_dom.get_by_ref(new_ref).unwrap();
 
-    for removed in &result.removed {
-        if ctx.moved_old.contains(removed) {
+    for old_child in old_parent.children() {
+        let local_match = ctx
+            .identity
+            .matched
+            .get(&old_child)
+            .copied()
+            .filter(|new_child| {
+                ctx.new_dom
+                    .get_by_ref(*new_child)
+                    .is_some_and(|instance| instance.parent() == new_ref)
+            });
+        if local_match.is_some() || ctx.identity.moved_old.contains(&old_child) {
             continue;
         }
-        if let Some(inst) = old_dom.get_by_ref(*removed) {
-            if is_studio_artifact(old_dom, old_ref, inst) {
+        if let Some(inst) = ctx.old_dom.get_by_ref(old_child) {
+            if is_studio_artifact(ctx.old_dom, old_ref, inst) {
                 continue;
             }
         }
-        ops.push(EditOp::RemoveSubtree { old_ref: *removed });
+        ops.push(EditOp::RemoveSubtree { old_ref: old_child });
     }
 
-    for added in &result.added {
-        if ctx.moved_new.contains(added) {
+    for new_child in new_parent.children() {
+        let local_match = ctx
+            .identity
+            .reverse_matched
+            .get(&new_child)
+            .copied()
+            .filter(|old_child| {
+                ctx.old_dom
+                    .get_by_ref(*old_child)
+                    .is_some_and(|instance| instance.parent() == old_ref)
+            });
+        if local_match.is_some() || ctx.identity.moved_new.contains(&new_child) {
             continue;
         }
-        if let Some(inst) = new_dom.get_by_ref(*added) {
-            if is_studio_artifact(new_dom, new_ref, inst) {
+        if let Some(inst) = ctx.new_dom.get_by_ref(new_child) {
+            if is_studio_artifact(ctx.new_dom, new_ref, inst) {
                 continue;
             }
         }
         ops.push(EditOp::AddSubtree {
             parent: Anchor::Old(old_ref),
-            new_ref: *added,
+            new_ref: new_child,
         });
     }
 
-    for (old_child, new_child) in &result.matched {
+    for old_child in old_parent.children() {
+        let Some(new_child) = ctx
+            .identity
+            .matched
+            .get(&old_child)
+            .copied()
+            .filter(|new_child| {
+                ctx.new_dom
+                    .get_by_ref(*new_child)
+                    .is_some_and(|instance| instance.parent() == new_ref)
+            })
+        else {
+            continue;
+        };
         // Pruning is safe here: mapping is already complete, and identical
         // subtrees need no ops.
-        if ctx.matcher.old_deep().get(*old_child) == ctx.matcher.new_deep().get(*new_child) {
+        if ctx.old_deep.get(old_child) == ctx.new_deep.get(new_child) {
             continue;
         }
-        emit_instance_edits(ctx, *old_child, *new_child, ops);
-        emit_ops(ctx, *old_child, *new_child, ops);
+        emit_instance_edits(ctx, old_child, new_child, ops);
+        emit_ops(ctx, old_child, new_child, ops);
     }
 }
 
 fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
-    let old_dom = ctx.matcher.old_dom();
-    let new_dom = ctx.matcher.new_dom();
-    let old_inst = old_dom.get_by_ref(old_ref).unwrap();
-    let new_inst = new_dom.get_by_ref(new_ref).unwrap();
+    let old_inst = ctx.old_dom.get_by_ref(old_ref).unwrap();
+    let new_inst = ctx.new_dom.get_by_ref(new_ref).unwrap();
 
     if old_inst.name() != new_inst.name() {
         ops.push(EditOp::SetName {
@@ -439,12 +398,12 @@ fn emit_instance_edits(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec
     }
 
     for change in raw_property_changes(
-        old_dom,
-        new_dom,
+        ctx.old_dom,
+        ctx.new_dom,
         old_ref,
         new_ref,
         ctx.config,
-        ctx.matched,
+        &ctx.identity.matched,
     ) {
         ops.push(EditOp::SetProperty {
             old_ref,
