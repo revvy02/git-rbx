@@ -70,33 +70,30 @@ pub enum DiffEntry {
     },
 }
 
-/// Serializable representation of a rigid CFrame used by pivot diffs.
+/// Roblox's canonical CFrame component representation:
+/// x, y, z, followed by the row-major 3×3 rotation matrix.
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(transparent)]
 pub struct CFrameValue {
-    pub position: [f32; 3],
-    pub orientation: [[f32; 3]; 3],
+    pub components: [f32; 12],
 }
 
 impl From<CFrame> for CFrameValue {
     fn from(value: CFrame) -> Self {
         Self {
-            position: [value.position.x, value.position.y, value.position.z],
-            orientation: [
-                [
-                    value.orientation.x.x,
-                    value.orientation.x.y,
-                    value.orientation.x.z,
-                ],
-                [
-                    value.orientation.y.x,
-                    value.orientation.y.y,
-                    value.orientation.y.z,
-                ],
-                [
-                    value.orientation.z.x,
-                    value.orientation.z.y,
-                    value.orientation.z.z,
-                ],
+            components: [
+                value.position.x,
+                value.position.y,
+                value.position.z,
+                value.orientation.x.x,
+                value.orientation.x.y,
+                value.orientation.x.z,
+                value.orientation.y.x,
+                value.orientation.y.y,
+                value.orientation.y.z,
+                value.orientation.z.x,
+                value.orientation.z.y,
+                value.orientation.z.z,
             ],
         }
     }
@@ -148,10 +145,7 @@ pub enum PropertyValue {
         y: f32,
         z: f32,
     },
-    CFrame {
-        position: [f32; 3],
-        orientation: [[f32; 3]; 3],
-    },
+    CFrame(CFrameValue),
     Color3 {
         r: f32,
         g: f32,
@@ -789,14 +783,7 @@ pub(crate) fn variant_to_property_value(v: &Variant) -> PropertyValue {
             y: v.y,
             z: v.z,
         },
-        Variant::CFrame(cf) => PropertyValue::CFrame {
-            position: [cf.position.x, cf.position.y, cf.position.z],
-            orientation: [
-                [cf.orientation.x.x, cf.orientation.x.y, cf.orientation.x.z],
-                [cf.orientation.y.x, cf.orientation.y.y, cf.orientation.y.z],
-                [cf.orientation.z.x, cf.orientation.z.y, cf.orientation.z.z],
-            ],
-        },
+        Variant::CFrame(cf) => PropertyValue::CFrame((*cf).into()),
         Variant::Color3(c) => PropertyValue::Color3 {
             r: c.r,
             g: c.g,

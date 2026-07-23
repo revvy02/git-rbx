@@ -184,10 +184,7 @@ fn format_property_value(v: &PropertyValue) -> String {
         PropertyValue::Ref { value } => format!("Ref({})", &value[..8.min(value.len())]),
         PropertyValue::Vector2 { x, y } => format!("({}, {})", x, y),
         PropertyValue::Vector3 { x, y, z } => format!("({}, {}, {})", x, y, z),
-        PropertyValue::CFrame {
-            position,
-            orientation,
-        } => format_cframe(position, orientation),
+        PropertyValue::CFrame(value) => format_cframe_value(value),
         PropertyValue::Color3 { r, g, b } => format!("Color3({}, {}, {})", r, g, b),
         PropertyValue::BrickColor { value } => format!("BrickColor({})", value),
         PropertyValue::Enum { value } => format!("Enum({})", value),
@@ -223,24 +220,21 @@ fn format_property_value(v: &PropertyValue) -> String {
 }
 
 fn format_cframe_value(value: &CFrameValue) -> String {
-    format_cframe(&value.position, &value.orientation)
-}
-
-fn format_cframe(position: &[f32; 3], orientation: &[[f32; 3]; 3]) -> String {
+    let components = &value.components;
     format!(
         "CFrame({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-        position[0],
-        position[1],
-        position[2],
-        orientation[0][0],
-        orientation[0][1],
-        orientation[0][2],
-        orientation[1][0],
-        orientation[1][1],
-        orientation[1][2],
-        orientation[2][0],
-        orientation[2][1],
-        orientation[2][2],
+        components[0],
+        components[1],
+        components[2],
+        components[3],
+        components[4],
+        components[5],
+        components[6],
+        components[7],
+        components[8],
+        components[9],
+        components[10],
+        components[11],
     )
 }
 
@@ -351,24 +345,37 @@ mod tests {
 
     #[test]
     fn pretty_output_preserves_sub_millistud_positions() {
-        let value = PropertyValue::CFrame {
-            position: [1.00001, 2.0, 3.0],
-            orientation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        };
+        let value = PropertyValue::CFrame(CFrameValue {
+            components: [
+                1.00001, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        });
 
         assert!(format_property_value(&value).contains("1.00001"));
     }
 
     #[test]
     fn pretty_output_uses_raw_cframe_components() {
-        let value = PropertyValue::CFrame {
-            position: [1.0, 2.0, 3.0],
-            orientation: [[1.0, 0.00001, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        };
+        let value = PropertyValue::CFrame(CFrameValue {
+            components: [
+                1.0, 2.0, 3.0, 1.0, 0.00001, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        });
 
         assert_eq!(
             format_property_value(&value),
             "CFrame(1, 2, 3, 1, 0.00001, 0, 0, 1, 0, 0, 0, 1)"
         );
+    }
+
+    #[test]
+    fn json_output_uses_flat_cframe_components() {
+        let value = PropertyValue::CFrame(CFrameValue {
+            components: [1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        });
+
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(json["type"], "c_frame");
+        assert_eq!(json["value"].as_array().unwrap().len(), 12);
     }
 }

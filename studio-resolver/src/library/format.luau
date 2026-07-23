@@ -81,13 +81,7 @@ function format.patchValue(encoded: any): string
 	elseif kind == "vector3" then
 		return `Vector3({formatFloat32Components({ value.x, value.y, value.z })})`
 	elseif kind == "c_frame" then
-		local numbers = { value.position[1], value.position[2], value.position[3] }
-		for _, row in value.orientation do
-			for _, component in row do
-				table.insert(numbers, component)
-			end
-		end
-		return `CFrame({formatFloat32Components(numbers)})`
+		return `CFrame({formatFloat32Components(value)})`
 	elseif kind == "color3" then
 		return `Color3({formatFloat32Components({ value.r, value.g, value.b })})`
 	elseif kind == "brick_color" then

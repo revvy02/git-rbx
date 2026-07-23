@@ -357,6 +357,9 @@ fn two_way_diff_cli_json_reports_pivots_instead_of_descendant_cframes() {
     let changes = json["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2, "{json:#}");
     assert!(changes.iter().all(|change| change["type"] == "pivoted"));
+    assert!(changes.iter().all(|change| change["delta"]
+        .as_array()
+        .is_some_and(|delta| delta.len() == 12)));
     assert_eq!(json["summary"]["pivoted"], 2);
     assert_eq!(json["summary"]["modified"], 0);
 

@@ -361,7 +361,7 @@ fn two_way_diff_collapses_nested_movement_into_one_pivoted_entry() {
         } => {
             assert!(path.ends_with("Asset.Nested"), "{path}");
             assert_eq!(class, "Model");
-            assert!((delta.position[0] - 100.0).abs() < 1e-4, "{delta:?}");
+            assert!((delta.components[0] - 100.0).abs() < 1e-4, "{delta:?}");
         }
         other => panic!("expected one pivot, got {other:#?}"),
     }
@@ -427,7 +427,7 @@ fn two_way_diff_keeps_world_pivot_edit_separate_from_content_pivot() {
     let (diffs, _) = diff_model_doms_with_config(&base, &mut side, &DiffConfig::default());
     assert_eq!(diffs.len(), 2, "{diffs:#?}");
     assert!(matches!(&diffs[0], DiffEntry::Pivoted { delta, .. }
-        if (delta.position[0] - 100.0).abs() < 1e-4));
+        if (delta.components[0] - 100.0).abs() < 1e-4));
     assert!(diffs.iter().any(|diff| matches!(
         diff,
         DiffEntry::Modified { property_changes, .. }
@@ -540,9 +540,9 @@ fn translated_far_model_ignores_studio_rotation_normalization_residue() {
     assert!(matches!(
         &diffs[0],
         DiffEntry::Pivoted { delta, .. }
-            if (delta.position[0] + 1.0).abs() < 1e-4
-                && delta.position[1].abs() < 1e-4
-                && delta.position[2].abs() < 1e-4
+            if (delta.components[0] + 1.0).abs() < 1e-4
+                && delta.components[1].abs() < 1e-4
+                && delta.components[2].abs() < 1e-4
     ));
 }
 
@@ -583,6 +583,6 @@ fn frame_consensus_averages_f32_translation_quantization() {
     assert_eq!(diffs.len(), 1, "{diffs:#?}");
     assert!(matches!(
         &diffs[0],
-        DiffEntry::Pivoted { delta, .. } if (delta.position[0] + 1.0).abs() < 1e-4
+        DiffEntry::Pivoted { delta, .. } if (delta.components[0] + 1.0).abs() < 1e-4
     ));
 }
