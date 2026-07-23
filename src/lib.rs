@@ -1,5 +1,6 @@
 //! rbx-diff: Compare two Roblox DOMs and report differences.
 
+mod compact_diff;
 mod conflict_file;
 mod diff;
 mod diff_dom;
@@ -89,7 +90,14 @@ pub fn diff_model_compact_doms_with_config(
     new_dom: &mut DiffDom,
     config: &DiffConfig,
 ) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
-    diff_model_views_with_config(old_dom, new_dom, config)
+    let normalization = model_normalize::prepare_model_diff_frames_view(old_dom, new_dom);
+    let diffs = compact_diff::compute_compact_diff_with_identity(
+        old_dom,
+        new_dom,
+        &normalization.identity,
+        config,
+    );
+    finish_model_diff(new_dom, diffs, normalization)
 }
 
 fn diff_model_views_with_config(
@@ -100,7 +108,7 @@ fn diff_model_views_with_config(
     let normalization = model_normalize::normalize_model_diff_frames_view(old_dom, new_dom);
     let old_hashes = hash::LazyHashCache::new_view(old_dom);
     let new_hashes = hash::LazyHashCache::new_view(new_dom.as_view());
-    let mut diffs = diff::compute_diff_with_identity(
+    let diffs = diff::compute_diff_with_identity(
         old_dom,
         new_dom.as_view(),
         &old_hashes,
@@ -109,26 +117,37 @@ fn diff_model_views_with_config(
         normalization.as_ref().map(|state| &state.identity),
     );
 
-    if let Some(state) = &normalization {
-        let mut frames = Vec::with_capacity(state.frames.len());
-        for frame in &state.frames {
-            let class = new_dom
-                .get_by_ref(frame.side_ref)
-                .map(|instance| instance.class().to_string())
-                .unwrap_or_else(|| "Model".to_string());
-            frames.push(DiffEntry::ModelFrame {
-                old_ref: frame.base_ref.to_string(),
-                new_ref: frame.side_ref.to_string(),
-                path: frame.path.clone(),
-                class,
-                order: frame.order,
-                parent_order: frame.parent_order,
-                delta: frame.delta.into(),
-            });
-        }
-        frames.append(&mut diffs);
-        diffs = frames;
+    if let Some(normalization) = normalization {
+        return finish_model_diff(new_dom.as_view(), diffs, normalization);
     }
+    (diffs, None)
+}
 
-    (diffs, normalization)
+fn finish_model_diff(
+    new_dom: &dyn diff_dom::DomView,
+    mut diffs: Vec<DiffEntry>,
+    normalization: ModelFrameDiff,
+) -> (Vec<DiffEntry>, Option<ModelFrameDiff>) {
+    if normalization.frames.is_empty() {
+        return (diffs, None);
+    }
+    let mut frames = Vec::with_capacity(normalization.frames.len());
+    for frame in &normalization.frames {
+        let class = new_dom
+            .get_by_ref(frame.side_ref)
+            .map(|instance| instance.class().to_string())
+            .unwrap_or_else(|| "Model".to_string());
+        frames.push(DiffEntry::ModelFrame {
+            old_ref: frame.base_ref.to_string(),
+            new_ref: frame.side_ref.to_string(),
+            path: frame.path.clone(),
+            class,
+            order: frame.order,
+            parent_order: frame.parent_order,
+            delta: frame.delta.into(),
+        });
+    }
+    frames.append(&mut diffs);
+    diffs = frames;
+    (diffs, Some(normalization))
 }

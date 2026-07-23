@@ -760,13 +760,19 @@ fn identity_frame() -> CFrame {
 /// identity can be established. The resulting identity is then frozen while
 /// nested frames are removed.
 pub fn normalize_model_diff_frames(base: &WeakDom, side: &mut WeakDom) -> Option<ModelFrameDiff> {
-    normalize_model_diff_frames_view(base, side)
+    let state = prepare_model_diff_frames_view(base, side);
+    (!state.frames.is_empty()).then_some(state)
 }
 
-pub(crate) fn normalize_model_diff_frames_view(
+/// Establish complete identity and optionally canonicalize inferred frames.
+///
+/// Compact diffing consumes the identity even when no frame was inferred, so
+/// the internal result is deliberately not optional. The public API retains
+/// its existing `None` result when there are no model frames.
+pub(crate) fn prepare_model_diff_frames_view(
     base: &dyn DomView,
     side: &mut dyn DomViewMut,
-) -> Option<ModelFrameDiff> {
+) -> ModelFrameDiff {
     let initial_identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
     let initial = detect_hierarchy_from_identity(base, side.as_view(), &initial_identity.matched);
     let prefixes = root_prefixes(&initial);
@@ -806,7 +812,15 @@ pub(crate) fn normalize_model_diff_frames_view(
             if let Some(raw) = raw.take() {
                 restore_world_properties(side, raw);
             }
-            return None;
+            return ModelFrameDiff {
+                frames: Vec::new(),
+                detected: detection
+                    .boundaries
+                    .iter()
+                    .filter(|boundary| boundary.candidate.is_some())
+                    .count(),
+                identity,
+            };
         };
         frames.push(ModelFrameChange {
             base_ref: boundary.base_ref,
@@ -823,7 +837,15 @@ pub(crate) fn normalize_model_diff_frames_view(
         if let Some(raw) = raw {
             restore_world_properties(side, raw);
         }
-        return None;
+        return ModelFrameDiff {
+            frames,
+            detected: detection
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.candidate.is_some())
+                .count(),
+            identity,
+        };
     }
 
     // Detection above happened in root-aligned coordinates. Restore the raw
@@ -837,7 +859,7 @@ pub(crate) fn normalize_model_diff_frames_view(
     }
     canonicalize_side(side, &detection);
 
-    Some(ModelFrameDiff {
+    ModelFrameDiff {
         frames,
         detected: detection
             .boundaries
@@ -845,7 +867,15 @@ pub(crate) fn normalize_model_diff_frames_view(
             .filter(|boundary| boundary.candidate.is_some())
             .count(),
         identity,
-    })
+    }
+}
+
+pub(crate) fn normalize_model_diff_frames_view(
+    base: &dyn DomView,
+    side: &mut dyn DomViewMut,
+) -> Option<ModelFrameDiff> {
+    let state = prepare_model_diff_frames_view(base, side);
+    (!state.frames.is_empty()).then_some(state)
 }
 
 /// Canonicalize both branches and return independently mergeable local frame

@@ -527,7 +527,7 @@ fn attr_string_bytes(value: &Variant) -> Option<&[u8]> {
     }
 }
 
-fn attr_value_eq(a: &Variant, b: &Variant) -> bool {
+pub(crate) fn attr_value_eq(a: &Variant, b: &Variant) -> bool {
     if let (Some(a), Some(b)) = (attr_string_bytes(a), attr_string_bytes(b)) {
         return a == b;
     }
@@ -747,7 +747,7 @@ pub(crate) fn raw_property_changes(
 /// Compare properties between two matched instances, for display.
 /// Detects name changes (inst.name is separate from inst.properties) and
 /// converts raw variants into display-oriented PropertyValues.
-fn diff_properties(
+pub(crate) fn diff_properties(
     old_dom: &dyn DomView,
     new_dom: &dyn DomView,
     old_ref: Ref,
@@ -843,7 +843,7 @@ pub(crate) fn is_studio_artifact(
 }
 
 /// Check if a value matches the reflection database default for this property.
-fn is_default_value(
+pub(crate) fn is_default_value(
     defaults: Option<&std::collections::HashMap<&str, Variant>>,
     name: &str,
     value: &Variant,

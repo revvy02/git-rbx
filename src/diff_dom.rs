@@ -29,7 +29,7 @@ use std::sync::Arc;
 pub(crate) struct NodeId(u32);
 
 impl NodeId {
-    fn from_index(index: usize) -> Self {
+    pub(crate) fn from_index(index: usize) -> Self {
         Self(u32::try_from(index).expect("DiffDom cannot contain more than u32::MAX nodes"))
     }
 
@@ -446,7 +446,6 @@ impl DiffDom {
         NodeId(0)
     }
 
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
@@ -539,7 +538,6 @@ impl<'a> DiffNode<'a> {
         self.raw().class.as_str()
     }
 
-    #[cfg(test)]
     pub(crate) fn children(self) -> impl ExactSizeIterator<Item = NodeId> + 'a {
         let range = self.raw().children.clone();
         self.dom.children[range.start as usize..range.end as usize]
@@ -561,7 +559,6 @@ impl<'a> DiffNode<'a> {
         self.raw().properties.len()
     }
 
-    #[cfg(test)]
     pub(crate) fn properties(self) -> impl ExactSizeIterator<Item = (&'a str, &'a Variant)> + 'a {
         let range = self.raw().properties.clone();
         self.dom.properties[range.start as usize..range.end as usize]
@@ -811,8 +808,10 @@ impl Iterator for DescendantRefs<'_> {
 #[cfg(test)]
 mod tests {
     use super::DiffDom;
+    use crate::compact_diff::compute_compact_diff_with_identity;
     use crate::diff::{compute_diff_with_identity, DiffConfig};
     use crate::diff_doms;
+    use crate::edit_script::compute_instance_identity;
     use crate::hash::LazyHashCache;
     use rbx_dom_weak::{InstanceBuilder, WeakDom};
     use rbx_types::{Ref, Variant};
@@ -944,9 +943,16 @@ mod tests {
             &config,
             None,
         );
+        let identity = compute_instance_identity(&compact_old, &compact_new, &config);
+        let dense =
+            compute_compact_diff_with_identity(&compact_old, &compact_new, &identity, &config);
 
         assert_eq!(
             serde_json::to_value(&compact).unwrap(),
+            serde_json::to_value(&weak).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&dense).unwrap(),
             serde_json::to_value(&weak).unwrap()
         );
     }
