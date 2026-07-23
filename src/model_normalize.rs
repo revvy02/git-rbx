@@ -665,7 +665,76 @@ fn canonicalize_roots(
         let Some(side_root) = boundary.side_ref else {
             continue;
         };
+        if Rigid::close(&prefixes[index], &Rigid::identity()) {
+            continue;
+        }
         transform_world_properties_below(dom, side_root, prefixes[index].inverse());
+    }
+}
+
+fn align_roots_for_matching(
+    dom: &mut dyn DomViewMut,
+    detection: &HierarchyDetection,
+    prefixes: &[Rigid],
+) -> Option<Vec<(Ref, &'static str, Variant)>> {
+    let roots_changed = detection
+        .boundaries
+        .iter()
+        .enumerate()
+        .any(|(index, boundary)| {
+            boundary.parent.is_none()
+                && boundary.side_ref.is_some()
+                && !Rigid::close(&prefixes[index], &Rigid::identity())
+        });
+    if !roots_changed {
+        return None;
+    }
+
+    let raw = snapshot_world_properties(dom.as_view());
+    canonicalize_roots(dom, detection, prefixes);
+    Some(raw)
+}
+
+fn restore_root_alignment(
+    dom: &mut dyn DomViewMut,
+    snapshot: Option<Vec<(Ref, &'static str, Variant)>>,
+) {
+    if let Some(snapshot) = snapshot {
+        restore_world_properties(dom, snapshot);
+    }
+}
+
+struct PreparedFrameSide {
+    identity: InstanceIdentity,
+    detection: HierarchyDetection,
+    prefixes: Vec<Rigid>,
+    raw: Option<Vec<(Ref, &'static str, Variant)>>,
+}
+
+fn prepare_frame_side(base: &dyn DomView, side: &mut dyn DomViewMut) -> PreparedFrameSide {
+    let config = DiffConfig::default();
+    let initial_identity = compute_instance_identity(base, side.as_view(), &config);
+    let initial_detection =
+        detect_hierarchy_from_identity(base, side.as_view(), &initial_identity.matched);
+    let prefixes = root_prefixes(&initial_detection);
+    let raw = align_roots_for_matching(side, &initial_detection, &prefixes);
+
+    // A nested-only move leaves the DOM untouched during identity discovery,
+    // so its initial detection is already authoritative. Only a changed
+    // serialized root requires rematching in the aligned coordinate system.
+    let (identity, detection) = if raw.is_some() {
+        let identity = compute_instance_identity(base, side.as_view(), &config);
+        let detection = detect_hierarchy_from_identity(base, side.as_view(), &identity.matched);
+        (identity, detection)
+    } else {
+        (initial_identity, initial_detection)
+    };
+
+    PreparedFrameSide {
+        identity,
+        detection,
+        prefixes,
+        raw,
     }
 }
 
@@ -773,30 +842,12 @@ pub(crate) fn prepare_model_diff_frames_view(
     base: &dyn DomView,
     side: &mut dyn DomViewMut,
 ) -> ModelFrameDiff {
-    let initial_identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
-    let initial = detect_hierarchy_from_identity(base, side.as_view(), &initial_identity.matched);
-    let prefixes = root_prefixes(&initial);
-    let roots_changed = initial
-        .boundaries
-        .iter()
-        .enumerate()
-        .any(|(index, boundary)| {
-            boundary.parent.is_none() && !Rigid::close(&prefixes[index], &Rigid::identity())
-        });
-
-    // A nested-only move leaves the DOM untouched during identity discovery,
-    // so its initial detection is already authoritative. Reusing it avoids a
-    // second place-wide boundary tree and world-property snapshot. Only a
-    // changed serialized root requires mutation, rematching, and restoration.
-    let (identity, mut detection, mut raw) = if roots_changed {
-        let raw = snapshot_world_properties(side.as_view());
-        canonicalize_roots(side, &initial, &prefixes);
-        let identity = compute_instance_identity(base, side.as_view(), &DiffConfig::default());
-        let detection = detect_hierarchy_from_identity(base, side.as_view(), &identity.matched);
-        (identity, detection, Some(raw))
-    } else {
-        (initial_identity, initial, None)
-    };
+    let PreparedFrameSide {
+        identity,
+        mut detection,
+        prefixes,
+        raw,
+    } = prepare_frame_side(base, side);
 
     let identity_frame = identity_frame();
     let mut nearest_frame = vec![None; detection.boundaries.len()];
@@ -809,9 +860,7 @@ pub(crate) fn prepare_model_diff_frames_view(
             continue;
         }
         let Some(side_ref) = boundary.side_ref else {
-            if let Some(raw) = raw.take() {
-                restore_world_properties(side, raw);
-            }
+            restore_root_alignment(side, raw);
             return ModelFrameDiff {
                 frames: Vec::new(),
                 detected: detection
@@ -834,9 +883,7 @@ pub(crate) fn prepare_model_diff_frames_view(
     }
 
     if frames.is_empty() {
-        if let Some(raw) = raw {
-            restore_world_properties(side, raw);
-        }
+        restore_root_alignment(side, raw);
         return ModelFrameDiff {
             frames,
             detected: detection
@@ -854,9 +901,7 @@ pub(crate) fn prepare_model_diff_frames_view(
     for (index, boundary) in detection.boundaries.iter_mut().enumerate() {
         boundary.effective = prefixes[index].mul(boundary.effective);
     }
-    if let Some(raw) = raw {
-        restore_world_properties(side, raw);
-    }
+    restore_root_alignment(side, raw);
     canonicalize_side(side, &detection);
 
     ModelFrameDiff {
@@ -902,107 +947,115 @@ fn normalize_model_merge_frames_view(
     ours: &mut dyn DomViewMut,
     theirs: &mut dyn DomViewMut,
 ) -> Option<ModelFrameMerge> {
-    let ours_raw = snapshot_world_properties(ours);
-    let theirs_raw = snapshot_world_properties(theirs);
-    // First remove only serialized-root placement. This gives duplicate-heavy
-    // assets a stable coordinate system for their authoritative identity map.
-    let ours_initial = detect_hierarchy(base, ours);
-    let theirs_initial = detect_hierarchy(base, theirs);
-    let ours_prefixes = root_prefixes(&ours_initial);
-    let theirs_prefixes = root_prefixes(&theirs_initial);
-    canonicalize_roots(ours, &ours_initial, &ours_prefixes);
-    canonicalize_roots(theirs, &theirs_initial, &theirs_prefixes);
+    // Each side is matched once in the common case. A serialized-root move is
+    // temporarily removed and rematched because duplicate-heavy assets need a
+    // shared coordinate system before their identity can be frozen.
+    let PreparedFrameSide {
+        identity: ours_identity,
+        detection: mut ours_detection,
+        prefixes: ours_prefixes,
+        raw: ours_raw,
+    } = prepare_frame_side(base, ours);
+    let PreparedFrameSide {
+        identity: theirs_identity,
+        detection: mut theirs_detection,
+        prefixes: theirs_prefixes,
+        raw: theirs_raw,
+    } = prepare_frame_side(base, theirs);
 
-    // Rebuild matching after root alignment, then retain this mapping through
-    // nested canonicalization and the merge itself.
-    let config = DiffConfig::default();
-    let ours_identity = compute_instance_identity(base, ours.as_view(), &config);
-    let theirs_identity = compute_instance_identity(base, theirs.as_view(), &config);
-    let mut ours_detection = detect_hierarchy_from_identity(base, ours, &ours_identity.matched);
-    let mut theirs_detection =
-        detect_hierarchy_from_identity(base, theirs, &theirs_identity.matched);
-    if ours_detection.boundaries.len() != theirs_detection.boundaries.len() {
-        return None;
-    }
+    let prepared = (|| {
+        // Both boundary vectors are emitted by the same preorder traversal of
+        // `base`; only their optional side references and inferred frames can
+        // differ.
+        debug_assert_eq!(
+            ours_detection.boundaries.len(),
+            theirs_detection.boundaries.len()
+        );
 
-    let identity = identity_frame();
-    let mut frames = Vec::new();
-    let mut nearest_frame = vec![None; ours_detection.boundaries.len()];
-    for (order, (ours_boundary, theirs_boundary)) in ours_detection
-        .boundaries
-        .iter()
-        .zip(&theirs_detection.boundaries)
-        .enumerate()
-    {
-        if ours_boundary.base_ref != theirs_boundary.base_ref {
+        let identity = identity_frame();
+        let mut frames = Vec::new();
+        let mut nearest_frame = vec![None; ours_detection.boundaries.len()];
+        for (order, (ours_boundary, theirs_boundary)) in ours_detection
+            .boundaries
+            .iter()
+            .zip(&theirs_detection.boundaries)
+            .enumerate()
+        {
+            debug_assert_eq!(ours_boundary.base_ref, theirs_boundary.base_ref);
+            let ours_local = raw_local_frame(ours_boundary, ours_prefixes[order]).to_cframe();
+            let theirs_local = raw_local_frame(theirs_boundary, theirs_prefixes[order]).to_cframe();
+            let parent_order = ours_boundary
+                .parent
+                .and_then(|parent| nearest_frame[parent]);
+            if model_frames_close(&ours_local, &identity)
+                && model_frames_close(&theirs_local, &identity)
+            {
+                nearest_frame[order] = parent_order;
+                continue;
+            }
+            let decision = if model_frames_close(&ours_local, &theirs_local) {
+                ModelFrameDecision::Automatic(ours_local)
+            } else if model_frames_close(&ours_local, &identity) {
+                ModelFrameDecision::Automatic(theirs_local)
+            } else if model_frames_close(&theirs_local, &identity) {
+                ModelFrameDecision::Automatic(ours_local)
+            } else {
+                ModelFrameDecision::Conflict
+            };
+            frames.push(ModelFrame {
+                target_ref: ours_boundary.base_ref,
+                ours_ref: ours_boundary.side_ref,
+                theirs_ref: theirs_boundary.side_ref,
+                path: get_instance_path(base, ours_boundary.base_ref),
+                order,
+                parent_order,
+                ours: ours_local,
+                theirs: theirs_local,
+                decision,
+            });
+            nearest_frame[order] = Some(order);
+        }
+
+        if frames.is_empty() {
             return None;
         }
-        let ours_local = raw_local_frame(ours_boundary, ours_prefixes[order]).to_cframe();
-        let theirs_local = raw_local_frame(theirs_boundary, theirs_prefixes[order]).to_cframe();
-        let parent_order = ours_boundary
-            .parent
-            .and_then(|parent| nearest_frame[parent]);
-        if model_frames_close(&ours_local, &identity)
-            && model_frames_close(&theirs_local, &identity)
-        {
-            nearest_frame[order] = parent_order;
-            continue;
+
+        // Convert root-aligned effective frames back into the raw branch
+        // coordinates before the single canonicalization pass below.
+        for (index, boundary) in ours_detection.boundaries.iter_mut().enumerate() {
+            boundary.effective = ours_prefixes[index].mul(boundary.effective);
         }
-        let decision = if model_frames_close(&ours_local, &theirs_local) {
-            ModelFrameDecision::Automatic(ours_local)
-        } else if model_frames_close(&ours_local, &identity) {
-            ModelFrameDecision::Automatic(theirs_local)
-        } else if model_frames_close(&theirs_local, &identity) {
-            ModelFrameDecision::Automatic(ours_local)
-        } else {
-            ModelFrameDecision::Conflict
+        for (index, boundary) in theirs_detection.boundaries.iter_mut().enumerate() {
+            boundary.effective = theirs_prefixes[index].mul(boundary.effective);
+        }
+
+        let merge = ModelFrameMerge {
+            frames,
+            ours_detected: ours_detection
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.candidate.is_some())
+                .count(),
+            theirs_detected: theirs_detection
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.candidate.is_some())
+                .count(),
+            ours_identity,
+            theirs_identity,
         };
-        frames.push(ModelFrame {
-            target_ref: ours_boundary.base_ref,
-            ours_ref: ours_boundary.side_ref,
-            theirs_ref: theirs_boundary.side_ref,
-            path: get_instance_path(base, ours_boundary.base_ref),
-            order,
-            parent_order,
-            ours: ours_local,
-            theirs: theirs_local,
-            decision,
-        });
-        nearest_frame[order] = Some(order);
-    }
+        Some((merge, ours_detection, theirs_detection))
+    })();
 
-    if frames.is_empty() {
-        return None;
-    }
-
-    // Return to the raw branches and canonicalize each property once with its
-    // combined raw absolute frame. The root-aligned copies above existed only
-    // to establish stable identity and nested evidence.
-    for (index, boundary) in ours_detection.boundaries.iter_mut().enumerate() {
-        boundary.effective = ours_prefixes[index].mul(boundary.effective);
-    }
-    for (index, boundary) in theirs_detection.boundaries.iter_mut().enumerate() {
-        boundary.effective = theirs_prefixes[index].mul(boundary.effective);
-    }
-    restore_world_properties(ours, ours_raw);
-    restore_world_properties(theirs, theirs_raw);
+    // Root alignment is temporary identity-discovery state. Restore both
+    // branches on every path before either returning or applying the final
+    // canonicalization.
+    restore_root_alignment(ours, ours_raw);
+    restore_root_alignment(theirs, theirs_raw);
+    let (merge, ours_detection, theirs_detection) = prepared?;
     canonicalize_side(ours, &ours_detection);
     canonicalize_side(theirs, &theirs_detection);
-    Some(ModelFrameMerge {
-        frames,
-        ours_detected: ours_detection
-            .boundaries
-            .iter()
-            .filter(|boundary| boundary.candidate.is_some())
-            .count(),
-        theirs_detected: theirs_detection
-            .boundaries
-            .iter()
-            .filter(|boundary| boundary.candidate.is_some())
-            .count(),
-        ours_identity,
-        theirs_identity,
-    })
+    Some(merge)
 }
 
 /// Express `side` in the serialized root frame of `base`.

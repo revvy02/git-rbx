@@ -188,6 +188,19 @@ fn normalization_removes_global_cframe_conflicts_but_keeps_pivot_edits() {
 }
 
 #[test]
+fn frame_free_merge_preparation_does_not_rewrite_either_branch() {
+    let base = asset(0.0, 0.0, 0.0, None, false);
+    let mut ours = asset(0.0, 0.0, 0.0, Some("ours"), false);
+    let mut theirs = asset(0.0, 0.0, 0.0, Some("theirs"), false);
+    let ours_before = asset(0.0, 0.0, 0.0, Some("ours"), false);
+    let theirs_before = asset(0.0, 0.0, 0.0, Some("theirs"), false);
+
+    assert!(normalize_model_merge_frames(&base, &mut ours, &mut theirs).is_none());
+    assert!(diff_doms(&ours_before, &ours).is_empty());
+    assert!(diff_doms(&theirs_before, &theirs).is_empty());
+}
+
+#[test]
 fn nested_model_move_becomes_its_own_local_frame() {
     let mut base = nested_majority_asset(0.0);
     let mut ours = nested_majority_asset(100.0);
