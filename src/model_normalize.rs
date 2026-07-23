@@ -259,10 +259,18 @@ fn select_candidate(
         .get(1)
         .is_some_and(|runner_up| runner_up.units == best.units);
     // Content alone wins only with an unambiguous strict majority and at
-    // least two independent units. A pivot is not a second content unit.
+    // least two independent units. A pivot is not a second content unit —
+    // but when it corroborates the winner, its delta IS the emitted value:
+    // pivot endpoints are two authored stored values, so their delta carries
+    // none of the part-average's per-part f32 quantization noise (an exact
+    // 1-stud pivot move reports as exactly 1, not 0.9998).
     if !tied && best.units >= MIN_CONTENT_SUPPORT && best.units * 2 > total_units {
+        let delta = match pivot_delta {
+            Some(pivot) if Rigid::close(&best.comparison_delta, &pivot) => pivot,
+            _ => best.consensus_delta,
+        };
         return Some(Candidate {
-            delta: best.consensus_delta,
+            delta,
             supporting_parts: best.supporting_parts,
         });
     }
@@ -280,8 +288,11 @@ fn select_candidate(
     if corroborated.next().is_some() {
         return None;
     }
+    // This path is pivot-corroborated by construction; emit the authored
+    // pivot delta rather than the noisier part average (same reasoning as
+    // the majority path above).
     Some(Candidate {
-        delta: selected.consensus_delta,
+        delta: pivot,
         supporting_parts: selected.supporting_parts,
     })
 }
