@@ -25,6 +25,7 @@ use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::Matcher;
 use crate::move_detect::detect_moves;
 use crate::placement::{apply_pivot_ops, PivotOp};
+use crate::reference_value::{direct_reference, with_direct_reference_target};
 
 /// Where a parent lives when an op needs one: an instance that exists in the
 /// old DOM, or one that an AddSubtree op creates (addressed by its new-DOM ref).
@@ -560,19 +561,19 @@ fn apply_ops_where(
         let Some(inst) = target.get_by_ref(target_ref) else {
             continue;
         };
-        let ref_props: Vec<(String, Ref)> = inst
+        let ref_props: Vec<(String, Variant)> = inst
             .properties
             .iter()
-            .filter_map(|(name, value)| match value {
-                Variant::Ref(r) if !r.is_none() => Some((name.to_string(), *r)),
-                _ => None,
+            .filter_map(|(name, value)| {
+                direct_reference(value)
+                    .filter(|(_, target)| !target.is_none())
+                    .map(|_| (name.to_string(), value.clone()))
             })
             .collect();
-        for (name, new_target_ref) in ref_props {
-            let remapped = remap_ref(new_target_ref, &identity.reverse_matched, &created);
+        for (name, value) in ref_props {
+            let remapped = remap_ref_value(value, &identity.reverse_matched, &created);
             if let Some(inst) = target.get_by_ref_mut(target_ref) {
-                inst.properties
-                    .insert(name.as_str().into(), Variant::Ref(remapped));
+                inst.properties.insert(name.as_str().into(), remapped);
             }
         }
     }
@@ -600,10 +601,12 @@ fn remap_ref_value(
     reverse: &HashMap<Ref, Ref>,
     created: &HashMap<Ref, Ref>,
 ) -> Variant {
-    match value {
-        Variant::Ref(r) if !r.is_none() => Variant::Ref(remap_ref(r, reverse, created)),
-        other => other,
+    if let Some((_, target)) = direct_reference(&value) {
+        if !target.is_none() {
+            return with_direct_reference_target(value, remap_ref(target, reverse, created));
+        }
     }
+    value
 }
 
 /// Recursively clone a new-DOM subtree into an InstanceBuilder (full fidelity —

@@ -181,8 +181,10 @@ pub(crate) fn non_ref_variants_equal(a: &Variant, b: &Variant) -> bool {
                 (ContentType::Uri(ua), ContentType::Uri(ub)) => {
                     normalize_asset_uri(ua) == normalize_asset_uri(ub)
                 }
-                // Object refs into the DOM are covered by instance identity.
-                (ContentType::Object(_), ContentType::Object(_)) => true,
+                // Identity-aware callers intercept object references. Keep a
+                // strict fallback so accidentally treating them as ordinary
+                // content cannot hide a retarget.
+                (ContentType::Object(ra), ContentType::Object(rb)) => ra == rb,
                 _ => false,
             }
         }

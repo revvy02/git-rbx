@@ -15,6 +15,8 @@ mod move_detect;
 pub mod output;
 mod placement;
 mod property_semantics;
+mod reference_graph;
+mod reference_value;
 mod rigid_groups;
 mod semantic_verify;
 mod value_compare;

@@ -14,6 +14,7 @@ use tracing::info;
 
 use crate::diff_dom::{DomView, InstanceView};
 use crate::property_semantics::normalize_asset_uri;
+use crate::reference_value::direct_reference;
 
 macro_rules! n_hash {
     ($hash:ident, $($num:expr),*) => {
@@ -171,12 +172,12 @@ fn hash_instance(
 
     let mut hash_property = |name: &str, value: &Variant| {
         if ignore_properties.is_some_and(|ignored| ignored.contains(name))
-            || (!policy.include_refs && matches!(value, Variant::Ref(_)))
+            || (!policy.include_refs && direct_reference(value).is_some())
         {
             return;
         }
         hasher.update(name.as_bytes());
-        hash_variant(dom, &mut hasher, value);
+        hash_variant_with_policy(dom, &mut hasher, value, policy.include_refs);
     };
 
     if matches!(inst, InstanceView::Compact(_)) {
@@ -300,6 +301,10 @@ impl<'a> DeepHashCache<'a> {
         self.get_instance_with_policy(instance, FULL_HASH)
     }
 
+    pub(crate) fn get_instance_no_refs(&self, instance: InstanceView<'_>) -> Hash {
+        self.get_instance_with_policy(instance, NO_REFS_HASH)
+    }
+
     pub(crate) fn get_instance_without_name(&self, instance: InstanceView<'_>) -> Hash {
         self.compute(
             instance,
@@ -342,15 +347,25 @@ impl<'a> DeepHashCache<'a> {
     fn compute(&self, inst: InstanceView<'_>, policy: HashPolicy) -> Hash {
         let mut hasher = hash_instance(self.dom, inst, Some(self.ignore_properties), policy);
 
-        for child_ref in inst.children() {
-            let child = self.dom.get_by_ref(child_ref).unwrap();
-            let child_hash = self.get_instance_with_policy(
-                child,
-                HashPolicy {
-                    include_name: true,
-                    include_refs: policy.include_refs,
-                },
-            );
+        // Roblox sibling order is not part of an Instance's identity, and the
+        // diff has no reorder operation. Canonicalizing child hashes lets an
+        // unchanged subtree survive serialization order changes and provides
+        // exact evidence for pairing otherwise-identical sibling roots.
+        let mut child_hashes: Vec<_> = inst
+            .children()
+            .map(|child_ref| {
+                let child = self.dom.get_by_ref(child_ref).unwrap();
+                self.get_instance_with_policy(
+                    child,
+                    HashPolicy {
+                        include_name: true,
+                        include_refs: policy.include_refs,
+                    },
+                )
+            })
+            .collect();
+        child_hashes.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for child_hash in child_hashes {
             hasher.update(child_hash.as_bytes());
         }
 
@@ -361,13 +376,25 @@ impl<'a> DeepHashCache<'a> {
 /// Hash a variant value.
 /// For Ref properties, uses name+class of the target as a stable identifier.
 pub(crate) fn hash_variant(dom: &dyn DomView, hasher: &mut Hasher, value: &Variant) {
+    hash_variant_with_policy(dom, hasher, value, true);
+}
+
+fn hash_variant_with_policy(
+    dom: &dyn DomView,
+    hasher: &mut Hasher,
+    value: &Variant,
+    include_refs: bool,
+) {
     match value {
         Variant::Attributes(attrs) => {
             let mut sorted: Vec<_> = attrs.iter().collect();
             sorted.sort_unstable_by_key(|(name, _)| name.as_str());
             for (name, attribute) in sorted {
+                if !include_refs && direct_reference(attribute).is_some() {
+                    continue;
+                }
                 hasher.update(name.as_bytes());
-                hash_variant(dom, hasher, attribute);
+                hash_variant_with_policy(dom, hasher, attribute, include_refs);
             }
         }
         Variant::Axes(a) => {
@@ -417,9 +444,9 @@ pub(crate) fn hash_variant(dom: &dyn DomView, hasher: &mut Hasher, value: &Varia
                     hasher.update(&[0x01]);
                     hasher.update(normalize_asset_uri(uri).as_bytes());
                 }
-                // Object refs point at DOM instances; skip like Variant::Ref
-                ContentType::Object(_) => {
+                ContentType::Object(target) => {
                     hasher.update(&[0x02]);
+                    hash_ref(dom, hasher, *target);
                 }
                 _ => {
                     hasher.update(&[0x03]);
@@ -499,24 +526,7 @@ pub(crate) fn hash_variant(dom: &dyn DomView, hasher: &mut Hasher, value: &Varia
             f32_hash(hasher, rect.min.y);
         }
         Variant::Ref(target_ref) => {
-            if target_ref.is_none() {
-                hasher.update(&[0x00]); // null ref
-            } else if let Some(target) = dom.get_by_ref(*target_ref) {
-                // Identify the target by name+class AND its index path from the
-                // root: name+class alone makes a retarget to a same-named
-                // sibling invisible (deep hashes stay equal, pruning hides the
-                // change). Index paths shift when siblings are inserted, but a
-                // spuriously changed hash only costs pruning/matching work —
-                // the property pass still decides equality via the ref mapping.
-                hasher.update(&[0x01]);
-                hasher.update(target.name().as_bytes());
-                hasher.update(target.class().as_bytes());
-                for index in ref_index_path(dom, *target_ref) {
-                    n_hash!(hasher, index);
-                }
-            } else {
-                hasher.update(&[0x00]); // invalid ref = null
-            }
+            hash_ref(dom, hasher, *target_ref);
         }
         Variant::Region3(region) => {
             vector_hash(hasher, region.max);
@@ -574,5 +584,24 @@ pub(crate) fn hash_variant(dom: &dyn DomView, hasher: &mut Hasher, value: &Varia
         }
         Variant::UniqueId(_) => {} // Skip - non-deterministic
         _ => {}                    // Skip unknown variants
+    }
+}
+
+fn hash_ref(dom: &dyn DomView, hasher: &mut Hasher, target_ref: Ref) {
+    if target_ref.is_none() {
+        hasher.update(&[0x00]);
+    } else if let Some(target) = dom.get_by_ref(target_ref) {
+        // Identify the target by name+class AND its index path from the root:
+        // name+class alone makes a retarget to a same-named sibling invisible.
+        // A shifted path only costs pruning work; identity-aware equality still
+        // makes the final semantic decision.
+        hasher.update(&[0x01]);
+        hasher.update(target.name().as_bytes());
+        hasher.update(target.class().as_bytes());
+        for index in ref_index_path(dom, target_ref) {
+            n_hash!(hasher, index);
+        }
+    } else {
+        hasher.update(&[0x00]);
     }
 }

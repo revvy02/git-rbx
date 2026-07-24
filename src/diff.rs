@@ -12,6 +12,7 @@ use crate::match_instances::{
     get_instance_path, get_instance_path_segments, join_instance_path,
 };
 use crate::property_semantics::get_authored_properties;
+use crate::reference_value::direct_reference;
 use crate::value_compare::non_ref_variants_equal;
 use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::{CFrame, ContentType, Variant};
@@ -807,11 +808,13 @@ fn variants_equal(
     b: &Variant,
     ref_mapping: &HashMap<Ref, Ref>,
 ) -> bool {
-    match (a, b) {
-        (Variant::Ref(old_target), Variant::Ref(new_target)) => {
-            refs_equal(old_dom, new_dom, *old_target, *new_target, ref_mapping)
+    match (direct_reference(a), direct_reference(b)) {
+        (Some((old_kind, old_target)), Some((new_kind, new_target))) => {
+            old_kind == new_kind
+                && refs_equal(old_dom, new_dom, old_target, new_target, ref_mapping)
         }
-        _ => non_ref_variants_equal(a, b),
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => non_ref_variants_equal(a, b),
     }
 }
 
@@ -876,8 +879,9 @@ pub(crate) fn variant_to_property_value(v: &Variant) -> PropertyValue {
             ContentType::Uri(uri) => PropertyValue::String {
                 value: uri.to_string(),
             },
-            ContentType::Object(_) => PropertyValue::Other {
-                type_name: "ContentObject".to_string(),
+            ContentType::Object(target) if target.is_none() => PropertyValue::Nil,
+            ContentType::Object(target) => PropertyValue::Ref {
+                value: format!("{}", target),
             },
             _ => PropertyValue::Other {
                 type_name: "Content".to_string(),

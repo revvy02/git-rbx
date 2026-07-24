@@ -228,6 +228,37 @@ fn round_trip_ref_into_added_subtree() {
 }
 
 #[test]
+fn round_trip_content_object_retarget() {
+    // Content::Object is another serialized DOM reference. It must use the
+    // same identity comparison and materialization path as Variant::Ref.
+    let old = WeakDom::new(folder("root").with_child({
+        let first = part("Target").with_property("Transparency", Variant::Float32(0.1));
+        let second = part("Target").with_property("Transparency", Variant::Float32(0.2));
+        let first_ref = first.referent();
+        folder("Owner")
+            .with_property(
+                "ObjectContent",
+                Variant::Content(Content::from_referent(first_ref)),
+            )
+            .with_child(first)
+            .with_child(second)
+    }));
+    let new = WeakDom::new(folder("root").with_child({
+        let first = part("Target").with_property("Transparency", Variant::Float32(0.1));
+        let second = part("Target").with_property("Transparency", Variant::Float32(0.2));
+        let second_ref = second.referent();
+        folder("Owner")
+            .with_property(
+                "ObjectContent",
+                Variant::Content(Content::from_referent(second_ref)),
+            )
+            .with_child(first)
+            .with_child(second)
+    }));
+    assert_round_trip(old, new);
+}
+
+#[test]
 fn mesh_id_changes_are_authored_property_changes() {
     let mut old = WeakDom::new(folder("root").with_child(mesh_part("rbxassetid://1", 0.0)));
     let new = WeakDom::new(folder("root").with_child(mesh_part("rbxassetid://2", 0.0)));

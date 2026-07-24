@@ -908,11 +908,23 @@ fn values_equal(
 ) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(Variant::Ref(ra)), Some(Variant::Ref(rb))) => {
+        (Some(va), Some(vb))
+            if crate::reference_value::direct_reference(va).is_some()
+                || crate::reference_value::direct_reference(vb).is_some() =>
+        {
+            let (Some((kind_a, ra)), Some((kind_b, rb))) = (
+                crate::reference_value::direct_reference(va),
+                crate::reference_value::direct_reference(vb),
+            ) else {
+                return false;
+            };
+            if kind_a != kind_b {
+                return false;
+            }
             if ra.is_none() && rb.is_none() {
                 return true;
             }
-            match (ours_to_base.get(ra), theirs_to_base.get(rb)) {
+            match (ours_to_base.get(&ra), theirs_to_base.get(&rb)) {
                 (Some(ba), Some(bb)) => ba == bb,
                 _ => false,
             }

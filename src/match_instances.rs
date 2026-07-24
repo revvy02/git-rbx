@@ -17,26 +17,43 @@ use tracing::{debug, info};
 use crate::diff_dom::{DomView, InstanceView};
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::property_semantics::{pairing_compatible, strong_content_key, PairingBasis};
+use crate::reference_graph::ReferenceGraphMatcher;
+use crate::reference_value::direct_reference;
 use crate::value_compare::non_ref_variants_equal;
 
 const MAX_TOLERANT_PAIRWISE: usize = 100_000;
+const MAX_EXACT_SUBTREE_NODES: usize = 256;
+
+fn subtree_within_limit(dom: &dyn DomView, root: Ref, limit: usize) -> bool {
+    let mut pending = vec![root];
+    let mut visited = 0usize;
+    while let Some(referent) = pending.pop() {
+        visited += 1;
+        if visited > limit {
+            return false;
+        }
+        let Some(instance) = dom.get_by_ref(referent) else {
+            continue;
+        };
+        pending.extend(instance.children());
+    }
+    true
+}
 
 fn tolerant_non_ref_properties_equal(old: InstanceView<'_>, new: InstanceView<'_>) -> bool {
     for (name, old_value) in old.authored_properties() {
-        if matches!(old_value, rbx_types::Variant::Ref(_)) {
+        if direct_reference(old_value).is_some() {
             continue;
         }
         let Some(new_value) = new.property(name) else {
             return false;
         };
-        if matches!(new_value, rbx_types::Variant::Ref(_))
-            || !non_ref_variants_equal(old_value, new_value)
-        {
+        if direct_reference(new_value).is_some() || !non_ref_variants_equal(old_value, new_value) {
             return false;
         }
     }
     for (name, new_value) in new.authored_properties() {
-        if matches!(new_value, rbx_types::Variant::Ref(_)) {
+        if direct_reference(new_value).is_some() {
             continue;
         }
         if old.property(name).is_none() {
@@ -65,6 +82,7 @@ pub(crate) struct Matcher<'a> {
     new_hashes: &'a LazyHashCache<'a>,
     old_deep: &'a DeepHashCache<'a>,
     new_deep: &'a DeepHashCache<'a>,
+    reference_graph: ReferenceGraphMatcher<'a>,
 }
 
 impl<'a> Matcher<'a> {
@@ -83,6 +101,7 @@ impl<'a> Matcher<'a> {
             new_hashes,
             old_deep,
             new_deep,
+            reference_graph: ReferenceGraphMatcher::new(old_dom, new_dom, old_hashes, new_hashes),
         }
     }
 
@@ -234,67 +253,216 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
 
         let mut pass1_count = 0usize;
         let mut pass2_count = 0usize;
+        let mut subtree_count = 0usize;
+        let mut residual_singleton_count = 0usize;
+        let mut graph_count = 0usize;
         let mut identity_count = 0usize;
         let mut tolerant_count = 0usize;
         let mut positional_count = 0usize;
 
-        // Pass 1: Full hash match (all properties including Refs)
-        let mut remaining_new: Vec<usize> = Vec::new();
+        // Pass 0: exact, order-independent subtree content without references.
+        // This handles ordinary serialization-order churn (for example the
+        // duplicate Reflective trees in the RC places) without pulling every
+        // instance into the more specialized reference graph.
+        let mut old_by_subtree = HashMap::new();
+        for &old_idx in &old_candidates {
+            if !subtree_within_limit(
+                old_dom,
+                old_children[old_idx].referent,
+                MAX_EXACT_SUBTREE_NODES,
+            ) {
+                continue;
+            }
+            old_by_subtree
+                .entry(
+                    *old_deep
+                        .get_instance_no_refs(old_children[old_idx].instance)
+                        .as_bytes(),
+                )
+                .or_insert_with(Vec::new)
+                .push(old_idx);
+        }
+        let mut new_by_subtree = HashMap::new();
         for &new_idx in new_indices {
+            if !subtree_within_limit(
+                new_dom,
+                new_children[new_idx].referent,
+                MAX_EXACT_SUBTREE_NODES,
+            ) {
+                continue;
+            }
+            new_by_subtree
+                .entry(
+                    *new_deep
+                        .get_instance_no_refs(new_children[new_idx].instance)
+                        .as_bytes(),
+                )
+                .or_insert_with(Vec::new)
+                .push(new_idx);
+        }
+        for (hash, old_indices) in &old_by_subtree {
+            let Some(new_indices) = new_by_subtree.get(hash) else {
+                continue;
+            };
+            if old_indices.len() != 1 || new_indices.len() != 1 {
+                continue;
+            }
+            let old_idx = old_indices[0];
+            let new_idx = new_indices[0];
+            if !pairing_compatible(
+                &old_children[old_idx].instance,
+                &new_children[new_idx].instance,
+                PairingBasis::ExactContent,
+            ) {
+                continue;
+            }
+            old_matched[old_idx] = true;
+            new_matched[new_idx] = true;
+            matched.push((
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+            ));
+            subtree_count += 1;
+        }
+
+        // Once every other candidate in a name/class group is accounted for,
+        // the sole remaining pair is unambiguous without further hashing or
+        // graph construction.
+        let old_remaining: Vec<_> = old_candidates
+            .iter()
+            .copied()
+            .filter(|&old_idx| !old_matched[old_idx])
+            .collect();
+        let new_remaining: Vec<_> = new_indices
+            .iter()
+            .copied()
+            .filter(|&new_idx| !new_matched[new_idx])
+            .collect();
+        if let ([old_idx], [new_idx]) = (old_remaining.as_slice(), new_remaining.as_slice()) {
+            if pairing_compatible(
+                &old_children[*old_idx].instance,
+                &new_children[*new_idx].instance,
+                PairingBasis::AnchoredName,
+            ) {
+                old_matched[*old_idx] = true;
+                new_matched[*new_idx] = true;
+                matched.push((
+                    old_children[*old_idx].referent,
+                    new_children[*new_idx].referent,
+                ));
+                residual_singleton_count += 1;
+            }
+        }
+
+        // Pass 1: exact containment + labeled reference-graph color. Unlike
+        // property or subtree hashes, this can distinguish structures whose
+        // only meaningful difference is Ref topology. Commit only
+        // mutual-unique colors; symmetric peers remain for deterministic
+        // fallbacks.
+        let old_graph_roots: Vec<_> = old_candidates
+            .iter()
+            .copied()
+            .filter(|&old_idx| !old_matched[old_idx])
+            .map(|old_idx| old_children[old_idx].referent)
+            .collect();
+        let new_graph_roots: Vec<_> = new_indices
+            .iter()
+            .copied()
+            .filter(|&new_idx| !new_matched[new_idx])
+            .map(|new_idx| new_children[new_idx].referent)
+            .collect();
+        for (old_ref, new_ref) in matcher
+            .reference_graph
+            .unique_matches(&old_graph_roots, &new_graph_roots)
+        {
+            let Some(old_idx) = old_candidates
+                .iter()
+                .copied()
+                .find(|&old_idx| old_children[old_idx].referent == old_ref)
+            else {
+                continue;
+            };
+            let Some(new_idx) = new_indices
+                .iter()
+                .copied()
+                .find(|&new_idx| new_children[new_idx].referent == new_ref)
+            else {
+                continue;
+            };
+            if !pairing_compatible(
+                &old_children[old_idx].instance,
+                &new_children[new_idx].instance,
+                PairingBasis::ExactContent,
+            ) {
+                continue;
+            }
+            old_matched[old_idx] = true;
+            new_matched[new_idx] = true;
+            matched.push((
+                old_children[old_idx].referent,
+                new_children[new_idx].referent,
+            ));
+            graph_count += 1;
+        }
+
+        // Pass 2: Full hash match (all properties including Refs).
+        let mut remaining_new = Vec::new();
+        let graph_remaining: Vec<_> = new_indices
+            .iter()
+            .copied()
+            .filter(|&new_idx| !new_matched[new_idx])
+            .collect();
+        for new_idx in graph_remaining {
             let new_hash = new_hashes.get_instance(new_children[new_idx].instance);
-            let new_hash_bytes = *new_hash.as_bytes();
-
-            let exact = old_candidates.iter().find(|&&oi| {
-                !old_matched[oi] && {
-                    let old_hash = old_hashes.get_instance(old_children[oi].instance);
-                    *old_hash.as_bytes() == new_hash_bytes
-                        && pairing_compatible(
-                            &old_children[oi].instance,
-                            &new_children[new_idx].instance,
-                            PairingBasis::ExactContent,
-                        )
-                }
+            let exact = old_candidates.iter().find(|&&old_idx| {
+                !old_matched[old_idx]
+                    && old_hashes.get_instance(old_children[old_idx].instance) == new_hash
+                    && pairing_compatible(
+                        &old_children[old_idx].instance,
+                        &new_children[new_idx].instance,
+                        PairingBasis::ExactContent,
+                    )
             });
-
-            if let Some(&oi) = exact {
-                old_matched[oi] = true;
+            if let Some(&old_idx) = exact {
+                old_matched[old_idx] = true;
                 new_matched[new_idx] = true;
-                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                matched.push((
+                    old_children[old_idx].referent,
+                    new_children[new_idx].referent,
+                ));
                 pass1_count += 1;
             } else {
                 remaining_new.push(new_idx);
             }
         }
 
-        // Pass 2: No-refs hash match (stable when only Ref properties changed)
-        let mut still_remaining: Vec<usize> = Vec::new();
+        // Pass 3: No-refs hash match (stable when only references changed).
+        let mut still_remaining = Vec::new();
         for new_idx in remaining_new {
-            let new_hash_nr = new_hashes.get_instance_no_refs(new_children[new_idx].instance);
-            let new_hash_nr_bytes = *new_hash_nr.as_bytes();
-
-            let nr_match = old_candidates.iter().find(|&&oi| {
-                !old_matched[oi] && {
-                    let old_hash_nr = old_hashes.get_instance_no_refs(old_children[oi].instance);
-                    *old_hash_nr.as_bytes() == new_hash_nr_bytes
-                        && pairing_compatible(
-                            &old_children[oi].instance,
-                            &new_children[new_idx].instance,
-                            PairingBasis::ExactContent,
-                        )
-                }
+            let new_hash = new_hashes.get_instance_no_refs(new_children[new_idx].instance);
+            let exact = old_candidates.iter().find(|&&old_idx| {
+                !old_matched[old_idx]
+                    && old_hashes.get_instance_no_refs(old_children[old_idx].instance) == new_hash
+                    && pairing_compatible(
+                        &old_children[old_idx].instance,
+                        &new_children[new_idx].instance,
+                        PairingBasis::ExactContent,
+                    )
             });
-
-            if let Some(&oi) = nr_match {
-                old_matched[oi] = true;
+            if let Some(&old_idx) = exact {
+                old_matched[old_idx] = true;
                 new_matched[new_idx] = true;
-                matched.push((old_children[oi].referent, new_children[new_idx].referent));
+                matched.push((
+                    old_children[old_idx].referent,
+                    new_children[new_idx].referent,
+                ));
                 pass2_count += 1;
             } else {
                 still_remaining.push(new_idx);
             }
         }
 
-        // Pass 3: placement-independent authored identity. A reordered set of
+        // Pass 4: placement-independent authored identity. A reordered set of
         // same-named MeshParts may move every CFrame while retaining MeshContent;
         // matching those siblings by position would detach geometry from its
         // intended transform.
@@ -358,7 +526,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         }
         still_remaining.retain(|&new_idx| !new_matched[new_idx]);
 
-        // Pass 4: Tolerance-aware content matching. Exact hashes intentionally
+        // Pass 5: Tolerance-aware content matching. Exact hashes intentionally
         // retain every finite bit, but pivot normalization can introduce
         // harmless float noise. Resolve only mutual-unique pairs here; truly
         // identical twins remain for the positional fallback.
@@ -412,7 +580,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
         }
 
-        // Pass 5: positional fallback. Strongly identified instances may only
+        // Pass 6: positional fallback. Strongly identified instances may only
         // pair with the same identity. MeshParts with different content IDs
         // must not be arbitrarily paired just because they share a sibling
         // position. Instances without a stable key retain the legacy behavior.
@@ -439,7 +607,14 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             }
         }
 
-        if pass2_count > 0 || identity_count > 0 || tolerant_count > 0 || positional_count > 0 {
+        if subtree_count > 0
+            || residual_singleton_count > 0
+            || graph_count > 0
+            || pass2_count > 0
+            || identity_count > 0
+            || tolerant_count > 0
+            || positional_count > 0
+        {
             let parent_name = old_dom
                 .get_by_ref(old_parent)
                 .map(|i| i.name())
@@ -448,11 +623,14 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 parent = parent_name,
                 name = *name,
                 total = new_indices.len(),
-                pass1_full_hash = pass1_count,
-                pass2_no_refs = pass2_count,
-                pass3_identity = identity_count,
-                pass4_tolerant = tolerant_count,
-                pass5_positional = positional_count,
+                pass0_subtree = subtree_count,
+                pass0_residual_singleton = residual_singleton_count,
+                pass1_reference_graph = graph_count,
+                pass2_full_hash = pass1_count,
+                pass3_no_refs = pass2_count,
+                pass4_identity = identity_count,
+                pass5_tolerant = tolerant_count,
+                pass6_positional = positional_count,
                 "multi-pass tiebreak"
             );
         }

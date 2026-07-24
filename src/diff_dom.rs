@@ -26,6 +26,7 @@ use std::slice;
 use std::sync::Arc;
 
 use crate::property_semantics::get_authored_properties;
+use crate::reference_value::reference_count;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct NodeId(u32);
@@ -85,12 +86,23 @@ struct Node {
     class: Ustr,
     children: Range<u32>,
     properties: Range<u32>,
+    direct_reference_count: u32,
 }
 
 struct Property {
     name: Ustr,
     value: Variant,
     authored: bool,
+}
+
+fn direct_reference_count(properties: &[Property]) -> u32 {
+    properties
+        .iter()
+        .filter(|property| property.authored)
+        .map(|property| reference_count(&property.value))
+        .sum::<usize>()
+        .try_into()
+        .expect("one instance exceeded u32::MAX reference properties")
 }
 
 type AuthoredPropertyCache = HashMap<Ustr, &'static HashSet<String>>;
@@ -111,6 +123,20 @@ pub struct DiffDom {
     properties: Vec<Property>,
     strings: StringTable,
     by_source_ref: HashMap<Ref, NodeId>,
+    subtree_reference_counts: Vec<u32>,
+}
+
+fn build_subtree_reference_counts(nodes: &[Node]) -> Vec<u32> {
+    let mut counts: Vec<_> = nodes
+        .iter()
+        .map(|node| node.direct_reference_count)
+        .collect();
+    for index in (0..nodes.len()).rev() {
+        if let Some(parent) = nodes[index].parent {
+            counts[parent.index()] = counts[parent.index()].saturating_add(counts[index]);
+        }
+    }
+    counts
 }
 
 struct BinaryInstance {
@@ -179,6 +205,7 @@ impl DiffDomDecodeTarget {
                 class: "DataModel".into(),
                 children: 0..0,
                 properties: 0..0,
+                direct_reference_count: 0,
             }],
             children: Vec::new(),
             properties: Vec::new(),
@@ -253,6 +280,9 @@ impl rbx_binary::DecodeTarget for DiffDomDecodeTarget {
         }
         let properties_end =
             u32::try_from(self.properties.len()).expect("DiffDom property arena exceeded u32::MAX");
+        let direct_reference_count = direct_reference_count(
+            &self.properties[properties_start as usize..properties_end as usize],
+        );
 
         if let Some(property) = self.properties[properties_start as usize..properties_end as usize]
             .iter_mut()
@@ -275,6 +305,7 @@ impl rbx_binary::DecodeTarget for DiffDomDecodeTarget {
             class: instance.class,
             children: 0..0,
             properties: properties_start..properties_end,
+            direct_reference_count,
         });
         let replaced = self.by_source_ref.insert(instance.source_ref, id);
         assert!(replaced.is_none(), "binary decoder emitted a duplicate Ref");
@@ -282,12 +313,14 @@ impl rbx_binary::DecodeTarget for DiffDomDecodeTarget {
 
     fn finish(mut self) -> Self::Output {
         self.strings.finish();
+        let subtree_reference_counts = build_subtree_reference_counts(&self.nodes);
         DiffDom {
             nodes: self.nodes,
             children: self.children,
             properties: self.properties,
             strings: self.strings,
             by_source_ref: self.by_source_ref,
+            subtree_reference_counts,
         }
     }
 }
@@ -362,6 +395,9 @@ impl DiffDom {
             }
             let properties_end =
                 u32::try_from(properties.len()).expect("DiffDom property arena exceeded u32::MAX");
+            let direct_reference_count = direct_reference_count(
+                &properties[properties_start as usize..properties_end as usize],
+            );
 
             nodes.push(Node {
                 source_ref,
@@ -370,16 +406,18 @@ impl DiffDom {
                 class: instance.class,
                 children: children_start..children_end,
                 properties: properties_start..properties_end,
+                direct_reference_count,
             });
         }
         strings.finish();
-
+        let subtree_reference_counts = build_subtree_reference_counts(&nodes);
         Self {
             nodes,
             children,
             properties,
             strings,
             by_source_ref,
+            subtree_reference_counts,
         }
     }
 
@@ -450,6 +488,9 @@ impl DiffDom {
             }
             let properties_end =
                 u32::try_from(properties.len()).expect("DiffDom property arena exceeded u32::MAX");
+            let direct_reference_count = direct_reference_count(
+                &properties[properties_start as usize..properties_end as usize],
+            );
 
             nodes.push(Node {
                 source_ref,
@@ -458,16 +499,18 @@ impl DiffDom {
                 class,
                 children: children_start..children_end,
                 properties: properties_start..properties_end,
+                direct_reference_count,
             });
         }
         strings.finish();
-
+        let subtree_reference_counts = build_subtree_reference_counts(&nodes);
         Self {
             nodes,
             children,
             properties,
             strings,
             by_source_ref,
+            subtree_reference_counts,
         }
     }
 
@@ -803,6 +846,10 @@ pub(crate) trait DomView {
     fn dense_len(&self) -> Option<usize> {
         None
     }
+
+    fn subtree_reference_count(&self, _referent: Ref) -> Option<usize> {
+        None
+    }
 }
 
 /// Narrow mutation contract needed by pivot canonicalization.
@@ -855,6 +902,11 @@ impl DomView for DiffDom {
 
     fn dense_len(&self) -> Option<usize> {
         Some(self.len())
+    }
+
+    fn subtree_reference_count(&self, referent: Ref) -> Option<usize> {
+        let id = self.id_from_source_ref(referent)?;
+        Some(self.subtree_reference_counts[id.index()] as usize)
     }
 }
 

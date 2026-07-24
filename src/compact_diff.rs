@@ -12,6 +12,7 @@ use crate::diff::{
 use crate::diff_dom::{DiffDom, DiffNode, DomView, InstanceView, NodeId};
 use crate::edit_script::{Anchor, EditOp, InstanceIdentity, SemanticChangeSet};
 use crate::placement::PivotOp;
+use crate::reference_value::direct_reference;
 use crate::value_compare::non_ref_variants_equal;
 
 struct DenseIdentity {
@@ -94,19 +95,23 @@ fn frozen_variants_equal(
     new: &Variant,
     identity: &InstanceIdentity,
 ) -> bool {
-    match (old, new) {
-        (Variant::Ref(old_target), Variant::Ref(new_target)) => {
+    match (direct_reference(old), direct_reference(new)) {
+        (Some((old_kind, old_target)), Some((new_kind, new_target))) => {
+            if old_kind != new_kind {
+                return false;
+            }
             let old_exists =
-                !old_target.is_none() && old_dom.id_from_source_ref(*old_target).is_some();
+                !old_target.is_none() && old_dom.id_from_source_ref(old_target).is_some();
             let new_exists =
-                !new_target.is_none() && new_dom.id_from_source_ref(*new_target).is_some();
+                !new_target.is_none() && new_dom.id_from_source_ref(new_target).is_some();
             match (old_exists, new_exists) {
                 (false, false) => true,
                 (true, false) | (false, true) => false,
-                (true, true) => identity.matched.get(old_target) == Some(new_target),
+                (true, true) => identity.matched.get(&old_target) == Some(&new_target),
             }
         }
-        _ => non_ref_variants_equal(old, new),
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => non_ref_variants_equal(old, new),
     }
 }
 
