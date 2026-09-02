@@ -3,12 +3,12 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::time::Instant;
 use tracing::info_span;
 use tracing_subscriber::{fmt, EnvFilter};
+
+mod git_lfs;
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
@@ -292,14 +292,14 @@ fn cmd_diff(
     let load_start = Instant::now();
     let old_dom = {
         let _span = info_span!("load_old_file", file = %old_file).entered();
-        load_diff_file(old_file, resolve_format(old_file, None)?)?
+        load_diff_file(old_file, None)?.0
     };
     let old_load_time = load_start.elapsed();
 
     let load_start = Instant::now();
     let mut new_dom = {
         let _span = info_span!("load_new_file", file = %new_file).entered();
-        load_diff_file(new_file, resolve_format(new_file, None)?)?
+        load_diff_file(new_file, None)?.0
     };
     let new_load_time = load_start.elapsed();
 
@@ -385,7 +385,7 @@ fn cmd_git_diff(summary_only: bool, args: &[String]) -> Result<()> {
                 InstanceBuilder::new("DataModel"),
             )));
         }
-        load_diff_file(file, resolve_format(file, Some(path))?)
+        Ok(load_diff_file(file, Some(path))?.0)
     };
     let old_dom = load_side(old_file)?;
     let mut new_dom = load_side(new_file)?;
@@ -417,6 +417,9 @@ struct MergeSummary<'a> {
     /// The real repository path, when the caller supplied --path.
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
+    /// The inputs were Git LFS pointers; the result was written back as a
+    /// pointer (content stored in the local LFS object store).
+    lfs: bool,
     /// No conflict state was written; the file is ready to commit.
     clean: bool,
     stats: &'a MergeStats,
@@ -443,13 +446,15 @@ fn cmd_merge(
     real_path: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let base_format = resolve_format(base_path, real_path)?;
     eprintln!("Loading base {}...", base_path);
-    let mut base = load_file(base_path, base_format)?;
+    let (mut base, base_source) = load_file(base_path, real_path)?;
     eprintln!("Loading ours {}...", ours_path);
-    let mut ours = load_diff_file(ours_path, resolve_format(ours_path, real_path)?)?;
+    let (mut ours, ours_source) = load_diff_file(ours_path, real_path)?;
     eprintln!("Loading theirs {}...", theirs_path);
-    let mut theirs = load_diff_file(theirs_path, resolve_format(theirs_path, real_path)?)?;
+    let (mut theirs, _) = load_diff_file(theirs_path, real_path)?;
+    if ours_source.lfs_pointer {
+        eprintln!("Inputs are Git LFS pointers; the result will be stored through LFS");
+    }
 
     // Model vs place is a property of the real filename — git's temp copies
     // say nothing about it. Unknown falls back to place semantics (no model
@@ -555,8 +560,14 @@ fn cmd_merge(
     let out_format = real_path
         .and_then(format_from_extension)
         .or_else(|| format_from_extension(out_path))
-        .unwrap_or(base_format);
-    save_file(out_path, &base, out_format)?;
+        .unwrap_or(base_source.format);
+    // %A is what git stores as the result blob: if ours arrived as a pointer
+    // the file is LFS-tracked at this path, and the result must be too.
+    let out_source = Source {
+        format: out_format,
+        lfs_pointer: ours_source.lfs_pointer,
+    };
+    save_file(out_path, &base, out_source)?;
     eprintln!("Wrote merged result to {}", out_path);
     // Under git, %A is moved to the real path once the driver exits — that is
     // the file a resolver will find.
@@ -569,6 +580,7 @@ fn cmd_merge(
         let summary = MergeSummary {
             output: out_path,
             path: real_path,
+            lfs: out_source.lfs_pointer,
             clean: result.conflicts.is_empty(),
             stats: &result.stats,
             pivots: pivot_merge.as_ref().map(|pivots| PivotSummary {
@@ -659,8 +671,7 @@ fn cmd_resolve(
     all: bool,
     do_finalize: bool,
 ) -> Result<()> {
-    let format = resolve_format(file, None)?;
-    let mut dom = load_file(file, format)?;
+    let (mut dom, source) = load_file(file, None)?;
     let Some(container) = find_container(&dom) else {
         bail!("{file} has no conflict container — nothing to resolve");
     };
@@ -703,7 +714,7 @@ fn cmd_resolve(
             .find(|e| e.name == entry_name)
             .ok_or_else(|| anyhow::anyhow!("no conflict entry named {entry_name}"))?;
         mark_entry_custom(&mut dom, entry.entry_ref, &parsed)?;
-        save_file(file, &dom, format)?;
+        save_file(file, &dom, source)?;
         eprintln!("Marked {entry_name} as custom");
         return Ok(());
     }
@@ -726,7 +737,7 @@ fn cmd_resolve(
         for entry_ref in refs {
             mark_entry(&mut dom, entry_ref, side)?;
         }
-        save_file(file, &dom, format)?;
+        save_file(file, &dom, source)?;
         eprintln!("Marked {count} conflict(s) as '{side}'");
 
         let remaining = list_entries(&dom, container)
@@ -743,7 +754,7 @@ fn cmd_resolve(
 
     if do_finalize {
         let count = finalize(&mut dom)?;
-        save_file(file, &dom, format)?;
+        save_file(file, &dom, source)?;
         eprintln!("Applied {count} resolution(s); conflict state stripped from {file}");
         return Ok(());
     }
@@ -765,8 +776,7 @@ const RESOLVER_ENTRY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolv
 /// `--finalize`) when the user hits Complete — the file on disk is the only
 /// truth, so the verdict afterwards is simply whether conflict state remains.
 fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
-    let format = resolve_format(file, None)?;
-    let dom = load_file(file, format)?;
+    let (dom, _) = load_file(file, None)?;
     let Some(container) = find_container(&dom) else {
         bail!("{file} has no conflict container — nothing to resolve");
     };
@@ -818,7 +828,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
 
     // rodeo's exit code only says how the SESSION ended (completed, killed,
     // Studio closed mid-way); what the merge is at now is in the file.
-    if find_container(&load_file(file, format)?).is_none() {
+    if find_container(&load_file(file, None)?.0).is_none() {
         eprintln!("{file}: conflicts resolved, file is clean");
         Ok(())
     } else {
@@ -831,7 +841,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
 }
 
 fn cmd_check(file: &str, json: bool) -> Result<()> {
-    let dom = load_file(file, resolve_format(file, None)?)?;
+    let (dom, _) = load_file(file, None)?;
     let unresolved = find_container(&dom).map(|container| {
         list_entries(&dom, container)
             .iter()
@@ -1176,20 +1186,44 @@ enum FileFormat {
     Xml,
 }
 
-/// Decide a file's encoding. Preference order:
+/// How a file reached us and how to write it back the same way.
+#[derive(Debug, Clone, Copy)]
+struct Source {
+    format: FileFormat,
+    /// The file on disk was a Git LFS pointer (content resolved through
+    /// `git lfs smudge`); writes go back through `git lfs clean`.
+    lfs_pointer: bool,
+}
+
+/// Read a file's content. A Git LFS pointer is resolved first — before the
+/// extension is trusted, since a `.rbxl` in a skip-smudge checkout or a
+/// git temp copy is pointer text. The encoding then resolves from:
 /// 1. the extension of `hint` — the real repository path (git's %P);
 /// 2. the extension of `path` itself;
-/// 3. the file's leading bytes. Git merge drivers receive extensionless
-///    temp copies (`.merge_file_XXXXXX`), and the content is unambiguous:
-///    binary files open with the `<roblox!` magic, XML with `<roblox`.
-fn resolve_format(path: &str, hint: Option<&str>) -> Result<FileFormat> {
-    if let Some(format) = hint.and_then(format_from_extension) {
-        return Ok(format);
+/// 3. the leading bytes. Git merge drivers receive extensionless temp copies
+///    (`.merge_file_XXXXXX`), and the content is unambiguous: binary files
+///    open with the `<roblox!` magic, XML with `<roblox`.
+fn read_source(path: &str, hint: Option<&str>) -> Result<(Vec<u8>, Source)> {
+    let mut bytes = std::fs::read(path).with_context(|| format!("opening {path}"))?;
+    let lfs_pointer = git_lfs::is_pointer(&bytes);
+    if lfs_pointer {
+        bytes = git_lfs::smudge(&bytes, hint.unwrap_or(path))
+            .with_context(|| format!("{path} is a Git LFS pointer; resolving its content"))?;
     }
-    if let Some(format) = format_from_extension(path) {
-        return Ok(format);
-    }
-    sniff_format(path)
+    let format = match hint
+        .and_then(format_from_extension)
+        .or_else(|| format_from_extension(path))
+    {
+        Some(format) => format,
+        None => sniff_format(path, &bytes)?,
+    };
+    Ok((
+        bytes,
+        Source {
+            format,
+            lfs_pointer,
+        },
+    ))
 }
 
 fn format_from_extension(path: &str) -> Option<FileFormat> {
@@ -1200,18 +1234,12 @@ fn format_from_extension(path: &str) -> Option<FileFormat> {
     }
 }
 
-fn sniff_format(path: &str) -> Result<FileFormat> {
-    use std::io::Read;
-    let mut head = Vec::with_capacity(512);
-    File::open(path)
-        .with_context(|| format!("opening {path}"))?
-        .take(512)
-        .read_to_end(&mut head)
-        .with_context(|| format!("reading {path}"))?;
+fn sniff_format(path: &str, bytes: &[u8]) -> Result<FileFormat> {
+    let head = &bytes[..bytes.len().min(512)];
     if head.starts_with(b"<roblox!") {
         return Ok(FileFormat::Binary);
     }
-    let text = String::from_utf8_lossy(&head);
+    let text = String::from_utf8_lossy(head);
     let text = text.trim_start_matches('\u{feff}').trim_start();
     if text.starts_with("<roblox") || (text.starts_with("<?xml") && text.contains("<roblox")) {
         return Ok(FileFormat::Xml);
@@ -1222,35 +1250,44 @@ fn sniff_format(path: &str) -> Result<FileFormat> {
     )
 }
 
-/// Load a Roblox file (model or place) in the given encoding.
-fn load_file(path: &str, format: FileFormat) -> Result<rbx_dom_weak::WeakDom> {
-    let file = BufReader::new(File::open(path).with_context(|| format!("opening {path}"))?);
-    match format {
-        FileFormat::Binary => Ok(rbx_binary::from_reader(file)?),
-        FileFormat::Xml => Ok(rbx_xml::from_reader_default(file)?),
-    }
+/// Load a Roblox file (model or place).
+fn load_file(path: &str, hint: Option<&str>) -> Result<(rbx_dom_weak::WeakDom, Source)> {
+    let (bytes, source) = read_source(path, hint)?;
+    let dom = match source.format {
+        FileFormat::Binary => rbx_binary::from_reader(bytes.as_slice())?,
+        FileFormat::Xml => rbx_xml::from_reader_default(bytes.as_slice())?,
+    };
+    Ok((dom, source))
 }
 
 /// Load directly into the compact comparison DOM when the source format
 /// supports it. XML still uses WeakDom as its parser output.
-fn load_diff_file(path: &str, format: FileFormat) -> Result<DiffDom> {
-    let file = BufReader::new(File::open(path).with_context(|| format!("opening {path}"))?);
-    match format {
-        FileFormat::Binary => Ok(DiffDom::from_binary_reader(file)?),
-        FileFormat::Xml => Ok(DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(
-            file,
-        )?)),
-    }
+fn load_diff_file(path: &str, hint: Option<&str>) -> Result<(DiffDom, Source)> {
+    let (bytes, source) = read_source(path, hint)?;
+    let dom = match source.format {
+        FileFormat::Binary => DiffDom::from_binary_reader(bytes.as_slice())?,
+        FileFormat::Xml => {
+            DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(bytes.as_slice())?)
+        }
+    };
+    Ok((dom, source))
 }
 
-/// Save a DOM in the given encoding.
-fn save_file(path: &str, dom: &rbx_dom_weak::WeakDom, format: FileFormat) -> Result<()> {
-    let file = BufWriter::new(File::create(path).with_context(|| format!("creating {path}"))?);
+/// Write a DOM back the way its source arrived: same encoding, and through
+/// `git lfs clean` when the source was an LFS pointer, so the object lands
+/// in the LFS store and git records a pointer.
+fn save_file(path: &str, dom: &rbx_dom_weak::WeakDom, source: Source) -> Result<()> {
+    let mut bytes = Vec::new();
     let roots = dom.root().children();
-    match format {
-        FileFormat::Binary => rbx_binary::to_writer(file, dom, roots)?,
-        FileFormat::Xml => rbx_xml::to_writer_default(file, dom, roots)?,
+    match source.format {
+        FileFormat::Binary => rbx_binary::to_writer(&mut bytes, dom, roots)?,
+        FileFormat::Xml => rbx_xml::to_writer_default(&mut bytes, dom, roots)?,
     }
+    if source.lfs_pointer {
+        bytes = git_lfs::clean(&bytes)
+            .with_context(|| format!("storing {path} through Git LFS"))?;
+    }
+    std::fs::write(path, bytes).with_context(|| format!("creating {path}"))?;
     Ok(())
 }
 

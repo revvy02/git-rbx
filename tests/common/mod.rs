@@ -35,7 +35,15 @@ pub fn write_model(path: &Path, dom: &WeakDom) {
 }
 
 pub fn transparency(path: &Path, name: &str) -> Option<f32> {
-    let dom: WeakDom = rbx_binary::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let dom: WeakDom = rbx_binary::from_reader(bytes.as_slice()).unwrap_or_else(|e| {
+        panic!(
+            "{} is not a Roblox binary ({e}); {} bytes, head: {:?}",
+            path.display(),
+            bytes.len(),
+            String::from_utf8_lossy(&bytes[..bytes.len().min(160)])
+        )
+    });
     dom.descendants().find(|i| i.name == name).and_then(|i| {
         match i.properties.get(&"Transparency".into()) {
             Some(Variant::Float32(t)) => Some(*t),
