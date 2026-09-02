@@ -19,6 +19,7 @@ local jecs = packages.jecs
 export type SideInfo = {
 	folder: Instance?, -- the stamped side folder (a swapped-out clone lives here)
 	clone: Instance?, -- this side's edited version (absent for deletes and moves)
+	moveOuts: { { folder: Instance, snapshot: Instance, destination: Instance } }?, -- edited descendants escaping a commonly deleted root
 	deleted: boolean?, -- this side removes the subtree (stamped Deleted attribute)
 	destination: Instance?, -- the parent this side moves the target to
 	destinationPath: string?,

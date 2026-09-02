@@ -185,7 +185,10 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 					local deleteSide = if ours.deleted then "ours" elseif theirs.deleted then "theirs" else nil
 					local keepSide = if deleteSide == "ours" then "theirs" else "ours"
 					local keepInfo = if keepSide == "ours" then ours else theirs
-					if staged == deleteSide or (staged == keepSide and keepInfo.clone ~= nil) then
+					if
+						staged == deleteSide
+						or (staged == keepSide and (keepInfo.clone ~= nil or #(keepInfo.moveOuts or {}) > 0))
+					then
 						hiddenRoots[world:get(conflict, cts.Target) :: Instance] = true
 					end
 				end

@@ -448,6 +448,47 @@ fn delete_vs_edit_snapshot_preserves_internal_references() {
 }
 
 #[test]
+fn common_delete_with_move_out_finalizes_both_ways() {
+    // Both branches remove A, but ours first preserves P by moving it to B.
+    // The common remove is part of the semantic choice: applying it early
+    // would null the conflict Target and make either resolution impossible.
+    let build = || {
+        let mut base = WeakDom::new(
+            folder("root")
+                .with_child(folder("A").with_child(part_with("P", 0.0)))
+                .with_child(folder("B")),
+        );
+        let ours =
+            WeakDom::new(folder("root").with_child(folder("B").with_child(part_with("P", 0.0))));
+        let theirs = WeakDom::new(folder("root").with_child(folder("B")));
+        let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
+        assert_eq!(result.conflicts.len(), 1, "{:#?}", result.conflicts);
+        assert_eq!(result.conflicts[0].path, "root.A");
+        stamp_conflicts(&mut base, &ours, &theirs, &result);
+
+        let mut bytes = Vec::new();
+        rbx_binary::to_writer(&mut bytes, &base, base.root().children()).unwrap();
+        rbx_binary::from_reader(bytes.as_slice()).unwrap()
+    };
+
+    for side in ["ours", "theirs"] {
+        let mut resolved = build();
+        let container = find_container(&resolved).unwrap();
+        let entry = list_entries(&resolved, container)[0].entry_ref;
+        mark_entry(&mut resolved, entry, side).unwrap();
+        finalize(&mut resolved).unwrap();
+
+        let expected = if side == "ours" {
+            WeakDom::new(folder("root").with_child(folder("B").with_child(part_with("P", 0.0))))
+        } else {
+            WeakDom::new(folder("root").with_child(folder("B")))
+        };
+        let residual = diff_doms(&resolved, &expected);
+        assert!(residual.is_empty(), "{side}: {residual:#?}");
+    }
+}
+
+#[test]
 fn stamped_file_diffs_cleanly_against_base() {
     // The container is tool metadata: diffing a conflicted file against base
     // must not report it (the conflicted property stays at base value).

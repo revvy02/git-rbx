@@ -177,6 +177,9 @@ function conflicts.renderedInstance(entity: any): Instance
 		if info and info.clone then
 			return info.clone :: Instance
 		end
+		if info and info.moveOuts and info.moveOuts[1] then
+			return info.moveOuts[1].snapshot
+		end
 	end
 	return target
 end

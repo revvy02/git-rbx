@@ -60,6 +60,32 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			for _, child in folder:GetChildren() do
 				if child.Name == "Destination" and child:IsA("ObjectValue") then
 					info.destination = child.Value
+				elseif child.Name == "MoveOuts" then
+					local moveOuts = {}
+					for _, record in child:GetChildren() do
+						if record.Name == "References" then
+							continue
+						end
+						local destinationValue = record:FindFirstChild("Destination")
+						local destination = if destinationValue and destinationValue:IsA("ObjectValue")
+							then destinationValue.Value
+							else nil
+						local snapshot = nil
+						for _, candidate in record:GetChildren() do
+							if not candidate:IsA("ObjectValue") then
+								snapshot = candidate
+								break
+							end
+						end
+						if destination and snapshot then
+							table.insert(moveOuts, {
+								folder = record,
+								snapshot = snapshot,
+								destination = destination,
+							})
+						end
+					end
+					info.moveOuts = moveOuts
 				elseif child.Name == "PivotPlan" then
 					local pivots: { types.PivotApplication } = {}
 					for _, pivot in child:GetChildren() do
@@ -231,12 +257,16 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			local keepSide = if deleteSide == "ours" then "theirs" else "ours"
 			local keepInfo = if keepSide == "ours" then ours else theirs
 			local clone = keepInfo.clone
-			local hideTarget = staged == deleteSide or (clone ~= nil and staged == keepSide)
+			local moveOuts = keepInfo.moveOuts or {}
+			local hideTarget = staged == deleteSide or ((clone ~= nil or #moveOuts > 0) and staged == keepSide)
 			for part, original in base.parts :: { [BasePart]: number } do
 				part.Transparency = if hideTarget then 1 else original
 			end
 			if clone then
 				clone.Parent = if staged == keepSide then target.Parent else keepInfo.folder
+			end
+			for _, moveOut in moveOuts do
+				moveOut.snapshot.Parent = if staged == keepSide then moveOut.destination else moveOut.folder
 			end
 		end
 	end

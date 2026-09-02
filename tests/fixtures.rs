@@ -170,6 +170,78 @@ fn save_vs_save_tree_move_is_cframe_changes_only() {
 
 #[test]
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
+fn fresh_build_to_manual_save_is_only_known_studio_materialization() {
+    let Some(diffs) = diff_files(
+        "tests-new/fixtures/rc_fresh_build.rbxl",
+        "tests-new/fixtures/rc_manually_saved_build.rbxl",
+    ) else {
+        return;
+    };
+    assert_eq!(counts(&diffs), (28, 0, 2, 0), "{diffs:#?}");
+
+    let modified_paths: Vec<_> = diffs
+        .iter()
+        .filter_map(|diff| match diff {
+            DiffEntry::Modified { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(modified_paths, vec!["Lighting", "Workspace"], "{diffs:#?}");
+    assert!(
+        diffs.iter().all(|diff| !matches!(
+            diff,
+            DiffEntry::Modified { path, .. } if path.contains("InteriorDoors")
+        )),
+        "a save must not manufacture InteriorDoors edits: {diffs:#?}"
+    );
+}
+
+#[test]
+#[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
+fn two_tree_moves_collapse_to_two_pivots_and_camera_state() {
+    let Some(base) = load_compact("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
+        return;
+    };
+    let Some(mut side) =
+        load_compact("tests-new/models-moved/rc_build_saved_manually_with_2_trees_moved.rbxl")
+    else {
+        return;
+    };
+    let (diffs, pivots) =
+        diff_model_compact_doms_with_config(&base, &mut side, &DiffConfig::default());
+    assert_eq!(pivots.unwrap().pivots.len(), 2, "{diffs:#?}");
+    assert_eq!(counts(&diffs), (0, 0, 1, 0), "{diffs:#?}");
+
+    let pivot_paths: std::collections::BTreeSet<_> = diffs
+        .iter()
+        .filter_map(|diff| match diff {
+            DiffEntry::Pivoted { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pivot_paths.len(), 2, "{diffs:#?}");
+    assert!(pivot_paths.iter().any(|path| path.ends_with("Tree3")));
+    assert!(pivot_paths.iter().any(|path| path.ends_with("Tree4")));
+
+    let camera = diffs.iter().find_map(|diff| match diff {
+        DiffEntry::Modified {
+            path,
+            property_changes,
+            ..
+        } if path == "Workspace.Camera" => Some(property_changes),
+        _ => None,
+    });
+    let camera = camera.expect("the manual save also records the viewing camera");
+    let properties: std::collections::BTreeSet<_> =
+        camera.iter().map(|change| change.name.as_str()).collect();
+    assert_eq!(
+        properties,
+        std::collections::BTreeSet::from(["CFrame", "Focus"])
+    );
+}
+
+#[test]
+#[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn police_station_and_nested_moves_collapse_to_three_pivots() {
     let Some(base) = load_compact("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
         return;

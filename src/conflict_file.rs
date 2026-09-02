@@ -15,6 +15,11 @@
 //!       <clone of our version>      (shallow for property conflicts,
 //!                                    full subtree for delete-vs-edit)
 //!     Theirs                        Folder; same shape
+//!       MoveOuts                    Folder; edited descendants that escape a
+//!                                    root both branches ultimately delete
+//!         Move_N/Destination        ObjectValue -> live destination parent
+//!         Move_N/<snapshot>         full escaped branch subtree
+//!         References                old -> clone ref remapping table
 //!   PivotPlan                       Folder; automatic hierarchical pivots
 //!     Pivot_1                       Folder; attrs: PivotOrder,
 //!                                   PivotParentOrder?, Path, Delta
@@ -34,7 +39,9 @@ use rbx_types::{Attributes, Tags, Variant};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 
-use crate::diff::{attribute_variant_to_property_value, variant_to_property_value, PropertyValue};
+use crate::diff::{
+    attribute_variant_to_property_value, variant_to_property_value, CFrameValue, PropertyValue,
+};
 use crate::diff_dom::{DiffDom, DomView};
 use crate::dom_utils::class_is_a;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
@@ -42,14 +49,19 @@ use crate::explorer_tree::{ExplorerTree, ExplorerTrees, ExplorerVersion};
 use crate::match_instances::get_instance_path;
 use crate::merge::{ConflictKind, MergeResult};
 use crate::placement::{apply_pivot_plan, PivotApplication, PivotOp};
+use crate::reference_value::{direct_reference, with_direct_reference_target};
 use crate::rigid_groups::{Rigid, RigidGroup};
 
 pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
 pub const CONFLICT_TAG: &str = "RbxDiffConflict";
 pub const ENTRY_TAG: &str = "RbxDiffConflictEntry";
 pub const VIRTUAL_TREES_NAME: &str = "VirtualTrees";
+/// Conflict container schema version, stamped as the container's `Version`
+/// attribute. Bump when the on-file layout changes shape.
+pub const SCHEMA_VERSION: u32 = 6;
 
 const VIRTUAL_TREE_CHUNK_BYTES: usize = 100_000;
+const MOVE_OUTS_NAME: &str = "MoveOuts";
 
 /// Stamp the conflict container into a merged DOM. `base` is the merged
 /// result (conflicted targets at base state); the branch DOMs supply the
@@ -96,7 +108,7 @@ fn stamp_conflicts_from_views(
                 "Attributes",
                 Variant::Attributes(
                     Attributes::new()
-                        .with("Version", Variant::Float64(5.0))
+                        .with("Version", Variant::Float64(SCHEMA_VERSION as f64))
                         .with(
                             "ConflictCount",
                             Variant::Float64(result.conflicts.len() as f64),
@@ -412,6 +424,21 @@ fn stamp_side(
     );
     stamp_impact(base, side_folder, &impact);
 
+    // A branch can delete the contested root after moving edited descendants
+    // out of it. There is then no branch-side root to snapshot, so persist the
+    // escaped subtrees and their live destinations explicitly. All roots
+    // share one clone-ref map so references between separate escapes remain
+    // intact; the Original/Clone table lets finalize repair incoming refs.
+    stamp_move_outs(
+        base,
+        side_folder,
+        side_ops,
+        base_ref,
+        branch_dom,
+        base_to_branch,
+        branch_to_base,
+    );
+
     // Move destination for finalize, when it maps to a live base instance
     if let Some(EditOp::Move {
         new_parent: Anchor::Old(parent),
@@ -439,6 +466,110 @@ fn stamp_side(
             stamp_conditional_pivots(base, side_folder, side_pivots, &branch_to_clone);
         }
     }
+}
+
+fn stamp_move_outs(
+    base: &mut WeakDom,
+    side_folder: Ref,
+    side_ops: &[EditOp],
+    conflict_root: Ref,
+    branch_dom: &dyn DomView,
+    base_to_branch: &HashMap<Ref, Ref>,
+    branch_to_base: &HashMap<Ref, Ref>,
+) {
+    let moved: Vec<(Ref, Ref, Ref)> = side_ops
+        .iter()
+        .filter_map(|op| {
+            let EditOp::Move {
+                old_ref,
+                new_parent: Anchor::Old(destination),
+            } = op
+            else {
+                return None;
+            };
+            if !is_within(base, *old_ref, conflict_root)
+                || is_within(base, *destination, conflict_root)
+            {
+                return None;
+            }
+            Some((*old_ref, *destination, *base_to_branch.get(old_ref)?))
+        })
+        .collect();
+    if moved.is_empty() {
+        return;
+    }
+
+    let mut branch_to_clone = HashMap::new();
+    for (_, _, branch_ref) in &moved {
+        allocate_clone_refs(branch_dom, *branch_ref, true, &mut branch_to_clone);
+    }
+
+    let move_outs = base.insert(
+        side_folder,
+        InstanceBuilder::new("Folder").with_name(MOVE_OUTS_NAME),
+    );
+    for (index, (_, destination, branch_ref)) in moved.iter().enumerate() {
+        let record = base.insert(
+            move_outs,
+            InstanceBuilder::new("Folder").with_name(format!("Move_{}", index + 1)),
+        );
+        base.insert(
+            record,
+            InstanceBuilder::new("ObjectValue")
+                .with_name("Destination")
+                .with_property("Value", Variant::Ref(*destination)),
+        );
+        let builder = build_branch_clone(
+            branch_dom,
+            *branch_ref,
+            branch_to_base,
+            &branch_to_clone,
+            true,
+        );
+        base.insert(record, builder);
+    }
+
+    let references = base.insert(
+        move_outs,
+        InstanceBuilder::new("Folder").with_name("References"),
+    );
+    let mut pairs: Vec<(Ref, Ref)> = branch_to_clone
+        .iter()
+        .filter_map(|(branch_ref, clone_ref)| {
+            let original = *branch_to_base.get(branch_ref)?;
+            base.get_by_ref(original).map(|_| (original, *clone_ref))
+        })
+        .collect();
+    pairs.sort_unstable_by_key(|(original, _)| original.to_string());
+    for (index, (original, clone_ref)) in pairs.into_iter().enumerate() {
+        let pair = base.insert(
+            references,
+            InstanceBuilder::new("Folder").with_name(format!("Ref_{}", index + 1)),
+        );
+        base.insert(
+            pair,
+            InstanceBuilder::new("ObjectValue")
+                .with_name("Original")
+                .with_property("Value", Variant::Ref(original)),
+        );
+        base.insert(
+            pair,
+            InstanceBuilder::new("ObjectValue")
+                .with_name("Clone")
+                .with_property("Value", Variant::Ref(clone_ref)),
+        );
+    }
+}
+
+fn is_within(dom: &WeakDom, referent: Ref, ancestor: Ref) -> bool {
+    let mut current = referent;
+    while let Some(instance) = dom.get_by_ref(current) {
+        if current == ancestor {
+            return true;
+        }
+        current = instance.parent();
+    }
+    false
 }
 
 fn stamp_conditional_pivots(
@@ -781,6 +912,9 @@ fn allocate_clone_refs(
     deep: bool,
     branch_to_clone: &mut HashMap<Ref, Ref>,
 ) {
+    if branch_to_clone.contains_key(&branch_ref) {
+        return;
+    }
     branch_to_clone.insert(branch_ref, Ref::new());
     if deep {
         for child in branch_dom.get_by_ref(branch_ref).unwrap().children() {
@@ -958,6 +1092,210 @@ pub fn list_entries(dom: &WeakDom, container: Ref) -> Vec<ConflictEntry> {
             })
         })
         .collect()
+}
+
+// ============================================================================
+// Machine-readable report
+// ============================================================================
+
+/// Structured view of a file's conflict state, for automation: emitted by
+/// `resolve --list --json` and (for the just-written file) `merge --json`.
+/// Everything here is read back from the stamped container, so it describes
+/// exactly what a resolver — CLI, agent, or Studio — will act on.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictReport {
+    pub schema_version: u32,
+    pub conflict_count: usize,
+    pub unresolved_count: usize,
+    pub groups: Vec<GroupReport>,
+    pub conflicts: Vec<ConflictEntryReport>,
+}
+
+impl ConflictReport {
+    /// The report for a file with no conflict state.
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            conflict_count: 0,
+            unresolved_count: 0,
+            groups: Vec::new(),
+            conflicts: Vec::new(),
+        }
+    }
+}
+
+/// A rigid group: several spatial conflicts that are one logical decision.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupReport {
+    /// Group entry name (e.g. "Group_1") — accepted by `--take --entry`.
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    /// Member conflict entry names.
+    pub members: Vec<String>,
+    pub delta_ours: CFrameValue,
+    pub delta_theirs: CFrameValue,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictEntryReport {
+    /// Unique entry name (e.g. "Conflict_2") — the key for `--take --entry`.
+    pub name: String,
+    pub kind: String,
+    /// Base path of the contested instance.
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub property: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pivot_order: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pivot_parent_order: Option<usize>,
+    /// "ours" | "theirs" | "custom", or absent while unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_value: Option<PropertyValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub ours: SideReport,
+    pub theirs: SideReport,
+}
+
+/// What choosing one side would do.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SideReport {
+    /// This side deleted the contested subtree.
+    pub deleted: bool,
+    /// Where this side moved the contested instance, when it moved it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_path: Option<String>,
+    /// This side's placement delta for Pivot conflicts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pivot_delta: Option<CFrameValue>,
+    /// The exact patch this choice applies: operations with before/after
+    /// values (the stamped `__RbxDiffImpact`, parsed). Absent only if the
+    /// container was produced by an older schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<serde_json::Value>,
+}
+
+/// Build the machine-readable report for a container.
+pub fn conflict_report(dom: &WeakDom, container: Ref) -> ConflictReport {
+    let schema_version = dom
+        .get_by_ref(container)
+        .and_then(|inst| match inst.properties.get(&"Attributes".into()) {
+            Some(Variant::Attributes(attrs)) => numeric_attr(attrs, "Version"),
+            _ => None,
+        })
+        .map(|version| version as u32)
+        .unwrap_or(SCHEMA_VERSION);
+
+    let entries = list_entries(dom, container);
+    let conflicts: Vec<ConflictEntryReport> = entries
+        .iter()
+        .map(|entry| {
+            let custom_value = dom
+                .get_by_ref(entry.entry_ref)
+                .and_then(|inst| match inst.properties.get(&"Attributes".into()) {
+                    Some(Variant::Attributes(attrs)) => attrs.get("CustomValue").cloned(),
+                    _ => None,
+                })
+                .map(|value| match entry.property.as_deref() {
+                    Some(property) if is_sub_property(property) => {
+                        attribute_variant_to_property_value(&value)
+                    }
+                    _ => variant_to_property_value(&value),
+                });
+            ConflictEntryReport {
+                name: entry.name.clone(),
+                kind: entry.kind.clone(),
+                path: entry.path.clone(),
+                property: entry.property.clone(),
+                properties: entry.properties.clone(),
+                pivot_order: entry.pivot_order,
+                pivot_parent_order: entry.pivot_parent_order,
+                resolved: entry.resolved.clone(),
+                custom_value,
+                group: entry.group.clone(),
+                ours: side_report(dom, entry.entry_ref, "Ours"),
+                theirs: side_report(dom, entry.entry_ref, "Theirs"),
+            }
+        })
+        .collect();
+
+    let groups = dom
+        .get_by_ref(container)
+        .map(|inst| inst.children().to_vec())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|group_ref| {
+            let inst = dom.get_by_ref(group_ref)?;
+            let attrs = match inst.properties.get(&"Attributes".into()) {
+                Some(Variant::Attributes(attrs)) => attrs,
+                _ => return None,
+            };
+            let kind = attr_string(attrs, "GroupKind")?;
+            let cframe = |key: &str| match attrs.get(key) {
+                Some(Variant::CFrame(cf)) => Some(CFrameValue::from(*cf)),
+                _ => None,
+            };
+            Some(GroupReport {
+                members: entries
+                    .iter()
+                    .filter(|entry| entry.group.as_deref() == Some(inst.name.as_str()))
+                    .map(|entry| entry.name.clone())
+                    .collect(),
+                name: inst.name.clone(),
+                kind,
+                path: attr_string(attrs, "Path").unwrap_or_default(),
+                delta_ours: cframe("DeltaOurs")?,
+                delta_theirs: cframe("DeltaTheirs")?,
+            })
+        })
+        .collect();
+
+    ConflictReport {
+        schema_version,
+        conflict_count: conflicts.len(),
+        unresolved_count: conflicts.iter().filter(|c| c.resolved.is_none()).count(),
+        groups,
+        conflicts,
+    }
+}
+
+fn side_report(dom: &WeakDom, entry_ref: Ref, side: &str) -> SideReport {
+    let Some(side_folder) = child_by_name(dom, entry_ref, side) else {
+        return SideReport {
+            deleted: false,
+            destination_path: None,
+            pivot_delta: None,
+            impact: None,
+        };
+    };
+    let destination_path = dom
+        .get_by_ref(side_folder)
+        .and_then(|inst| match inst.properties.get(&"Attributes".into()) {
+            Some(Variant::Attributes(attrs)) => attr_string(attrs, "DestinationPath"),
+            _ => None,
+        });
+    let impact = child_by_name(dom, side_folder, "__RbxDiffImpact")
+        .and_then(|value_ref| dom.get_by_ref(value_ref))
+        .and_then(|inst| match inst.properties.get(&"Value".into()) {
+            Some(Variant::String(encoded)) => serde_json::from_str(encoded).ok(),
+            _ => None,
+        });
+    SideReport {
+        deleted: side_attr_bool(dom, side_folder, "Deleted"),
+        destination_path,
+        pivot_delta: side_attr_cframe(dom, side_folder, "Delta").map(CFrameValue::from),
+        impact,
+    }
 }
 
 /// Stamp rigid-group metadata: a Group_N folder per group (GroupKind — no
@@ -1526,6 +1864,12 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             let deleted = side_attr_bool(dom, side_folder, "Deleted");
             if deleted {
                 dom.destroy(target);
+            } else if apply_move_outs(dom, side_folder)? {
+                // Both branches delete the old container, but this side first
+                // preserves edited descendants by moving them elsewhere.
+                // The snapshots now occupy those destinations and all
+                // incoming authored references point at their clone refs.
+                dom.destroy(target);
             } else if let Some(clone_ref) = first_non_value_child(dom, side_folder) {
                 // Replace the base subtree with this side's edited version
                 let parent = dom.get_by_ref(target).map(|i| i.parent());
@@ -1599,9 +1943,101 @@ fn first_non_value_child(dom: &WeakDom, side_folder: Ref) -> Option<Ref> {
                     i.class.as_str() != "ObjectValue"
                         && i.name != "__RbxDiffImpact"
                         && i.name != "PivotPlan"
+                        && i.name != MOVE_OUTS_NAME
                 })
                 .unwrap_or(false)
         })
+}
+
+fn apply_move_outs(dom: &mut WeakDom, side_folder: Ref) -> Result<bool> {
+    let Some(move_outs) = child_by_name(dom, side_folder, MOVE_OUTS_NAME) else {
+        return Ok(false);
+    };
+    let references = child_by_name(dom, move_outs, "References")
+        .ok_or_else(|| anyhow::anyhow!("MoveOuts is missing its References table"))?;
+    let pair_refs = dom
+        .get_by_ref(references)
+        .map(|instance| instance.children().to_vec())
+        .unwrap_or_default();
+    let mut remap = HashMap::new();
+    for pair in pair_refs {
+        let original = child_object_value(dom, pair, "Original")
+            .ok_or_else(|| anyhow::anyhow!("move-out reference is missing Original"))?;
+        let clone_ref = child_object_value(dom, pair, "Clone")
+            .ok_or_else(|| anyhow::anyhow!("move-out reference is missing Clone"))?;
+        remap.insert(original, clone_ref);
+    }
+
+    let records = dom
+        .get_by_ref(move_outs)
+        .map(|instance| instance.children().to_vec())
+        .unwrap_or_default();
+    let mut transfers = Vec::new();
+    for record in records {
+        let Some(instance) = dom.get_by_ref(record) else {
+            continue;
+        };
+        if instance.name == "References" {
+            continue;
+        }
+        let destination = child_object_value(dom, record, "Destination")
+            .ok_or_else(|| anyhow::anyhow!("{} is missing Destination", instance.name))?;
+        let snapshot = first_non_value_child(dom, record)
+            .ok_or_else(|| anyhow::anyhow!("{} is missing its snapshot", instance.name))?;
+        transfers.push((snapshot, destination));
+    }
+    for (snapshot, destination) in transfers {
+        if dom.get_by_ref(destination).is_none() {
+            bail!("move-out destination no longer exists");
+        }
+        dom.transfer_within(snapshot, destination);
+    }
+    remap_authored_references(dom, &remap);
+    Ok(true)
+}
+
+fn remap_authored_references(dom: &mut WeakDom, remap: &HashMap<Ref, Ref>) {
+    if remap.is_empty() {
+        return;
+    }
+    let referents: Vec<Ref> = dom
+        .descendants()
+        .map(|instance| instance.referent())
+        .collect();
+    for referent in referents {
+        let Some(instance) = dom.get_by_ref_mut(referent) else {
+            continue;
+        };
+        let replacements: Vec<_> = instance
+            .properties
+            .iter()
+            .filter_map(|(name, value)| {
+                let remapped = remap_variant_references(value, remap);
+                (remapped != *value).then(|| (name.clone(), remapped))
+            })
+            .collect();
+        for (name, value) in replacements {
+            instance.properties.insert(name, value);
+        }
+    }
+}
+
+fn remap_variant_references(value: &Variant, remap: &HashMap<Ref, Ref>) -> Variant {
+    if let Some((_, target)) = direct_reference(value) {
+        return remap
+            .get(&target)
+            .copied()
+            .map(|target| with_direct_reference_target(value.clone(), target))
+            .unwrap_or_else(|| value.clone());
+    }
+    if let Variant::Attributes(attributes) = value {
+        let mut remapped = Attributes::new();
+        for (name, value) in attributes {
+            remapped.insert(name.clone(), remap_variant_references(value, remap));
+        }
+        return Variant::Attributes(remapped);
+    }
+    value.clone()
 }
 
 fn side_attr_bool(dom: &WeakDom, side_folder: Ref, key: &str) -> bool {
