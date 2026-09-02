@@ -11,12 +11,14 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
 use rbx_diff::{
-    apply_pivot_ops, apply_pivot_ops_to_compact_branch, detect_rigid_groups,
+    apply_pivot_ops, apply_pivot_ops_to_compact_branch, conflict_report, detect_rigid_groups,
     diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
     mark_entry_custom, merge_compact_doms, merge_compact_doms_with_matches_and_pivots,
     normalize_model_merge_compact_pivots, stamp_compact_conflicts, stamp_pivot_plan,
-    stamp_rigid_groups, ConflictKind, DiffConfig, DiffDom, PivotApplication, CONTAINER_NAME,
+    stamp_rigid_groups, ConflictKind, ConflictReport, DiffConfig, DiffDom, MergeStats,
+    PivotApplication, CONTAINER_NAME,
 };
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(name = "rbx-diff")]
@@ -49,7 +51,7 @@ enum Command {
         #[arg(long, short = 't')]
         timing: bool,
     },
-    /// Three-way merge (git merge driver: rbx-diff merge %O %A %B).
+    /// Three-way merge (git merge driver: rbx-diff merge %O %A %B --path %P).
     /// Writes the merged result to OURS (or --output) and exits nonzero
     /// when conflicts remain (conflicted content keeps the base version).
     Merge {
@@ -65,6 +67,18 @@ enum Command {
         /// Write the merged result here instead of overwriting OURS
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Real repository path of the file being merged (git merge driver:
+        /// %P). Git hands drivers extensionless temp copies; this decides the
+        /// output encoding, model-vs-place behavior, and the path shown in
+        /// hints. Without it the encoding is sniffed from file content
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+
+        /// Print a machine-readable summary (stats + the conflict report of
+        /// the written file) to stdout. Exit codes are unchanged
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect and resolve conflicts stored in a merged file
     Resolve {
@@ -74,6 +88,11 @@ enum Command {
         /// List conflicts and their resolution state
         #[arg(long)]
         list: bool,
+
+        /// With --list: print the full conflict report as JSON (competing
+        /// values, exact per-side patches, groups) instead of text lines
+        #[arg(long, requires = "list")]
+        json: bool,
 
         /// Resolve toward this side: ours | theirs | custom (custom requires
         /// --entry and --value)
@@ -106,7 +125,7 @@ enum Command {
         /// Resolve visually in Roblox Studio: opens the file with conflict
         /// highlights and an Ours/Theirs/Custom panel (needs `rodeo` on
         /// PATH). Exits 0 only when the session leaves the file clean
-        #[arg(long, conflicts_with_all = ["list", "take", "value", "path", "entry", "all", "finalize"])]
+        #[arg(long, conflicts_with_all = ["list", "json", "take", "value", "path", "entry", "all", "finalize"])]
         studio: bool,
 
         /// Debug: auto-stage every conflict to this side and complete
@@ -117,6 +136,10 @@ enum Command {
     Check {
         /// File to check
         file: String,
+
+        /// Print `{"clean": bool, "unresolvedCount": n}` to stdout
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -142,10 +165,20 @@ fn main() -> Result<()> {
             ours,
             theirs,
             output,
-        } => cmd_merge(&base, &ours, &theirs, output.as_deref()),
+            path,
+            json,
+        } => cmd_merge(
+            &base,
+            &ours,
+            &theirs,
+            output.as_deref(),
+            path.as_deref(),
+            json,
+        ),
         Command::Resolve {
             file,
             list,
+            json,
             take,
             value,
             path,
@@ -161,6 +194,7 @@ fn main() -> Result<()> {
                 cmd_resolve(
                     &file,
                     list,
+                    json,
                     take.as_deref(),
                     value.as_deref(),
                     path.as_deref(),
@@ -170,7 +204,7 @@ fn main() -> Result<()> {
                 )
             }
         }
-        Command::Check { file } => cmd_check(&file),
+        Command::Check { file, json } => cmd_check(&file, json),
     }
 }
 
@@ -186,14 +220,14 @@ fn cmd_diff(
     let load_start = Instant::now();
     let old_dom = {
         let _span = info_span!("load_old_file", file = %old_file).entered();
-        load_diff_file(old_file)?
+        load_diff_file(old_file, resolve_format(old_file, None)?)?
     };
     let old_load_time = load_start.elapsed();
 
     let load_start = Instant::now();
     let mut new_dom = {
         let _span = info_span!("load_new_file", file = %new_file).entered();
-        load_diff_file(new_file)?
+        load_diff_file(new_file, resolve_format(new_file, None)?)?
     };
     let new_load_time = load_start.elapsed();
 
@@ -243,23 +277,64 @@ fn cmd_diff(
     Ok(())
 }
 
+/// `merge --json` payload: merge statistics plus the conflict report of the
+/// file that was just written — the same report `resolve --list --json`
+/// produces, so an agent driving `git merge` sees exactly what it will
+/// resolve, without a second invocation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeSummary<'a> {
+    /// Where the result was written (under git, the %A temp file).
+    output: &'a str,
+    /// The real repository path, when the caller supplied --path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    /// No conflict state was written; the file is ready to commit.
+    clean: bool,
+    stats: &'a MergeStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pivots: Option<PivotSummary>,
+    #[serde(flatten)]
+    report: ConflictReport,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PivotSummary {
+    factored: usize,
+    ours_detected: usize,
+    theirs_detected: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_merge(
     base_path: &str,
     ours_path: &str,
     theirs_path: &str,
     output: Option<&str>,
+    real_path: Option<&str>,
+    json: bool,
 ) -> Result<()> {
+    let base_format = resolve_format(base_path, real_path)?;
     eprintln!("Loading base {}...", base_path);
-    let mut base = load_file(base_path)?;
+    let mut base = load_file(base_path, base_format)?;
     eprintln!("Loading ours {}...", ours_path);
-    let mut ours = load_diff_file(ours_path)?;
+    let mut ours = load_diff_file(ours_path, resolve_format(ours_path, real_path)?)?;
     eprintln!("Loading theirs {}...", theirs_path);
-    let mut theirs = load_diff_file(theirs_path)?;
+    let mut theirs = load_diff_file(theirs_path, resolve_format(theirs_path, real_path)?)?;
 
-    let pivot_merge = if is_model_asset_path(base_path)
-        && is_model_asset_path(ours_path)
-        && is_model_asset_path(theirs_path)
-    {
+    // Model vs place is a property of the real filename — git's temp copies
+    // say nothing about it. Unknown falls back to place semantics (no model
+    // pivot factoring), the conservative choice.
+    let is_model = match real_path {
+        Some(real_path) => is_model_asset_path(real_path),
+        None => {
+            is_model_asset_path(base_path)
+                && is_model_asset_path(ours_path)
+                && is_model_asset_path(theirs_path)
+        }
+    };
+    let pivot_merge = if is_model {
         let pivots = normalize_model_merge_compact_pivots(&base, &mut ours, &mut theirs);
         if let Some(pivots) = &pivots {
             eprintln!(
@@ -347,8 +422,36 @@ fn cmd_merge(
     }
 
     let out_path = output.unwrap_or(ours_path);
-    save_file(out_path, &base)?;
+    // The output encoding follows the real file when known, else the output
+    // path's own extension, else whatever the base was encoded as.
+    let out_format = real_path
+        .and_then(format_from_extension)
+        .or_else(|| format_from_extension(out_path))
+        .unwrap_or(base_format);
+    save_file(out_path, &base, out_format)?;
     eprintln!("Wrote merged result to {}", out_path);
+    // Under git, %A is moved to the real path once the driver exits — that is
+    // the file a resolver will find.
+    let display_path = real_path.unwrap_or(out_path);
+
+    if json {
+        let report = find_container(&base)
+            .map(|container| conflict_report(&base, container))
+            .unwrap_or_else(ConflictReport::empty);
+        let summary = MergeSummary {
+            output: out_path,
+            path: real_path,
+            clean: result.conflicts.is_empty(),
+            stats: &result.stats,
+            pivots: pivot_merge.as_ref().map(|pivots| PivotSummary {
+                factored: pivots.affected_boundaries(),
+                ours_detected: pivots.ours_detected,
+                theirs_detected: pivots.theirs_detected,
+            }),
+            report,
+        };
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    }
 
     if result.conflicts.is_empty() {
         return Ok(());
@@ -395,7 +498,7 @@ fn cmd_merge(
 
     eprintln!();
     eprintln!("Conflict state is stored in the file ({CONTAINER_NAME}); resolve with:");
-    eprintln!("  rbx-diff resolve {} --list", out_path);
+    eprintln!("  rbx-diff resolve {} --list", display_path);
 
     // Nonzero exit tells git the merge needs manual resolution
     std::process::exit(1);
@@ -416,9 +519,11 @@ fn is_model_asset_path(path: &str) -> bool {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_resolve(
     file: &str,
     list: bool,
+    json: bool,
     take: Option<&str>,
     value: Option<&str>,
     path: Option<&str>,
@@ -426,12 +531,18 @@ fn cmd_resolve(
     all: bool,
     do_finalize: bool,
 ) -> Result<()> {
-    let mut dom = load_file(file)?;
+    let format = resolve_format(file, None)?;
+    let mut dom = load_file(file, format)?;
     let Some(container) = find_container(&dom) else {
         bail!("{file} has no conflict container — nothing to resolve");
     };
 
     if list {
+        if json {
+            let report = conflict_report(&dom, container);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         for entry in list_entries(&dom, container) {
             let state = entry.resolved.as_deref().unwrap_or("UNRESOLVED");
             let detail = entry
@@ -464,7 +575,7 @@ fn cmd_resolve(
             .find(|e| e.name == entry_name)
             .ok_or_else(|| anyhow::anyhow!("no conflict entry named {entry_name}"))?;
         mark_entry_custom(&mut dom, entry.entry_ref, &parsed)?;
-        save_file(file, &dom)?;
+        save_file(file, &dom, format)?;
         eprintln!("Marked {entry_name} as custom");
         return Ok(());
     }
@@ -487,7 +598,7 @@ fn cmd_resolve(
         for entry_ref in refs {
             mark_entry(&mut dom, entry_ref, side)?;
         }
-        save_file(file, &dom)?;
+        save_file(file, &dom, format)?;
         eprintln!("Marked {count} conflict(s) as '{side}'");
 
         let remaining = list_entries(&dom, container)
@@ -504,7 +615,7 @@ fn cmd_resolve(
 
     if do_finalize {
         let count = finalize(&mut dom)?;
-        save_file(file, &dom)?;
+        save_file(file, &dom, format)?;
         eprintln!("Applied {count} resolution(s); conflict state stripped from {file}");
         return Ok(());
     }
@@ -526,7 +637,8 @@ const RESOLVER_ENTRY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolv
 /// `--finalize`) when the user hits Complete — the file on disk is the only
 /// truth, so the verdict afterwards is simply whether conflict state remains.
 fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
-    let dom = load_file(file)?;
+    let format = resolve_format(file, None)?;
+    let dom = load_file(file, format)?;
     let Some(container) = find_container(&dom) else {
         bail!("{file} has no conflict container — nothing to resolve");
     };
@@ -538,7 +650,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
     // Places open in Studio directly; models run in an empty place and the
     // resolver imports them into a preview folder.
     let abs_file = std::fs::canonicalize(file)?;
-    let is_place = matches!(extension(file)?.as_str(), "rbxl" | "rbxlx");
+    let is_place = matches!(extension(file).as_str(), "rbxl" | "rbxlx");
 
     if !Path::new(RESOLVER_ENTRY).exists() {
         bail!(
@@ -578,7 +690,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
 
     // rodeo's exit code only says how the SESSION ended (completed, killed,
     // Studio closed mid-way); what the merge is at now is in the file.
-    if find_container(&load_file(file)?).is_none() {
+    if find_container(&load_file(file, format)?).is_none() {
         eprintln!("{file}: conflicts resolved, file is clean");
         Ok(())
     } else {
@@ -590,14 +702,26 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
     }
 }
 
-fn cmd_check(file: &str) -> Result<()> {
-    let dom = load_file(file)?;
-    match find_container(&dom) {
-        Some(container) => {
-            let unresolved = list_entries(&dom, container)
-                .iter()
-                .filter(|e| e.resolved.is_none())
-                .count();
+fn cmd_check(file: &str, json: bool) -> Result<()> {
+    let dom = load_file(file, resolve_format(file, None)?)?;
+    let unresolved = find_container(&dom).map(|container| {
+        list_entries(&dom, container)
+            .iter()
+            .filter(|e| e.resolved.is_none())
+            .count()
+    });
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "file": file,
+                "clean": unresolved.is_none(),
+                "unresolvedCount": unresolved.unwrap_or(0),
+            })
+        );
+    }
+    match unresolved {
+        Some(unresolved) => {
             eprintln!("{file}: contains merge conflict state ({unresolved} unresolved)");
             std::process::exit(1);
         }
@@ -608,48 +732,96 @@ fn cmd_check(file: &str) -> Result<()> {
     }
 }
 
-/// Load a Roblox file (binary or XML, model or place) based on extension.
-fn load_file(path: &str) -> Result<rbx_dom_weak::WeakDom> {
-    let ext = extension(path)?;
+/// On-disk encoding of a Roblox file. Independent of whether the content is
+/// a model or a place: both come in either encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileFormat {
+    Binary,
+    Xml,
+}
+
+/// Decide a file's encoding. Preference order:
+/// 1. the extension of `hint` — the real repository path (git's %P);
+/// 2. the extension of `path` itself;
+/// 3. the file's leading bytes. Git merge drivers receive extensionless
+///    temp copies (`.merge_file_XXXXXX`), and the content is unambiguous:
+///    binary files open with the `<roblox!` magic, XML with `<roblox`.
+fn resolve_format(path: &str, hint: Option<&str>) -> Result<FileFormat> {
+    if let Some(format) = hint.and_then(format_from_extension) {
+        return Ok(format);
+    }
+    if let Some(format) = format_from_extension(path) {
+        return Ok(format);
+    }
+    sniff_format(path)
+}
+
+fn format_from_extension(path: &str) -> Option<FileFormat> {
+    match extension(path).as_str() {
+        "rbxm" | "rbxl" => Some(FileFormat::Binary),
+        "rbxmx" | "rbxlx" => Some(FileFormat::Xml),
+        _ => None,
+    }
+}
+
+fn sniff_format(path: &str) -> Result<FileFormat> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(512);
+    File::open(path)
+        .with_context(|| format!("opening {path}"))?
+        .take(512)
+        .read_to_end(&mut head)
+        .with_context(|| format!("reading {path}"))?;
+    if head.starts_with(b"<roblox!") {
+        return Ok(FileFormat::Binary);
+    }
+    let text = String::from_utf8_lossy(&head);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    if text.starts_with("<roblox") || (text.starts_with("<?xml") && text.contains("<roblox")) {
+        return Ok(FileFormat::Xml);
+    }
+    bail!(
+        "{path}: not a recognizable Roblox file (no .rbxm/.rbxl/.rbxmx/.rbxlx extension and \
+         no <roblox header). When invoked by git with temp files, pass --path <real path>"
+    )
+}
+
+/// Load a Roblox file (model or place) in the given encoding.
+fn load_file(path: &str, format: FileFormat) -> Result<rbx_dom_weak::WeakDom> {
     let file = BufReader::new(File::open(path).with_context(|| format!("opening {path}"))?);
-    match ext.as_str() {
-        "rbxm" | "rbxl" => Ok(rbx_binary::from_reader(file)?),
-        "rbxmx" | "rbxlx" => Ok(rbx_xml::from_reader_default(file)?),
-        _ => bail!("Unknown file extension: {ext}. Expected .rbxm, .rbxmx, .rbxl, or .rbxlx"),
+    match format {
+        FileFormat::Binary => Ok(rbx_binary::from_reader(file)?),
+        FileFormat::Xml => Ok(rbx_xml::from_reader_default(file)?),
     }
 }
 
 /// Load directly into the compact comparison DOM when the source format
 /// supports it. XML still uses WeakDom as its parser output.
-fn load_diff_file(path: &str) -> Result<DiffDom> {
-    let ext = extension(path)?;
+fn load_diff_file(path: &str, format: FileFormat) -> Result<DiffDom> {
     let file = BufReader::new(File::open(path).with_context(|| format!("opening {path}"))?);
-    match ext.as_str() {
-        "rbxm" | "rbxl" => Ok(DiffDom::from_binary_reader(file)?),
-        "rbxmx" | "rbxlx" => Ok(DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(
+    match format {
+        FileFormat::Binary => Ok(DiffDom::from_binary_reader(file)?),
+        FileFormat::Xml => Ok(DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(
             file,
         )?)),
-        _ => bail!("Unknown file extension: {ext}. Expected .rbxm, .rbxmx, .rbxl, or .rbxlx"),
     }
 }
 
-/// Save a DOM in the format implied by the path's extension.
-fn save_file(path: &str, dom: &rbx_dom_weak::WeakDom) -> Result<()> {
-    let ext = extension(path)?;
+/// Save a DOM in the given encoding.
+fn save_file(path: &str, dom: &rbx_dom_weak::WeakDom, format: FileFormat) -> Result<()> {
     let file = BufWriter::new(File::create(path).with_context(|| format!("creating {path}"))?);
     let roots = dom.root().children();
-    match ext.as_str() {
-        "rbxm" | "rbxl" => rbx_binary::to_writer(file, dom, roots)?,
-        "rbxmx" | "rbxlx" => rbx_xml::to_writer_default(file, dom, roots)?,
-        _ => bail!("Unknown file extension: {ext}. Expected .rbxm, .rbxmx, .rbxl, or .rbxlx"),
+    match format {
+        FileFormat::Binary => rbx_binary::to_writer(file, dom, roots)?,
+        FileFormat::Xml => rbx_xml::to_writer_default(file, dom, roots)?,
     }
     Ok(())
 }
 
-fn extension(path: &str) -> Result<String> {
-    Ok(Path::new(path)
+fn extension(path: &str) -> String {
+    Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-        .to_lowercase())
+        .to_lowercase()
 }

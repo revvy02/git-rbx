@@ -22,9 +22,10 @@ mod semantic_verify;
 mod value_compare;
 
 pub use conflict_file::{
-    finalize, find_container, list_entries, mark_entry, mark_entry_custom, stamp_compact_conflicts,
-    stamp_conflicts, stamp_pivot_plan, stamp_rigid_groups, ConflictEntry, CONFLICT_TAG,
-    CONTAINER_NAME, ENTRY_TAG, VIRTUAL_TREES_NAME,
+    conflict_report, finalize, find_container, list_entries, mark_entry, mark_entry_custom,
+    stamp_compact_conflicts, stamp_conflicts, stamp_pivot_plan, stamp_rigid_groups,
+    ConflictEntry, ConflictEntryReport, ConflictReport, GroupReport, SideReport, CONFLICT_TAG,
+    CONTAINER_NAME, ENTRY_TAG, SCHEMA_VERSION, VIRTUAL_TREES_NAME,
 };
 pub use diff::{compute_diff, CFrameValue, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
