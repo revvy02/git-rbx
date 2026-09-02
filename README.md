@@ -35,15 +35,19 @@ The binary has to be on your `PATH` as `git-rbx`; git then dispatches
 silicon and Intel), Linux x86_64, and Windows x86_64.
 
 With [mise](https://mise.jdx.dev), add it to your project's `mise.toml` (or
-`mise use -g ubi:revvy02/git-rbx@latest` for every project):
+`mise use -g github:revvy02/git-rbx@latest` for every project):
 
 ```toml
 [tools]
-"ubi:revvy02/git-rbx" = "latest"
+"github:revvy02/git-rbx" = "latest"
 ```
 
 The repository is private, so mise needs a `GITHUB_TOKEN` in the environment
-with access to it to fetch the release asset.
+with access to it to fetch the release asset. Recent mise versions also hide
+releases younger than 24 hours (`minimum_release_age`); to pick up a release
+sooner, pin its version (`"github:revvy02/git-rbx" = "0.0.1"`) or add
+`minimum_release_age_excludes = ["github:revvy02/git-rbx"]` under
+`[settings]`.
 
 Or build from source:
 
@@ -242,49 +246,6 @@ the worktree gets real content. Put `git rbx install` *after* `git lfs
 track` in `.gitattributes` history, or just re-run it: the managed block is
 always kept last so it overrides LFS's own `merge=lfs diff=lfs` lines.
 
-## How it works
-
-**Identity without ids.** Roblox files carry no stable instance identity
-that survives a Studio round-trip (`UniqueId` is regenerated). git-rbx
-infers identity: per parent it matches children by name and class, then
-disambiguates same-named siblings by subtree content hashes,
-reference-graph topology, full and reference-free property hashes, class
-specific content keys (a MeshPart's mesh id), tolerance-aware comparison,
-and finally position. Instances that vanished under one parent and appeared
-under another are paired globally — exact content first (also with the
-root's name ignored, which catches rename-and-reparent), then by similarity
-for moved-and-edited subtrees — yielding Moved entries instead of
-remove/add pairs.
-
-**Semantic change sets.** Both diff display and merging consume one
-intermediate form: a list of operations (add subtree, remove subtree, move,
-set name, set property) in terms of the base file's instances, plus pivot
-operations. The merge combiner is set logic over operation targets, with
-the dedupe and conflict rules described above, materialized by applying the
-surviving operations from both branches to the base.
-
-**Conflict state in the file.** A conflicted merge writes a
-`__GitRbxConflicts` folder (under `ServerStorage` for places, at the root for
-models) holding one entry per conflict:
-
-```
-__GitRbxConflicts                    attrs: Version, ConflictCount
-  Conflict_1                      attrs: Kind, Path, Property?, Resolved?, Group?
-    Target                        ObjectValue -> the live, base-state instance
-    Ours                          attrs: Deleted?, DestinationPath?
-      __GitRbxImpact             exact patch for this choice (JSON)
-      <our version>               shallow clone for property conflicts,
-                                  full subtree for delete-vs-edit
-    Theirs                        same shape
-  Group_1                         rigid group: members, both deltas
-```
-
-Contested live instances are tagged `GitRbxConflict` (discoverable with
-`CollectionService:GetTagged` from any Studio plugin or command bar).
-Resolution is a `Resolved` attribute on the entry; `finalize` applies the
-winners in Rust and removes everything the merge added. A stamped file
-diffs cleanly against its base apart from the conflicts themselves.
-
 ## Limitations
 
 - Identity is heuristic. Truly ambiguous cases (identical twins under one
@@ -301,28 +262,3 @@ diffs cleanly against its base apart from the conflicts themselves.
 - The Studio resolver currently runs from the git-rbx source checkout it
   was built in (it needs the `studio-resolver` sources); the CLI path has
   no such dependency.
-
-## Development
-
-```sh
-cargo build --release
-cargo test --release                  # ~180 tests, including real-git and git-lfs flows
-cargo test --release -- --ignored     # the multi-megabyte real-world place captures
-```
-
-Real-world fixtures (Rensselaer County place and model captures) live in a
-private repository mounted as the `rc-fixtures/` submodule. Tests that
-need them skip when it is not checked out, so the suite is green without
-access; with access, `git submodule update --init rc-fixtures` (about
-450 MB through Git LFS) enables them, and `GIT_RBX_FIXTURES_REQUIRED=1`
-turns a missing fixture into a failure (CI sets it). Synthetic fixtures
-built in code stay in `tests/`.
-
-The library (`git_rbx`) holds the engine — `match_instances` (per-parent
-identity), `move_detect` (global pairing), `hash` (content hashes),
-`edit_script` (semantic change sets and materialization), `merge` (the
-three-way combiner), `model_normalize`/`placement` (pivot factoring),
-`conflict_file` (the in-file conflict schema and reports). `src/main.rs` is
-the `git-rbx` binary. `studio-resolver/` is the Luau front end run through
-rodeo. CLI tests under `tests/cli_*.rs` drive the built binary against
-isolated git repositories.

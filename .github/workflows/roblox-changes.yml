@@ -12,8 +12,10 @@ name: Roblox changes
 
 on:
   pull_request:
+    paths: ["**.rbxl", "**.rbxlx", "**.rbxm", "**.rbxmx"]
   push:
     branches: [main]
+    paths: ["**.rbxl", "**.rbxlx", "**.rbxm", "**.rbxmx"]
 
 permissions:
   contents: read
@@ -62,7 +64,11 @@ jobs:
         # another repository use a PAT secret with access to git-rbx.
         env:
           GITHUB_TOKEN: ${{ secrets.GIT_RBX_TOKEN || github.token }}
-        run: mise use -g ubi:revvy02/git-rbx@latest
+          # mise hides releases younger than 24h (minimum_release_age) as a
+          # supply-chain safeguard; a brand-new git-rbx release would
+          # otherwise be invisible for a day.
+          MISE_MINIMUM_RELEASE_AGE_EXCLUDES: github:revvy02/git-rbx
+        run: mise use -g github:revvy02/git-rbx@latest
 
       - name: Render semantic changes
         shell: bash

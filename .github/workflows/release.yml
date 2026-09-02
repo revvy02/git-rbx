@@ -1,5 +1,5 @@
 # Build release binaries for every tag shaped like v1.2.3 and attach them to
-# a GitHub release, named so `ubi` (and therefore mise) can pick the right
+# a GitHub release, named so mise (github: backend, via ubi) can pick the right
 # one per platform:
 #
 #   git-rbx-v1.2.3-macos-aarch64.tar.gz
@@ -10,7 +10,7 @@
 # Consumers then add to mise.toml:
 #
 #   [tools]
-#   "ubi:revvy02/git-rbx" = "latest"
+#   "github:revvy02/git-rbx" = "latest"
 #
 # Cutting a release: bump `version` in Cargo.toml, commit, then
 # `git tag v<version> && git push origin v<version>`. The verify job refuses
@@ -145,7 +145,7 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           # v1.0.0-rc.1 style tags are prereleases so the previous stable
-          # release stays "Latest" (which is what `ubi ... = "latest"` picks).
+          # release stays "Latest" (which is what `= "latest"` picks).
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: artifacts/*
           fail_on_unmatched_files: true
