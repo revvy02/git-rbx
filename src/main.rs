@@ -11,6 +11,7 @@ use tracing::info_span;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use rbx_diff::output::{print_diff, OutputFormat};
+use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_diff::{
     apply_pivot_ops, apply_pivot_ops_to_compact_branch, conflict_report, detect_rigid_groups,
     diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
@@ -142,6 +143,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// git external-diff entry point (`diff.rbx.command`, written by
+    /// `install`). Git calls it as `<path> <old-file> <old-hex> <old-mode>
+    /// <new-file> <new-hex> <new-mode>` and splices stdout into `git diff`
+    /// and `git log -p --ext-diff` / `git show --ext-diff`
+    #[command(name = "git-diff")]
+    GitDiff {
+        /// Only print summary counts
+        #[arg(long)]
+        summary_only: bool,
+
+        /// Arguments exactly as git passes them
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        args: Vec<String>,
+    },
     /// Configure git to merge Roblox files through git-rbx: writes the merge
     /// driver + mergetool config, and a managed block in the repository's
     /// .gitattributes routing *.rbxl/*.rbxlx/*.rbxm/*.rbxmx through it.
@@ -240,6 +255,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Check { file, json } => cmd_check(&file, json),
+        Command::GitDiff { summary_only, args } => cmd_git_diff(summary_only, &args),
         Command::Install {
             global,
             local,
@@ -287,21 +303,7 @@ fn cmd_diff(
     };
     let new_load_time = load_start.elapsed();
 
-    let config = DiffConfig::default();
-
     let diff_start = Instant::now();
-    // Unlike the old root-only model normalization, hierarchical framing
-    // reports every inferred movement explicitly. It is therefore safe and
-    // useful for place files too: authored placement remains visible as one
-    // Pivoted entry instead of thousands of descendant CFrame changes.
-    let (diffs, pivots) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
-    let pivot_stats = pivots
-        .as_ref()
-        .map(|pivots| (pivots.pivots.len(), pivots.detected));
-    let diff_time = diff_start.elapsed();
-
-    let total_time = total_start.elapsed();
-
     let format = if json {
         OutputFormat::Json
     } else if summary_only {
@@ -309,8 +311,10 @@ fn cmd_diff(
     } else {
         OutputFormat::Pretty
     };
+    let pivot_stats = diff_and_print(&old_dom, &mut new_dom, format);
+    let diff_time = diff_start.elapsed();
 
-    print_diff(&diffs, format);
+    let total_time = total_start.elapsed();
 
     if timing {
         eprintln!();
@@ -330,6 +334,74 @@ fn cmd_diff(
         eprintln!("  Total: {:?}", total_time);
     }
 
+    Ok(())
+}
+
+/// Diff two loaded DOMs and print in `format`; returns pivot-factoring
+/// stats when any pivots were inferred.
+fn diff_and_print(
+    old_dom: &DiffDom,
+    new_dom: &mut DiffDom,
+    format: OutputFormat,
+) -> Option<(usize, usize)> {
+    let config = DiffConfig::default();
+    // Unlike the old root-only model normalization, hierarchical framing
+    // reports every inferred movement explicitly. It is therefore safe and
+    // useful for place files too: authored placement remains visible as one
+    // Pivoted entry instead of thousands of descendant CFrame changes.
+    let (diffs, pivots) = diff_model_compact_doms_with_config(old_dom, new_dom, &config);
+    print_diff(&diffs, format);
+    pivots
+        .as_ref()
+        .map(|pivots| (pivots.pivots.len(), pivots.detected))
+}
+
+/// External diff for git. Git's temp copies are extensionless, so the real
+/// path (the first argument) is the format hint; `/dev/null` stands for a
+/// missing side (added or deleted file). Stdout is the whole diff git shows
+/// for this path — git prints no header of its own for external diffs.
+fn cmd_git_diff(summary_only: bool, args: &[String]) -> Result<()> {
+    // One argument means an unmerged path.
+    if args.len() == 1 {
+        println!("* Unmerged path {}", args[0]);
+        return Ok(());
+    }
+    if args.len() < 7 {
+        bail!(
+            "git-diff expects git's external-diff arguments \
+             (<path> <old-file> <old-hex> <old-mode> <new-file> <new-hex> <new-mode>), got {}",
+            args.len()
+        );
+    }
+    let path = args[0].as_str();
+    let old_file = args[1].as_str();
+    let new_file = args[4].as_str();
+    // Renames/copies append the new path (and a similarity note).
+    let new_path = args.get(7).map(String::as_str).unwrap_or(path);
+
+    let load_side = |file: &str| -> Result<DiffDom> {
+        if file == "/dev/null" {
+            return Ok(DiffDom::from_weak_dom_owned(WeakDom::new(
+                InstanceBuilder::new("DataModel"),
+            )));
+        }
+        load_diff_file(file, resolve_format(file, Some(path))?)
+    };
+    let old_dom = load_side(old_file)?;
+    let mut new_dom = load_side(new_file)?;
+
+    println!("diff --rbx a/{path} b/{new_path}");
+    if old_file == "/dev/null" {
+        println!("new file");
+    } else if new_file == "/dev/null" {
+        println!("deleted file");
+    }
+    let format = if summary_only {
+        OutputFormat::Summary
+    } else {
+        OutputFormat::Pretty
+    };
+    diff_and_print(&old_dom, &mut new_dom, format);
     Ok(())
 }
 
@@ -828,8 +900,9 @@ fn attributes_block() -> String {
     block.push('\n');
     for glob in ROBLOX_GLOBS {
         // -text: never let git normalize line endings or attempt a text
-        // merge on these; merge=rbx: route three-way merges to the driver.
-        block.push_str(&format!("{glob:<8} merge=rbx -text\n"));
+        // merge on these; merge=rbx / diff=rbx: route three-way merges and
+        // `git diff` through git-rbx.
+        block.push_str(&format!("{glob:<8} merge=rbx diff=rbx -text\n"));
     }
     block.push_str(ATTRIBUTES_END);
     block.push('\n');
@@ -860,6 +933,7 @@ fn config_entries(exe: &str) -> Vec<(&'static str, String)> {
             format!("{exe} merge %O %A %B --path %P"),
         ),
         ("merge.rbx.recursive", "binary".to_string()),
+        ("diff.rbx.command", format!("{exe} git-diff")),
         (
             "mergetool.rbx.cmd",
             format!("{exe} resolve \"$MERGED\" --studio"),
@@ -911,38 +985,41 @@ fn on_path(program: &str) -> bool {
     })
 }
 
-/// Replace (or append) the managed block, preserving everything else.
+/// Rewrite the managed block at the END of the file, preserving everything
+/// else. Last matching line wins per attribute in git, and `git lfs track`
+/// appends `merge=lfs diff=lfs` lines for the same globs — the block must
+/// come after them to take effect.
 fn merge_attributes(existing: &str, block: &str) -> String {
-    let mut lines: Vec<&str> = existing.lines().collect();
-    let begin = lines.iter().position(|line| line.trim() == ATTRIBUTES_BEGIN);
-    let end = lines.iter().position(|line| line.trim() == ATTRIBUTES_END);
-    let mut result = String::new();
-    match (begin, end) {
-        (Some(begin), Some(end)) if end >= begin => {
-            lines.drain(begin..=end);
-            for (index, line) in lines.iter().enumerate() {
-                if index == begin {
-                    result.push_str(block);
-                }
-                result.push_str(line);
-                result.push('\n');
-            }
-            if begin >= lines.len() {
-                result.push_str(block);
-            }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in existing.lines() {
+        if line.trim() == ATTRIBUTES_BEGIN {
+            inside = true;
+            continue;
         }
-        _ => {
-            result.push_str(existing);
-            if !existing.is_empty() && !existing.ends_with('\n') {
-                result.push('\n');
+        if inside {
+            if line.trim() == ATTRIBUTES_END {
+                inside = false;
             }
-            if !existing.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(block);
+            continue;
         }
+        kept.push(line);
     }
+    while kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    let mut result = kept.join("\n");
+    if !result.is_empty() {
+        result.push_str("\n\n");
+    }
+    result.push_str(block);
     result
+}
+
+/// The block is effective only when nothing after it re-assigns the
+/// attributes (e.g. a later `git lfs track`).
+fn attributes_block_effective(existing: &str) -> bool {
+    existing.trim_end().ends_with(attributes_block().trim_end())
 }
 
 fn hook_script(exe: &str) -> String {
@@ -988,7 +1065,7 @@ fn cmd_install(options: InstallOptions) -> Result<()> {
         git_run(&["config", options.scope.flag(), key, value])?;
     }
     eprintln!(
-        "Wrote {} git config: merge.rbx.* (driver) and mergetool.rbx.* (Studio resolver)",
+        "Wrote {} git config: merge.rbx.* (driver), diff.rbx.* (git diff), mergetool.rbx.* (Studio resolver)",
         match options.scope {
             ConfigScope::Global => "global",
             ConfigScope::Local => "repository",
@@ -1045,6 +1122,7 @@ fn cmd_install(options: InstallOptions) -> Result<()> {
     if options.scope == ConfigScope::Global {
         eprintln!("Done. Each teammate runs `git rbx install` once; the .gitattributes change ships with the repository.");
     }
+    eprintln!("Note: `git diff` uses the semantic differ automatically; `git log -p` and `git show` need --ext-diff.");
     Ok(())
 }
 
@@ -1068,8 +1146,14 @@ fn install_check(
     match attributes_path {
         Some(path) => {
             let existing = std::fs::read_to_string(path).unwrap_or_default();
-            let ok = existing.contains(&attributes_block());
-            report(ok, format!("{}: managed git-rbx block", path.display()));
+            let ok = attributes_block_effective(&existing);
+            report(
+                ok,
+                format!(
+                    "{}: managed git-rbx block (last, so it overrides earlier lines)",
+                    path.display()
+                ),
+            );
         }
         None => eprintln!("  [skip] .gitattributes (not inside a git repository)"),
     }

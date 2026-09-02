@@ -4,131 +4,10 @@
 //! invocations that reach the driver through git's extensionless temp
 //! files (`%O %A %B`) plus the `--path %P` hint.
 
-use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_types::Variant;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+mod common;
+use common::*;
 
-const BIN: &str = env!("CARGO_BIN_EXE_git-rbx");
-
-fn folder(name: &str) -> InstanceBuilder {
-    InstanceBuilder::new("Folder").with_name(name)
-}
-
-fn part_with(name: &str, transparency: f32) -> InstanceBuilder {
-    InstanceBuilder::new("Part")
-        .with_name(name)
-        .with_property("Anchored", Variant::Bool(true))
-        .with_property("Transparency", Variant::Float32(transparency))
-}
-
-fn map(q: f32, r: f32) -> WeakDom {
-    WeakDom::new(
-        folder("root")
-            .with_child(part_with("Q", q))
-            .with_child(part_with("R", r)),
-    )
-}
-
-fn write_model(path: &Path, dom: &WeakDom) {
-    let file = std::fs::File::create(path).unwrap();
-    rbx_binary::to_writer(file, dom, dom.root().children()).unwrap();
-}
-
-fn transparency(path: &Path, name: &str) -> Option<f32> {
-    let dom: WeakDom = rbx_binary::from_reader(std::fs::File::open(path).unwrap()).unwrap();
-    dom.descendants().find(|i| i.name == name).and_then(|i| {
-        match i.properties.get(&"Transparency".into()) {
-            Some(Variant::Float32(t)) => Some(*t),
-            _ => None,
-        }
-    })
-}
-
-/// A throwaway repository, fully isolated from the developer's own git
-/// configuration (global config, system config, hooks path, editor).
-struct Repo {
-    dir: PathBuf,
-}
-
-impl Repo {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "git-rbx-install-{name}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let repo = Self { dir };
-        repo.git(&["-c", "init.defaultBranch=main", "init", "-q"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@example.com"]);
-        repo
-    }
-
-    fn command(&self, program: &str) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.dir)
-            .env("GIT_CONFIG_GLOBAL", self.dir.join("isolated-global.gitconfig"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_EDITOR", "true")
-            .env("HOME", &self.dir);
-        command
-    }
-
-    fn git_output(&self, args: &[&str]) -> Output {
-        self.command("git").args(args).output().expect("git runs")
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let output = self.git_output(args);
-        assert!(
-            output.status.success(),
-            "git {} failed:\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim_end().to_string()
-    }
-
-    fn rbx_output(&self, args: &[&str]) -> Output {
-        self.command(BIN).args(args).output().expect("git-rbx runs")
-    }
-
-    fn rbx(&self, args: &[&str]) -> Output {
-        let output = self.rbx_output(args);
-        assert!(
-            output.status.success(),
-            "git-rbx {} failed:\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
-    }
-
-    fn install(&self, extra: &[&str]) {
-        let mut args = vec!["install", "--local", "--exe", BIN];
-        args.extend_from_slice(extra);
-        self.rbx(&args);
-    }
-
-    fn commit_map(&self, dom: &WeakDom, message: &str) {
-        write_model(&self.dir.join("map.rbxm"), dom);
-        self.git(&["add", "map.rbxm"]);
-        self.git(&["commit", "-q", "-m", message]);
-    }
-
-    fn attributes(&self) -> String {
-        std::fs::read_to_string(self.dir.join(".gitattributes")).unwrap_or_default()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
+use std::process::Command;
 
 #[test]
 fn install_writes_driver_config_and_managed_attributes_idempotently() {
@@ -154,10 +33,17 @@ fn install_writes_driver_config_and_managed_attributes_idempotently() {
     assert!(attributes.starts_with("*.png binary\n"), "{attributes}");
     for glob in ["*.rbxl", "*.rbxlx", "*.rbxm", "*.rbxmx"] {
         assert!(
-            attributes.lines().any(|l| l.starts_with(glob) && l.contains("merge=rbx") && l.contains("-text")),
+            attributes.lines().any(|l| l.starts_with(glob)
+                && l.contains("merge=rbx")
+                && l.contains("diff=rbx")
+                && l.contains("-text")),
             "missing {glob} line in:\n{attributes}"
         );
     }
+    assert_eq!(
+        repo.git(&["config", "--local", "--get", "diff.rbx.command"]),
+        format!("{BIN} git-diff")
+    );
 
     // Idempotent: a second run changes nothing.
     repo.install(&[]);
@@ -285,4 +171,57 @@ fn git_merge_conflict_resolves_through_the_cli_with_hook_enforcement() {
     // And the merge commit really has two parents.
     let parents = repo.git(&["log", "-1", "--format=%P"]);
     assert_eq!(parents.split_whitespace().count(), 2, "{parents}");
+}
+
+/// A later `git lfs track` line for the same glob would win under git's
+/// last-match rule; re-running install must move the managed block back to
+/// the end, and --check must notice when it isn't last.
+#[test]
+fn managed_block_stays_last_so_it_overrides_later_lfs_lines() {
+    let repo = Repo::new("block-order");
+    repo.install(&[]);
+    let mut attributes = repo.attributes();
+    attributes.push_str("*.rbxm filter=lfs diff=lfs merge=lfs -text\n");
+    std::fs::write(repo.dir.join(".gitattributes"), &attributes).unwrap();
+
+    let output = repo.rbx_output(&["install", "--local", "--exe", BIN, "--check"]);
+    assert_eq!(output.status.code(), Some(1), "block no longer last: {output:?}");
+
+    repo.install(&[]);
+    let attributes = repo.attributes();
+    let lfs_line = attributes.find("filter=lfs").unwrap();
+    let block = attributes.find("# >>> git-rbx").unwrap();
+    assert!(block > lfs_line, "block must follow the lfs line:\n{attributes}");
+    assert_eq!(attributes.matches("# >>> git-rbx").count(), 1);
+    repo.rbx(&["install", "--local", "--exe", BIN, "--check"]);
+}
+
+/// `git diff` on a modified Roblox file goes through the external-diff
+/// shim, so the output is semantic instead of "Binary files differ".
+#[test]
+fn git_diff_shows_semantic_changes_through_the_shim() {
+    let repo = Repo::new("ext-diff");
+    repo.install(&[]);
+    repo.git(&["add", ".gitattributes"]);
+    repo.git(&["commit", "-q", "-m", "attributes"]);
+    repo.commit_map(&map(0.0, 0.0), "base");
+
+    // Worktree vs index: new side is the real file, old side a temp blob.
+    write_model(&repo.dir.join("map.rbxm"), &map(0.4, 0.0));
+    let diff = repo.git(&["diff"]);
+    assert!(diff.contains("diff --rbx a/map.rbxm b/map.rbxm"), "{diff}");
+    assert!(diff.contains("Transparency"), "{diff}");
+    assert!(!diff.contains("Binary files"), "{diff}");
+
+    // Commit-to-commit (`git log -p`/`git show` need --ext-diff).
+    repo.git(&["commit", "-q", "-am", "edit Q"]);
+    let shown = repo.git(&["show", "--ext-diff", "--format=", "HEAD"]);
+    assert!(shown.contains("Transparency"), "{shown}");
+    let summary = repo.git(&["-c", &format!("diff.rbx.command={BIN} git-diff --summary-only"), "show", "--ext-diff", "--format=", "HEAD"]);
+    assert!(summary.contains("modified"), "{summary}");
+
+    // Added and deleted files (a /dev/null side) render too.
+    std::fs::remove_file(repo.dir.join("map.rbxm")).unwrap();
+    let removed = repo.git(&["diff"]);
+    assert!(removed.contains("deleted file"), "{removed}");
 }
