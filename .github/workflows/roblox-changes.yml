@@ -1,0 +1,86 @@
+# Semantic diffs for Roblox files on GitHub.
+#
+# GitHub cannot render .rbxl/.rbxm diffs itself and has no hook for custom
+# renderers, so this job computes them with git-rbx and attaches the result
+# where reviewers look: the check's step summary (every push, tied to the
+# commit) and one pull-request comment (updated in place on each push).
+#
+# Copy this file into a repository that stores Roblox files; adjust the
+# install step to however you distribute git-rbx (a release binary is the
+# fast path once one exists).
+name: Roblox changes
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both revisions must be present locally; LFS objects for the base
+          # side are fetched explicitly below.
+          fetch-depth: 0
+          lfs: true
+
+      - name: Resolve revisions
+        id: revs
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=${{ github.sha }}~1" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch LFS objects for both revisions
+        run: git lfs fetch origin "${{ steps.revs.outputs.base }}" "${{ steps.revs.outputs.head }}" || true
+
+      - name: Install git-rbx
+        run: cargo install --locked --git https://github.com/revvy02/rbx-diff
+
+      - name: Render semantic changes
+        shell: bash
+        run: |
+          {
+            echo "## Roblox changes"
+            echo
+            git rbx changes "${{ steps.revs.outputs.base }}" "${{ steps.revs.outputs.head }}" --format markdown
+          } > changes.md
+          cat changes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post or update the pull-request comment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          marker='<!-- git-rbx-changes -->'
+          { echo "$marker"; cat changes.md; } > comment.md
+          # GitHub caps comments at 65,536 characters; keep the summary intact.
+          if [ "$(wc -c < comment.md)" -gt 60000 ]; then
+            head -c 60000 comment.md > trimmed.md
+            printf '\n\n_Truncated — see the full report in the check run summary._\n' >> trimmed.md
+            mv trimmed.md comment.md
+          fi
+          existing=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" \
+              -F body=@comment.md > /dev/null
+          else
+            gh pr comment "$PR" --body-file comment.md
+          fi
