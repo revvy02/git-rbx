@@ -5,6 +5,9 @@
 //! reconciles those pools globally, git-rename-detection style:
 //!
 //! - Pass A: exact deep-hash pairing — identical subtree content = pure move.
+//! - Pass A2: exact name-less deep-hash pairing — rename + move. Only
+//!   mutually-unique content-bearing subtrees pair, so identical twins or
+//!   empty containers can never be claimed across names by accident.
 //! - Pass B: same (name, class) pairing with similarity scoring — move + edit.
 //!
 //! Pairs below the similarity threshold stay removed/added; a wrong move inference
@@ -15,13 +18,14 @@
 //! or out of a removed one still pairs. A node inside an already-paired
 //! subtree is excluded — it moved as part of its ancestor.
 //!
-//! Known limitation: rename+move together is not detected (both hash
-//! variants include the name).
+//! Known limitation: rename+move+edit together is not detected (Pass A2
+//! requires exact content; similarity buckets are keyed by name).
 
 use blake3::Hasher;
 use rbx_dom_weak::types::Ref;
 use rbx_types::Variant;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::diff_dom::{DomView, InstanceView};
@@ -82,10 +86,26 @@ pub fn detect_moves(
             moves.push((o, n));
         };
 
+        // Pass A2: exact name-less deep-hash over roots (rename + move)
+        pair_by_exact_hash_ignoring_name(
+            &matcher, &removed, &added, &can_old, &can_new, &mut on_pair,
+        );
+    }
+    let pass_a2_count = moves.len() - pass_a_count;
+
+    {
+        let can_old = |r: Ref| !claims_old.borrow().conflicts(old_dom, r);
+        let can_new = |n: Ref| !claims_new.borrow().conflicts(new_dom, n);
+        let mut on_pair = |o: Ref, n: Ref| {
+            claims_old.borrow_mut().claim(old_dom, o);
+            claims_new.borrow_mut().claim(new_dom, n);
+            moves.push((o, n));
+        };
+
         // Pass B: same (name, class) similarity over roots (move + edit)
         pair_by_similarity(&matcher, &removed, &added, &can_old, &can_new, &mut on_pair);
     }
-    let pass_b_count = moves.len() - pass_a_count;
+    let pass_b_count = moves.len() - pass_a_count - pass_a2_count;
 
     // Passes C/D: pair an unmatched boundary root with a node inside the other
     // side's unmatched tree. This detects content moved into a newly-added
@@ -131,7 +151,7 @@ pub fn detect_moves(
             &mut on_pair,
         );
     }
-    let pass_c_count = moves.len() - pass_a_count - pass_b_count;
+    let pass_c_count = moves.len() - pass_a_count - pass_a2_count - pass_b_count;
 
     {
         let can_old = |r: Ref| !claims_old.borrow().conflicts(old_dom, r);
@@ -158,7 +178,7 @@ pub fn detect_moves(
             &mut on_pair,
         );
     }
-    let pass_d_count = moves.len() - pass_a_count - pass_b_count - pass_c_count;
+    let pass_d_count = moves.len() - pass_a_count - pass_a2_count - pass_b_count - pass_c_count;
 
     if !moves.is_empty() {
         info!(
@@ -166,6 +186,7 @@ pub fn detect_moves(
             added_in = added_count,
             moves = moves.len(),
             exact = pass_a_count,
+            renamed_exact = pass_a2_count,
             similarity = pass_b_count,
             descendant_exact = pass_c_count,
             descendant_similarity = pass_d_count,
@@ -191,8 +212,8 @@ struct MoveMatcher<'a> {
 /// contain a claim" is a set lookup instead of a walk over all claims.
 #[derive(Default)]
 struct Claims {
-    nodes: HashSet<Ref>,
-    ancestors: HashSet<Ref>,
+    nodes: FxHashSet<Ref>,
+    ancestors: FxHashSet<Ref>,
 }
 
 impl Claims {
@@ -237,7 +258,7 @@ fn pair_by_exact_hash(
     can_claim_new: impl Fn(Ref) -> bool,
     mut on_pair: impl FnMut(Ref, Ref),
 ) {
-    let mut new_by_hash: HashMap<[u8; 32], Vec<Ref>> = HashMap::new();
+    let mut new_by_hash: FxHashMap<[u8; 32], Vec<Ref>> = FxHashMap::default();
     for &n in new_pool {
         new_by_hash
             .entry(*matcher.new_deep.get(n).as_bytes())
@@ -268,6 +289,94 @@ fn pair_by_exact_hash(
     }
 }
 
+/// Rename+move pairing: exact deep content with only the ROOT's name ignored
+/// (descendant names still participate). Unlike [`pair_by_exact_hash`], a
+/// name is not corroborating evidence here, so pairing demands more of the
+/// content itself:
+///
+/// - the content hash must be unique in BOTH pools — identical twins with
+///   different names never pair by arbitrary claiming order;
+/// - the subtree must carry authored content (properties or children) —
+///   an empty container's hash is just its class, which would equate every
+///   empty renamed Folder in the place;
+/// - the pair must satisfy the same [`PairingBasis::ContentPreservingRename`]
+///   gate the per-parent class fallback uses.
+fn pair_by_exact_hash_ignoring_name(
+    matcher: &MoveMatcher<'_>,
+    old_pool: &[Ref],
+    new_pool: &[Ref],
+    can_claim_old: impl Fn(Ref) -> bool,
+    can_claim_new: impl Fn(Ref) -> bool,
+    mut on_pair: impl FnMut(Ref, Ref),
+) {
+    fn content_bearing(dom: &dyn DomView, referent: Ref) -> bool {
+        dom.get_by_ref(referent).is_some_and(|inst| {
+            inst.children().next().is_some() || inst.authored_properties().next().is_some()
+        })
+    }
+
+    let mut old_hash_counts: FxHashMap<[u8; 32], usize> = FxHashMap::default();
+    let mut old_hashes: FxHashMap<Ref, [u8; 32]> = FxHashMap::default();
+    for &o in old_pool {
+        if !can_claim_old(o) || !content_bearing(matcher.old_dom, o) {
+            continue;
+        }
+        let instance = matcher.old_dom.get_by_ref(o).unwrap();
+        let hash = *matcher
+            .old_deep
+            .get_instance_without_name(instance)
+            .as_bytes();
+        *old_hash_counts.entry(hash).or_default() += 1;
+        old_hashes.insert(o, hash);
+    }
+
+    let mut new_by_hash: FxHashMap<[u8; 32], Vec<Ref>> = FxHashMap::default();
+    for &n in new_pool {
+        if !can_claim_new(n) || !content_bearing(matcher.new_dom, n) {
+            continue;
+        }
+        let instance = matcher.new_dom.get_by_ref(n).unwrap();
+        new_by_hash
+            .entry(*matcher.new_deep.get_instance_without_name(instance).as_bytes())
+            .or_default()
+            .push(n);
+    }
+
+    // Old-pool order keeps pairing deterministic (tree-walk order).
+    for &o in old_pool {
+        let Some(&hash) = old_hashes.get(&o) else {
+            continue;
+        };
+        if old_hash_counts[&hash] != 1 {
+            continue;
+        }
+        let Some(bucket) = new_by_hash.get(&hash) else {
+            continue;
+        };
+        let [n] = bucket.as_slice() else {
+            continue;
+        };
+        let n = *n;
+        if !can_claim_old(o) || !can_claim_new(n) {
+            continue;
+        }
+        let (Some(old_instance), Some(new_instance)) = (
+            matcher.old_dom.get_by_ref(o),
+            matcher.new_dom.get_by_ref(n),
+        ) else {
+            continue;
+        };
+        if !pairing_compatible(
+            &old_instance,
+            &new_instance,
+            PairingBasis::ContentPreservingRename,
+        ) {
+            continue;
+        }
+        on_pair(o, n);
+    }
+}
+
 /// Similarity pairing: bucket both pools by (name, class), score all pairs in
 /// a bucket, then claim greedily from the highest score down. Passes B and D
 /// differ only in their pools and claim predicates.
@@ -281,7 +390,7 @@ fn pair_by_similarity(
 ) {
     let old_dom = matcher.old_dom;
     let new_dom = matcher.new_dom;
-    let mut old_by_key: HashMap<(String, String), Vec<Ref>> = HashMap::new();
+    let mut old_by_key: FxHashMap<(String, String), Vec<Ref>> = FxHashMap::default();
     for &o in old_pool {
         if !can_claim_old(o) {
             continue;
@@ -293,7 +402,7 @@ fn pair_by_similarity(
                 .push(o);
         }
     }
-    let mut new_by_key: HashMap<(String, String), Vec<Ref>> = HashMap::new();
+    let mut new_by_key: FxHashMap<(String, String), Vec<Ref>> = FxHashMap::default();
     for &n in new_pool {
         if !can_claim_new(n) {
             continue;

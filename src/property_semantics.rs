@@ -8,7 +8,8 @@
 use rbx_dom_weak::Instance;
 use rbx_reflection::{PropertyKind, PropertySerialization, Scriptability};
 use rbx_types::{ContentType, Variant};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashSet;
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use crate::diff_dom::InstanceView;
@@ -160,8 +161,8 @@ fn class_semantics(class_name: &str) -> Option<&'static ClassSemantics> {
 
 /// Get the authored property names for a class. The result is cached for the
 /// process lifetime and shared by matching, hashing, move detection, and diff.
-pub(crate) fn get_authored_properties(class_name: &str) -> &'static HashSet<String> {
-    static CLASS_PROPERTIES: OnceLock<Mutex<HashMap<String, &'static HashSet<String>>>> =
+pub(crate) fn get_authored_properties(class_name: &str) -> &'static FxHashSet<String> {
+    static CLASS_PROPERTIES: OnceLock<Mutex<HashMap<String, &'static FxHashSet<String>>>> =
         OnceLock::new();
 
     let map_mutex = CLASS_PROPERTIES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -180,9 +181,9 @@ pub(crate) fn get_authored_properties(class_name: &str) -> &'static HashSet<Stri
     properties
 }
 
-fn build_authored_properties(class_name: &str) -> HashSet<String> {
+fn build_authored_properties(class_name: &str) -> FxHashSet<String> {
     let database = rbx_reflection_database::get().unwrap();
-    let mut result = HashSet::new();
+    let mut result = FxHashSet::default();
     let mut current_class = class_name;
 
     while let Some(class_data) = database.classes.get(current_class) {

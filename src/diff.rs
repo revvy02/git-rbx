@@ -223,12 +223,12 @@ pub struct ColorKeypoint {
 /// Configuration for diffing.
 pub struct DiffConfig {
     /// Properties to ignore when comparing
-    pub ignore_properties: HashSet<String>,
+    pub ignore_properties: rustc_hash::FxHashSet<String>,
 }
 
 impl Default for DiffConfig {
     fn default() -> Self {
-        let mut ignore = HashSet::new();
+        let mut ignore = rustc_hash::FxHashSet::default();
         // Always ignore non-deterministic properties
         ignore.insert("UniqueId".to_string());
         ignore.insert("HistoryId".to_string());

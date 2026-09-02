@@ -11,7 +11,7 @@
 //! 3. Content-preserving class fallback for remaining unmatched renames
 
 use rbx_dom_weak::types::Ref;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use tracing::{debug, info};
 
 use crate::diff_dom::{DomView, InstanceView};
@@ -159,11 +159,11 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     let mut new_matched = vec![false; new_count];
 
     // Build name → indices map for O(1) lookup instead of O(n) scan
-    let mut name_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut name_index: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
     for (i, child) in old_children.iter().enumerate() {
         name_index.entry(child.name()).or_default().push(i);
     }
-    let mut new_name_class_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut new_name_class_counts: FxHashMap<(&str, &str), usize> = FxHashMap::default();
     for child in &new_children {
         *new_name_class_counts
             .entry((child.name(), child.class()))
@@ -216,7 +216,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
 
     // ===== Multi-candidate matching (multi-pass tiebreaking) =====
     // Group unmatched new children by name for batch processing
-    let mut name_groups: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut name_groups: FxHashMap<(&str, &str), Vec<usize>> = FxHashMap::default();
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
             let has_candidates = name_index
@@ -264,7 +264,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         // This handles ordinary serialization-order churn (for example the
         // duplicate Reflective trees in the RC places) without pulling every
         // instance into the more specialized reference graph.
-        let mut old_by_subtree = HashMap::new();
+        let mut old_by_subtree = FxHashMap::default();
         for &old_idx in &old_candidates {
             if !subtree_within_limit(
                 old_dom,
@@ -282,7 +282,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                 .or_insert_with(Vec::new)
                 .push(old_idx);
         }
-        let mut new_by_subtree = HashMap::new();
+        let mut new_by_subtree = FxHashMap::default();
         for &new_idx in new_indices {
             if !subtree_within_limit(
                 new_dom,
@@ -405,7 +405,19 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             graph_count += 1;
         }
 
-        // Pass 2: Full hash match (all properties including Refs).
+        // Pass 2: Full hash match (all properties including Refs). Several
+        // old candidates can share one hash (identical twins); taking the
+        // first in old order would let a branch's UNCHANGED twin steal the
+        // wrong slot, cross-pairing the two branch mappings of a 3-way merge.
+        // Prefer the hash-equal candidate closest to the new child's relative
+        // position within the group so both branches resolve twins the same,
+        // positional way.
+        let new_rank_of = |new_idx: usize| {
+            new_indices
+                .iter()
+                .position(|&candidate| candidate == new_idx)
+                .unwrap_or(0)
+        };
         let mut remaining_new = Vec::new();
         let graph_remaining: Vec<_> = new_indices
             .iter()
@@ -414,15 +426,21 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
             .collect();
         for new_idx in graph_remaining {
             let new_hash = new_hashes.get_instance(new_children[new_idx].instance);
-            let exact = old_candidates.iter().find(|&&old_idx| {
-                !old_matched[old_idx]
-                    && old_hashes.get_instance(old_children[old_idx].instance) == new_hash
-                    && pairing_compatible(
-                        &old_children[old_idx].instance,
-                        &new_children[new_idx].instance,
-                        PairingBasis::ExactContent,
-                    )
-            });
+            let new_rank = new_rank_of(new_idx);
+            let exact = old_candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, &old_idx)| {
+                    !old_matched[old_idx]
+                        && old_hashes.get_instance(old_children[old_idx].instance) == new_hash
+                        && pairing_compatible(
+                            &old_children[old_idx].instance,
+                            &new_children[new_idx].instance,
+                            PairingBasis::ExactContent,
+                        )
+                })
+                .min_by_key(|(old_rank, _)| (old_rank.abs_diff(new_rank), *old_rank))
+                .map(|(_, old_idx)| old_idx);
             if let Some(&old_idx) = exact {
                 old_matched[old_idx] = true;
                 new_matched[new_idx] = true;
@@ -437,18 +455,26 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         }
 
         // Pass 3: No-refs hash match (stable when only references changed).
+        // Same position-aware tiebreak as Pass 2, for the same reason.
         let mut still_remaining = Vec::new();
         for new_idx in remaining_new {
             let new_hash = new_hashes.get_instance_no_refs(new_children[new_idx].instance);
-            let exact = old_candidates.iter().find(|&&old_idx| {
-                !old_matched[old_idx]
-                    && old_hashes.get_instance_no_refs(old_children[old_idx].instance) == new_hash
-                    && pairing_compatible(
-                        &old_children[old_idx].instance,
-                        &new_children[new_idx].instance,
-                        PairingBasis::ExactContent,
-                    )
-            });
+            let new_rank = new_rank_of(new_idx);
+            let exact = old_candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, &old_idx)| {
+                    !old_matched[old_idx]
+                        && old_hashes.get_instance_no_refs(old_children[old_idx].instance)
+                            == new_hash
+                        && pairing_compatible(
+                            &old_children[old_idx].instance,
+                            &new_children[new_idx].instance,
+                            PairingBasis::ExactContent,
+                        )
+                })
+                .min_by_key(|(old_rank, _)| (old_rank.abs_diff(new_rank), *old_rank))
+                .map(|(_, old_idx)| old_idx);
             if let Some(&old_idx) = exact {
                 old_matched[old_idx] = true;
                 new_matched[new_idx] = true;
@@ -466,7 +492,7 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         // same-named MeshParts may move every CFrame while retaining MeshContent;
         // matching those siblings by position would detach geometry from its
         // intended transform.
-        let old_identities: HashMap<usize, String> = old_candidates
+        let old_identities: FxHashMap<usize, String> = old_candidates
             .iter()
             .filter(|&&old_idx| !old_matched[old_idx])
             .filter_map(|&old_idx| {
@@ -474,15 +500,15 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
                     .map(|identity| (old_idx, identity))
             })
             .collect();
-        let new_identities: HashMap<usize, String> = still_remaining
+        let new_identities: FxHashMap<usize, String> = still_remaining
             .iter()
             .filter_map(|&new_idx| {
                 strong_content_key(&new_children[new_idx].instance)
                     .map(|identity| (new_idx, identity))
             })
             .collect();
-        let mut old_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
-        let mut new_by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut old_by_identity: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        let mut new_by_identity: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         for (&index, identity) in &old_identities {
             old_by_identity
                 .entry(identity.as_str())
@@ -641,14 +667,14 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
     // unique old/new subtree whose deep content is identical when the root
     // name is omitted. This catches real renames without consuming unrelated
     // same-class additions by sibling position.
-    let mut class_groups_old: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut class_groups_old: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
     for (i, child) in old_children.iter().enumerate() {
         if !old_matched[i] {
             class_groups_old.entry(child.class()).or_default().push(i);
         }
     }
 
-    let mut class_groups_new: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut class_groups_new: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
     for (new_idx, new_child) in new_children.iter().enumerate() {
         if !new_matched[new_idx] {
             class_groups_new
@@ -671,8 +697,8 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         }
 
         // Pass 1: full deep content, ignoring only the candidate root's name.
-        let mut old_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
-        let mut new_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+        let mut old_by_hash: FxHashMap<[u8; 32], Vec<usize>> = FxHashMap::default();
+        let mut new_by_hash: FxHashMap<[u8; 32], Vec<usize>> = FxHashMap::default();
         for &old_idx in &old_candidates {
             old_by_hash
                 .entry(
@@ -719,8 +745,8 @@ fn compute_child_matches(matcher: &Matcher<'_>, old_parent: Ref, new_parent: Ref
         }
 
         // Pass 2: the same strong match while allowing Ref retargeting.
-        let mut old_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
-        let mut new_by_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+        let mut old_by_hash: FxHashMap<[u8; 32], Vec<usize>> = FxHashMap::default();
+        let mut new_by_hash: FxHashMap<[u8; 32], Vec<usize>> = FxHashMap::default();
         for &old_idx in &old_candidates {
             if old_matched[old_idx] {
                 continue;

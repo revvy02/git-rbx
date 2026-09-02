@@ -54,7 +54,7 @@
 
 use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::{CFrame, Variant};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::diff::DiffConfig;
 use crate::diff_dom::{DescendantRefs, DiffDom, DomView, DomViewMut};
@@ -171,7 +171,7 @@ fn collect_matches(
 fn matched_refs(base: &dyn DomView, side: &dyn DomView) -> HashMap<Ref, Ref> {
     let base_hashes = LazyHashCache::new_view(base);
     let side_hashes = LazyHashCache::new_view(side);
-    let ignored = HashSet::new();
+    let ignored = rustc_hash::FxHashSet::default();
     let base_deep = DeepHashCache::new(base, &ignored);
     let side_deep = DeepHashCache::new(side, &ignored);
     let matcher = Matcher::new(

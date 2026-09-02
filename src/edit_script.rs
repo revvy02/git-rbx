@@ -196,6 +196,28 @@ fn discover_identity_once(
     InstanceIdentity::new(matched, moves)
 }
 
+/// Per-DOM lazy hash caches shared across planning passes.
+///
+/// A three-way merge plans two scripts against the same base; sharing one
+/// set of base caches means base subtrees are hashed once instead of once
+/// per branch. Purely a memoization handle — safe to build cheaply and drop.
+pub(crate) struct DomCaches<'a> {
+    pub(crate) shallow: LazyHashCache<'a>,
+    pub(crate) deep: DeepHashCache<'a>,
+}
+
+impl<'a> DomCaches<'a> {
+    pub(crate) fn new(
+        dom: &'a dyn DomView,
+        ignore_properties: &'a rustc_hash::FxHashSet<String>,
+    ) -> Self {
+        Self {
+            shallow: LazyHashCache::new_view(dom),
+            deep: DeepHashCache::new(dom, ignore_properties),
+        }
+    }
+}
+
 /// Compute an edit script while preserving identity established before a
 /// representation-only DOM canonicalization.
 pub(crate) fn compute_semantic_changes_with_identity(
@@ -204,23 +226,36 @@ pub(crate) fn compute_semantic_changes_with_identity(
     config: &DiffConfig,
     pinned: Option<&InstanceIdentity>,
 ) -> SemanticChangeSet {
-    let old_deep = DeepHashCache::new(old_dom, &config.ignore_properties);
-    let new_deep = DeepHashCache::new(new_dom, &config.ignore_properties);
+    let old_caches = DomCaches::new(old_dom, &config.ignore_properties);
+    let new_caches = DomCaches::new(new_dom, &config.ignore_properties);
+    compute_semantic_changes_with_caches(old_dom, new_dom, config, pinned, &old_caches, &new_caches)
+}
+
+/// Cache-sharing variant: the caller owns the per-DOM caches so several
+/// planning passes over the same DOM reuse one memoization.
+pub(crate) fn compute_semantic_changes_with_caches(
+    old_dom: &dyn DomView,
+    new_dom: &dyn DomView,
+    config: &DiffConfig,
+    pinned: Option<&InstanceIdentity>,
+    old_caches: &DomCaches<'_>,
+    new_caches: &DomCaches<'_>,
+) -> SemanticChangeSet {
+    let old_deep = &old_caches.deep;
+    let new_deep = &new_caches.deep;
 
     let identity = if let Some(pinned) = pinned {
         pinned.clone()
     } else {
-        let old_hashes = LazyHashCache::new_view(old_dom);
-        let new_hashes = LazyHashCache::new_view(new_dom);
         let matcher = Matcher::new(
             old_dom,
             new_dom,
-            &old_hashes,
-            &new_hashes,
-            &old_deep,
-            &new_deep,
+            &old_caches.shallow,
+            &new_caches.shallow,
+            old_deep,
+            new_deep,
         );
-        discover_identity_once(&matcher, old_dom, new_dom, &old_deep, &new_deep)
+        discover_identity_once(&matcher, old_dom, new_dom, old_deep, new_deep)
     };
 
     let mut ops = Vec::new();
@@ -250,8 +285,8 @@ pub(crate) fn compute_semantic_changes_with_identity(
         new_dom,
         config,
         identity: &identity,
-        old_deep: &old_deep,
-        new_deep: &new_deep,
+        old_deep,
+        new_deep,
     };
     emit_ops(&ctx, old_dom.root_ref(), new_dom.root_ref(), &mut ops);
     for (old_root, new_root) in identity.moves.iter() {

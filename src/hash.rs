@@ -9,7 +9,7 @@ use blake3::{Hash, Hasher};
 use rbx_dom_weak::{types::Ref, WeakDom};
 use rbx_types::{PhysicalProperties, Variant, Vector3};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::info;
 
 use crate::diff_dom::{DomView, InstanceView};
@@ -93,7 +93,7 @@ enum HashStorage {
     Uninitialized {
         dense_len: Option<usize>,
     },
-    Sparse(HashMap<Ref, Hash>),
+    Sparse(FxHashMap<Ref, Hash>),
     Dense {
         values: Vec<Option<Hash>>,
         populated: usize,
@@ -126,7 +126,7 @@ impl HashStorage {
                     values: vec![None; len],
                     populated: 0,
                 },
-                None => Self::Sparse(HashMap::new()),
+                None => Self::Sparse(FxHashMap::default()),
             };
         }
         match self {
@@ -160,7 +160,7 @@ impl HashStorage {
 fn hash_instance(
     dom: &dyn DomView,
     inst: InstanceView<'_>,
-    ignore_properties: Option<&HashSet<String>>,
+    ignore_properties: Option<&FxHashSet<String>>,
     policy: HashPolicy,
 ) -> Hasher {
     let mut hasher = Hasher::new();
@@ -280,13 +280,13 @@ impl<'a> LazyHashCache<'a> {
 /// Skips ignored properties (e.g. UniqueId, HistoryId) so pruning works correctly.
 pub struct DeepHashCache<'a> {
     dom: &'a dyn DomView,
-    ignore_properties: &'a HashSet<String>,
+    ignore_properties: &'a FxHashSet<String>,
     cache: RefCell<HashStorage>,
     cache_no_refs: RefCell<HashStorage>,
 }
 
 impl<'a> DeepHashCache<'a> {
-    pub fn new(dom: &'a dyn DomView, ignore_properties: &'a HashSet<String>) -> Self {
+    pub fn new(dom: &'a dyn DomView, ignore_properties: &'a FxHashSet<String>) -> Self {
         Self {
             dom,
             ignore_properties,

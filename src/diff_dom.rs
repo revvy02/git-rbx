@@ -19,6 +19,7 @@
 use rbx_dom_weak::InstanceBuilder;
 use rbx_dom_weak::{types::Ref, Instance, Ustr, WeakDom};
 use rbx_types::{UniqueId, Variant};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::ops::Range;
@@ -105,12 +106,12 @@ fn direct_reference_count(properties: &[Property]) -> u32 {
         .expect("one instance exceeded u32::MAX reference properties")
 }
 
-type AuthoredPropertyCache = HashMap<Ustr, &'static HashSet<String>>;
+type AuthoredPropertyCache = FxHashMap<Ustr, &'static FxHashSet<String>>;
 
 fn authored_properties_for(
     cache: &mut AuthoredPropertyCache,
     class: Ustr,
-) -> &'static HashSet<String> {
+) -> &'static FxHashSet<String> {
     *cache
         .entry(class)
         .or_insert_with(|| get_authored_properties(class.as_str()))
@@ -212,7 +213,7 @@ impl DiffDomDecodeTarget {
             strings,
             by_source_ref,
             unique_ids: HashSet::new(),
-            authored_properties: HashMap::new(),
+            authored_properties: AuthoredPropertyCache::default(),
         }
     }
 }
@@ -358,7 +359,7 @@ impl DiffDom {
         let mut nodes = Vec::with_capacity(source_refs.len());
         let mut children = Vec::with_capacity(source_refs.len().saturating_sub(1));
         let mut properties = Vec::new();
-        let mut authored_properties = HashMap::new();
+        let mut authored_properties = AuthoredPropertyCache::default();
 
         for &source_ref in &source_refs {
             let instance = dom
@@ -450,7 +451,7 @@ impl DiffDom {
         let mut nodes = Vec::with_capacity(source_refs.len());
         let mut children = Vec::with_capacity(source_refs.len().saturating_sub(1));
         let mut properties = Vec::with_capacity(property_count);
-        let mut authored_properties = HashMap::new();
+        let mut authored_properties = AuthoredPropertyCache::default();
 
         for source_ref in source_refs {
             let instance = instances
@@ -779,7 +780,7 @@ pub(crate) struct AuthoredPropertyIter<'a>(AuthoredPropertyIterInner<'a>);
 enum AuthoredPropertyIterInner<'a> {
     Weak {
         inner: std::collections::hash_map::Iter<'a, Ustr, Variant>,
-        authored: &'static HashSet<String>,
+        authored: &'static FxHashSet<String>,
     },
     Compact {
         inner: slice::Iter<'a, Property>,
