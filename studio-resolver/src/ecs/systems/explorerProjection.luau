@@ -24,7 +24,7 @@ type VersionTrees = types.VersionTrees
 local function visibleChildren(inst: Instance): { Instance }
 	local children = {}
 	for _, child in inst:GetChildren() do
-		if child.ClassName ~= "Highlight" and child.Name ~= "__RbxDiffMerge" then
+		if child.ClassName ~= "Highlight" and child.Name ~= "__GitRbxConflicts" then
 			table.insert(children, child)
 		end
 	end

@@ -12,7 +12,7 @@ local widgets = require("./library/widgets")
 local ExplorerPanel = require("../../ui/ExplorerPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("RbxDiffMergeExplorer", "rbx-diff — explorer", Enum.InitialDockState.Left, {
+	local widget = widgets.create("GitRbxMergeExplorer", "rbx-diff — explorer", Enum.InitialDockState.Left, {
 		width = 360,
 		height = 600,
 		minWidth = 260,

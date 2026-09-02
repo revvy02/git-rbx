@@ -146,7 +146,7 @@ local cts = {
 	-- Session singletons.
 	Conflicts = world:component(), -- boot-sorted conflict entity array (immutable after boot)
 	Cards = world:component(), -- display list: group entities + ungrouped conflicts
-	Container = world:component(), -- the stamped __RbxDiffMerge container
+	Container = world:component(), -- the stamped __GitRbxConflicts container
 	PivotPlan = world:component(), -- automatic local pivots deferred by a pivot conflict
 	ViewTab = world:component(), -- "base" | "ours" | "theirs" | "result"
 	SelectedConflict = world:component(), -- conflict entity

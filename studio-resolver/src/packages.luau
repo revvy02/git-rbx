@@ -29,7 +29,7 @@ end
 local result = process.run({ "rojo", "build", `{root}/packages.project.json`, "-o", `{root}/build/packages.rbxm` })
 assert(result.ok, `rojo build of roblox_packages failed: {result.err}`)
 
-local stale = ServerStorage:FindFirstChild("RbxDiffPackages")
+local stale = ServerStorage:FindFirstChild("GitRbxPackages")
 if stale then
 	stale:Destroy()
 end

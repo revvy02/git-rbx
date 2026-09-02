@@ -27,7 +27,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		local highlight = liveHighlights[entity]
 		if not highlight then
 			highlight = Instance.new("Highlight")
-			highlight.Name = `RbxDiffHighlight_{world:get(entity, jecs.Name)}`
+			highlight.Name = `GitRbxHighlight_{world:get(entity, jecs.Name)}`
 			highlight.Parent = target
 			liveHighlights[entity] = highlight
 		end

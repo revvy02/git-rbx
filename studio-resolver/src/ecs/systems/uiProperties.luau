@@ -12,7 +12,7 @@ local widgets = require("./library/widgets")
 local PropertyPanel = require("../../ui/PropertyPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("RbxDiffMergeProperties", "rbx-diff — properties", Enum.InitialDockState.Left, {
+	local widget = widgets.create("GitRbxMergeProperties", "rbx-diff — properties", Enum.InitialDockState.Left, {
 		width = 340,
 		height = 500,
 		minWidth = 240,

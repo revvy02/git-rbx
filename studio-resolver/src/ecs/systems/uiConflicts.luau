@@ -15,7 +15,7 @@ local widgets = require("./library/widgets")
 local Panel = require("../../ui/Panel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("RbxDiffMergeConflicts", "rbx-diff — conflicts", Enum.InitialDockState.Right, {
+	local widget = widgets.create("GitRbxMergeConflicts", "rbx-diff — conflicts", Enum.InitialDockState.Right, {
 		width = 460,
 		height = 600,
 		minWidth = 320,

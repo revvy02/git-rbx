@@ -134,7 +134,7 @@ fn virtual_tree_records(dom: &WeakDom, side: &str) -> Vec<serde_json::Value> {
 
 fn conflict_impact(dom: &WeakDom, entry: Ref, side: &str) -> serde_json::Value {
     let side_folder = child_named(dom, entry, side);
-    let impact = child_named(dom, side_folder, "__RbxDiffImpact");
+    let impact = child_named(dom, side_folder, "__GitRbxImpact");
     let encoded = match dom
         .get_by_ref(impact)
         .unwrap()
@@ -163,12 +163,12 @@ fn conflict_state_survives_serialization() {
     let tagged = dom.descendants().any(|i| {
         matches!(
             i.properties.get(&"Tags".into()),
-            Some(Variant::Tags(tags)) if tags.iter().any(|t| t == "RbxDiffConflict")
+            Some(Variant::Tags(tags)) if tags.iter().any(|t| t == "GitRbxConflict")
         ) && i.name == "P"
     });
     assert!(
         tagged,
-        "conflicted target should carry the RbxDiffConflict tag"
+        "conflicted target should carry the GitRbxConflict tag"
     );
 
     for (side, expected) in [("Ours", 0.25), ("Theirs", 0.75)] {

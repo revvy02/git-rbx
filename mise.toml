@@ -12,12 +12,13 @@ stylua = "latest"
 _.path = ["./bin"]
 
 [tasks.build]
-description = "Build the release binary into bin/"
+description = "Build the git-rbx binary into bin/ (on PATH under mise, so `git rbx` resolves)"
 run = """
 cargo build --release
 mkdir -p bin
-cp target/release/rbx-diff bin/rbx-diff.new
-mv -f bin/rbx-diff.new bin/rbx-diff
+cp target/release/git-rbx bin/git-rbx.new
+mv -f bin/git-rbx.new bin/git-rbx
+rm -f bin/rbx-diff
 """
 
 [tasks.icons]

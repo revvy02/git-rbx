@@ -853,8 +853,11 @@ fn cmd_merge(
     }
 
     eprintln!();
-    eprintln!("Conflict state is stored in the file ({CONTAINER_NAME}); resolve with:");
-    eprintln!("  git rbx resolve {} --list", display_path);
+    eprintln!(
+        "The conflicts are stored inside the file itself (a {CONTAINER_NAME} folder you will \
+         see in Studio — leave it; resolving removes it). Resolve with:"
+    );
+    eprintln!("  git rbx resolve {} --list        (or --studio)", display_path);
 
     // Nonzero exit tells git the merge needs manual resolution
     std::process::exit(1);

@@ -11,7 +11,7 @@
 	The run owns the Studio it spawns, so Studio closes itself when the
 	session completes — pass --detach to keep it open.
 
-	Discovery is entirely in-DOM (the __RbxDiffMerge container + RbxDiffConflict
+	Discovery is entirely in-DOM (the __GitRbxConflicts container + GitRbxConflict
 	tags that `git rbx merge` stamped). Decisions are STAGED in the session —
 	nothing touches the disk file until Complete, which batches the canonical
 	CLI calls host-side via @rodeo/process:
@@ -52,7 +52,7 @@ local cts = require("@self/ecs/cts")
 local scheduler = require("@self/ecs/scheduler")
 local world = require("@self/ecs/world")
 
-local CONTAINER_NAME = "__RbxDiffMerge"
+local CONTAINER_NAME = "__GitRbxConflicts"
 
 local parser = argparse("rbx-diff-resolver", "Resolve rbx-diff merge conflicts visually in Studio")
 parser:argument("file", "Conflicted merged file written by `rbx-diff merge`")
@@ -75,12 +75,12 @@ local container = game:FindFirstChild(CONTAINER_NAME, true)
 -- exactly as with places — the import is only ever eyes and highlights.
 if not container and mergedFile:match("%.rbxmx?$") then
 	local roblox = require("@rodeo/roblox")
-	local stalePreview = workspace:FindFirstChild("RbxDiffModelPreview")
+	local stalePreview = workspace:FindFirstChild("GitRbxModelPreview")
 	if stalePreview then
 		stalePreview:Destroy()
 	end
 	local previewFolder = Instance.new("Folder")
-	previewFolder.Name = "RbxDiffModelPreview"
+	previewFolder.Name = "GitRbxModelPreview"
 	for _, root in roblox.import(mergedFile) do
 		root.Parent = previewFolder
 	end
@@ -124,7 +124,7 @@ local groupRecords: { GroupRecord } = {}
 
 local function readImpact(entry: Instance, side: string): cts.ImpactSide?
 	local sideFolder = entry:FindFirstChild(side)
-	local value = sideFolder and sideFolder:FindFirstChild("__RbxDiffImpact")
+	local value = sideFolder and sideFolder:FindFirstChild("__GitRbxImpact")
 	if not value or not value:IsA("StringValue") then
 		return nil
 	end

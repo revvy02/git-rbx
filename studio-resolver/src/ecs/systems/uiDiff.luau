@@ -12,7 +12,7 @@ local widgets = require("./library/widgets")
 local ImpactPanel = require("../../ui/ImpactPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("RbxDiffMergeDirectDiff", "rbx-diff — direct diff", Enum.InitialDockState.Right, {
+	local widget = widgets.create("GitRbxMergeDirectDiff", "rbx-diff — direct diff", Enum.InitialDockState.Right, {
 		width = 500,
 		height = 360,
 		minWidth = 320,

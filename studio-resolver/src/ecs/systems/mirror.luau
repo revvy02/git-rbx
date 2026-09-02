@@ -48,7 +48,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 	-- Model previews root at the imported content; places root at Workspace
 	-- plus any service holding a conflict target.
 	local function treeRoots(): { Instance }
-		local previewFolder = workspace:FindFirstChild("RbxDiffModelPreview")
+		local previewFolder = workspace:FindFirstChild("GitRbxModelPreview")
 		if previewFolder then
 			return previewFolder:GetChildren()
 		end
@@ -99,7 +99,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 
 			local kids: { Instance } = {}
 			for _, child in inst:GetChildren() do
-				if child.ClassName ~= "Highlight" and child.Name ~= "__RbxDiffMerge" then
+				if child.ClassName ~= "Highlight" and child.Name ~= "__GitRbxConflicts" then
 					table.insert(kids, child)
 				end
 			end

@@ -152,7 +152,7 @@ function format.readProperty(inst: Instance, property: string): (boolean, any)
 	end)
 end
 
-local previewPrefix = "Workspace.RbxDiffModelPreview."
+local previewPrefix = "Workspace.GitRbxModelPreview."
 
 function format.relPath(inst: Instance): string
 	local full = inst:GetFullName()

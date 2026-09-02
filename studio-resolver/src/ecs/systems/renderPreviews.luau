@@ -104,7 +104,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 						end
 					end
 					info.pivots = pivots
-				elseif child.Name ~= "__RbxDiffImpact" then
+				elseif child.Name ~= "__GitRbxImpact" then
 					info.clone = child
 				end
 			end

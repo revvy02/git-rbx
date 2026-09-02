@@ -6,12 +6,12 @@
 //! models) holding one entry per conflict:
 //!
 //! ```text
-//! __RbxDiffMerge                    Folder, attrs: Version, ConflictCount
-//!   Conflict_1                      Folder [tag RbxDiffConflictEntry]
+//! __GitRbxConflicts                    Folder, attrs: Version, ConflictCount
+//!   Conflict_1                      Folder [tag GitRbxConflictEntry]
 //!                                   attrs: Kind, Path, Property?, Resolved?
 //!     Target                        ObjectValue -> live instance (base state)
 //!     Ours                          Folder; attrs: Deleted?, DestinationPath?
-//!       __RbxDiffImpact             StringValue; exact direct patch for this choice
+//!       __GitRbxImpact             StringValue; exact direct patch for this choice
 //!       <clone of our version>      (shallow for property conflicts,
 //!                                    full subtree for delete-vs-edit)
 //!     Theirs                        Folder; same shape
@@ -26,7 +26,7 @@
 //!       Target                      ObjectValue -> live boundary instance
 //! ```
 //!
-//! Live conflicted instances are tagged `RbxDiffConflict` so any consumer —
+//! Live conflicted instances are tagged `GitRbxConflict` so any consumer —
 //! the CLI, a plain Studio command bar, or the rodeo resolver — can discover
 //! them via CollectionService:GetTagged. Resolution is writing the entry's
 //! `Resolved` attribute to "ours"/"theirs"; `finalize` applies the winners in
@@ -52,13 +52,13 @@ use crate::placement::{apply_pivot_plan, PivotApplication, PivotOp};
 use crate::reference_value::{direct_reference, with_direct_reference_target};
 use crate::rigid_groups::{Rigid, RigidGroup};
 
-pub const CONTAINER_NAME: &str = "__RbxDiffMerge";
-pub const CONFLICT_TAG: &str = "RbxDiffConflict";
-pub const ENTRY_TAG: &str = "RbxDiffConflictEntry";
+pub const CONTAINER_NAME: &str = "__GitRbxConflicts";
+pub const CONFLICT_TAG: &str = "GitRbxConflict";
+pub const ENTRY_TAG: &str = "GitRbxConflictEntry";
 pub const VIRTUAL_TREES_NAME: &str = "VirtualTrees";
 /// Conflict container schema version, stamped as the container's `Version`
 /// attribute. Bump when the on-file layout changes shape.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 const VIRTUAL_TREE_CHUNK_BYTES: usize = 100_000;
 const MOVE_OUTS_NAME: &str = "MoveOuts";
@@ -642,7 +642,7 @@ fn stamp_impact(base: &mut WeakDom, side_folder: Ref, impact: &ImpactSide) {
     base.insert(
         side_folder,
         InstanceBuilder::new("StringValue")
-            .with_name("__RbxDiffImpact")
+            .with_name("__GitRbxImpact")
             .with_property("Value", Variant::String(encoded)),
     );
 }
@@ -1179,7 +1179,7 @@ pub struct SideReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pivot_delta: Option<CFrameValue>,
     /// The exact patch this choice applies: operations with before/after
-    /// values (the stamped `__RbxDiffImpact`, parsed). Absent only if the
+    /// values (the stamped `__GitRbxImpact`, parsed). Absent only if the
     /// container was produced by an older schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impact: Option<serde_json::Value>,
@@ -1284,7 +1284,7 @@ fn side_report(dom: &WeakDom, entry_ref: Ref, side: &str) -> SideReport {
             Some(Variant::Attributes(attrs)) => attr_string(attrs, "DestinationPath"),
             _ => None,
         });
-    let impact = child_by_name(dom, side_folder, "__RbxDiffImpact")
+    let impact = child_by_name(dom, side_folder, "__GitRbxImpact")
         .and_then(|value_ref| dom.get_by_ref(value_ref))
         .and_then(|inst| match inst.properties.get(&"Value".into()) {
             Some(Variant::String(encoded)) => serde_json::from_str(encoded).ok(),
@@ -1941,7 +1941,7 @@ fn first_non_value_child(dom: &WeakDom, side_folder: Ref) -> Option<Ref> {
             dom.get_by_ref(c)
                 .map(|i| {
                     i.class.as_str() != "ObjectValue"
-                        && i.name != "__RbxDiffImpact"
+                        && i.name != "__GitRbxImpact"
                         && i.name != "PivotPlan"
                         && i.name != MOVE_OUTS_NAME
                 })

@@ -2,23 +2,15 @@
 
 Semantic diff, three-way merge, and conflict resolution for Roblox place and
 model files (`.rbxl`, `.rbxlx`, `.rbxm`, `.rbxmx`), as a git extension.
-
-Git treats a Roblox file as an opaque blob: `git diff` says "Binary files
-differ", and `git merge` refuses to merge concurrent edits at all — the second
-person to touch a place file loses. git-rbx teaches git what an Instance is.
-It matches instances across versions without relying on ids, diffs and merges
-at the level of instances and properties, and stores unresolved conflicts
-*inside the merged file* so they can be resolved from the command line, by an
-agent, or visually in Roblox Studio.
-
 ```
 $ git merge feature
 Merged in 1.32s: 214 ours + 96 theirs ops applied, 40 deduped, 2 conflicts
 CONFLICTS (2):
   ! Workspace.Lobby.Door — property 'CFrame' (base content kept)
   ! Workspace.Props.Crate — delete vs edit (base content kept)
-Conflict state is stored in the file (__RbxDiffMerge); resolve with:
-  git rbx resolve Workspace/map.rbxl --list
+The conflicts are stored inside the file itself (a __GitRbxConflicts folder you will
+see in Studio — leave it; resolving removes it). Resolve with:
+  git rbx resolve Workspace/map.rbxl --list        (or --studio)
 ```
 
 ## Contents
@@ -49,27 +41,6 @@ Then wire git up. Once per machine:
 ```sh
 git rbx install
 ```
-
-This writes the merge driver, diff driver, and mergetool entries to your
-`~/.gitconfig`, and — when run inside a repository — appends a managed block
-to that repository's `.gitattributes`:
-
-```gitattributes
-# >>> git-rbx (managed; re-run `git rbx install` to update)
-*.rbxl   merge=rbx diff=rbx -text
-*.rbxlx  merge=rbx diff=rbx -text
-*.rbxm   merge=rbx diff=rbx -text
-*.rbxmx  merge=rbx diff=rbx -text
-# <<< git-rbx
-```
-
-Commit `.gitattributes` so every clone routes Roblox files through the
-driver; each teammate runs `git rbx install` once for the config half.
-`git rbx install --check` reports anything missing (the classic failure is
-attributes without the driver config, where git silently keeps "ours").
-`--local` scopes the config to one repository, `--hooks` adds a pre-commit
-hook that refuses to commit a file still carrying conflict state, and
-`--exe <path>` embeds an explicit binary path instead of relying on `PATH`.
 
 ## Quick start
 
@@ -140,18 +111,6 @@ reads as two small deltas, not one large and one enormous one. Pivots are
 also first-class merge operations: two branches pivoting different models
 compose, and two branches pivoting the same model differently is a
 [Pivot conflict](#conflict-types).
-
-**What is not reported.** Non-deterministic bookkeeping properties
-(`UniqueId`, `HistoryId`, `SourceAssetId`) are ignored. Properties the
-reflection database marks non-serialized or non-scriptable are excluded,
-with a short allowlist of serialized-but-unscriptable content properties
-(union geometry, terrain voxels, collision-group data) kept in. Asset URIs
-are normalized (`rbxassetid://N` and `roblox.com/asset/?id=N` are the same
-asset; Studio rewrites between them on save). Services that Studio
-materializes at the DataModel root on load, and its `FilteredSelection`
-helper objects, are not reported as added or removed. Everything else —
-including things some tools hide, like `Camera` and `CurrentCamera` — is
-reported, on the principle that the diff should not guess what you meant.
 
 ## Conflict types
 
@@ -290,22 +249,22 @@ the dedupe and conflict rules described above, materialized by applying the
 surviving operations from both branches to the base.
 
 **Conflict state in the file.** A conflicted merge writes a
-`__RbxDiffMerge` folder (under `ServerStorage` for places, at the root for
+`__GitRbxConflicts` folder (under `ServerStorage` for places, at the root for
 models) holding one entry per conflict:
 
 ```
-__RbxDiffMerge                    attrs: Version, ConflictCount
+__GitRbxConflicts                    attrs: Version, ConflictCount
   Conflict_1                      attrs: Kind, Path, Property?, Resolved?, Group?
     Target                        ObjectValue -> the live, base-state instance
     Ours                          attrs: Deleted?, DestinationPath?
-      __RbxDiffImpact             exact patch for this choice (JSON)
+      __GitRbxImpact             exact patch for this choice (JSON)
       <our version>               shallow clone for property conflicts,
                                   full subtree for delete-vs-edit
     Theirs                        same shape
   Group_1                         rigid group: members, both deltas
 ```
 
-Contested live instances are tagged `RbxDiffConflict` (discoverable with
+Contested live instances are tagged `GitRbxConflict` (discoverable with
 `CollectionService:GetTagged` from any Studio plugin or command bar).
 Resolution is a `Resolved` attribute on the entry; `finalize` applies the
 winners in Rust and removes everything the merge added. A stamped file
