@@ -33,7 +33,7 @@ Build the binary and put it on your `PATH` as `git-rbx`; git then dispatches
 `git rbx <subcommand>` to it.
 
 ```sh
-cargo install --locked --git https://github.com/revvy02/rbx-diff
+cargo install --locked --git https://github.com/revvy02/git-rbx
 ```
 
 Then wire git up. Once per machine:

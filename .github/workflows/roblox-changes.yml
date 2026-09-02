@@ -49,7 +49,7 @@ jobs:
         run: git lfs fetch origin "${{ steps.revs.outputs.base }}" "${{ steps.revs.outputs.head }}" || true
 
       - name: Install git-rbx
-        run: cargo install --locked --git https://github.com/revvy02/rbx-diff
+        run: cargo install --locked --git https://github.com/revvy02/git-rbx
 
       - name: Render semantic changes
         shell: bash
