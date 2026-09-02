@@ -1,4 +1,5 @@
-//! rbx-diff: A fast diff and merge tool for Roblox place/model files.
+//! git-rbx: semantic diff, three-way merge, and conflict resolution for
+//! Roblox place/model files, as a git extension (`git rbx <subcommand>`).
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -21,8 +22,8 @@ use rbx_diff::{
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "rbx-diff")]
-#[command(about = "Diff and merge Roblox rbxm/rbxmx/rbxl/rbxlx files")]
+#[command(name = "git-rbx", bin_name = "git rbx")]
+#[command(about = "Diff, merge, and resolve Roblox rbxm/rbxmx/rbxl/rbxlx files under git")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -51,7 +52,7 @@ enum Command {
         #[arg(long, short = 't')]
         timing: bool,
     },
-    /// Three-way merge (git merge driver: rbx-diff merge %O %A %B --path %P).
+    /// Three-way merge (git merge driver: git-rbx merge %O %A %B --path %P).
     /// Writes the merged result to OURS (or --output) and exits nonzero
     /// when conflicts remain (conflicted content keeps the base version).
     Merge {
@@ -82,7 +83,7 @@ enum Command {
     },
     /// Inspect and resolve conflicts stored in a merged file
     Resolve {
-        /// The conflicted file written by `rbx-diff merge`
+        /// The conflicted file written by `git rbx merge`
         file: String,
 
         /// List conflicts and their resolution state
@@ -395,7 +396,7 @@ fn cmd_merge(
 
     // Conflicted merges carry their conflict state in the file itself:
     // competing versions materialized as instances, targets tagged for
-    // discovery. `rbx-diff resolve` (or Studio) consumes it.
+    // discovery. `git rbx resolve` (or Studio) consumes it.
     let mut groups = Vec::new();
     if !result.conflicts.is_empty() {
         groups = detect_rigid_groups(&base, &result.conflicts);
@@ -498,7 +499,7 @@ fn cmd_merge(
 
     eprintln!();
     eprintln!("Conflict state is stored in the file ({CONTAINER_NAME}); resolve with:");
-    eprintln!("  rbx-diff resolve {} --list", display_path);
+    eprintln!("  git rbx resolve {} --list", display_path);
 
     // Nonzero exit tells git the merge needs manual resolution
     std::process::exit(1);
@@ -606,7 +607,7 @@ fn cmd_resolve(
             .filter(|e| e.resolved.is_none())
             .count();
         if remaining == 0 {
-            eprintln!("All conflicts resolved — run: rbx-diff resolve {file} --finalize");
+            eprintln!("All conflicts resolved — run: git rbx resolve {file} --finalize");
         } else {
             eprintln!("{remaining} conflict(s) still unresolved");
         }
@@ -655,8 +656,8 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
     if !Path::new(RESOLVER_ENTRY).exists() {
         bail!(
             "resolver source not found at {RESOLVER_ENTRY} — `resolve --studio` \
-             currently runs from the rbx-diff checkout it was built in; rebuild \
-             on this machine or resolve from the CLI (rbx-diff resolve {file} --list)"
+             currently runs from the git-rbx checkout it was built in; rebuild \
+             on this machine or resolve from the CLI (git rbx resolve {file} --list)"
         );
     }
 
@@ -683,7 +684,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         std::io::ErrorKind::NotFound => anyhow::anyhow!(
             "`rodeo` not found on PATH — the Studio resolver runs through it \
              (https://github.com/revvy02/rodeo). Resolve from the CLI instead: \
-             rbx-diff resolve {file} --list"
+             git rbx resolve {file} --list"
         ),
         _ => anyhow::Error::from(e).context("launching rodeo"),
     })?;

@@ -119,7 +119,7 @@ fn human_merge_is_reachable_from_binary_conflict_decisions() {
         std::env::temp_dir().join(format!("rbx-diff-tow-reachability-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let conflicted_path = scratch.join("conflicted.rbxm");
-    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let output = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "merge",
             fixture.join("base.rbxm").to_str().unwrap(),

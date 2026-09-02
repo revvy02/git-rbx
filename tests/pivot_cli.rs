@@ -339,7 +339,7 @@ fn two_way_diff_cli_json_reports_pivots_instead_of_descendant_cframes() {
     save(&base_path, &nested_rotated_asset(identity, identity));
     save(&side_path, &nested_rotated_asset(parent, child));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let output = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "diff",
             base_path.to_str().unwrap(),
@@ -395,7 +395,7 @@ fn pretty_diff_splits_long_cframe_changes() {
     save(&base_path, &camera_asset(0.0));
     save(&side_path, &camera_asset(100.0));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let output = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "diff",
             base_path.to_str().unwrap(),
@@ -452,7 +452,7 @@ fn pretty_diff_renders_every_shared_path_segment_and_direct_property_changes() {
     save(&base_path, &asset(0.0, 0.0));
     save(&side_path, &asset(0.25, 0.5));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let output = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "diff",
             base_path.to_str().unwrap(),
@@ -508,7 +508,7 @@ fn pretty_diff_nests_attributes_with_direct_values() {
     save(&base_path, &asset(&[("changed", 1.0), ("removed", 1.0)]));
     save(&side_path, &asset(&[("added", 3.0), ("changed", 2.0)]));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let output = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "diff",
             base_path.to_str().unwrap(),
@@ -575,7 +575,7 @@ fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
     save(&base_path, &asset("A", 0.0));
     save(&side_path, &asset("B", 0.5));
 
-    let pretty = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let pretty = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "diff",
             base_path.to_str().unwrap(),
@@ -603,7 +603,7 @@ fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
         "{stdout}"
     );
 
-    let json = Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    let json = Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args([
             "diff",
             base_path.to_str().unwrap(),
@@ -646,7 +646,7 @@ fn tow_truck_content_and_property_pivot_choices_reconstruct_each_raw_branch() {
         return;
     }
 
-    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let binary = env!("CARGO_BIN_EXE_git-rbx");
     let scratch = std::env::temp_dir().join(format!("rbx-diff-pivot-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let conflicted = scratch.join("conflicted.rbxm");
@@ -707,7 +707,7 @@ fn tow_truck_content_and_property_pivot_choices_reconstruct_each_raw_branch() {
 
 #[test]
 fn one_sided_pivot_is_automatic_and_carries_the_other_sides_edit() {
-    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let binary = env!("CARGO_BIN_EXE_git-rbx");
     let scratch =
         std::env::temp_dir().join(format!("rbx-diff-pivot-auto-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
@@ -758,7 +758,7 @@ fn one_sided_pivot_is_automatic_and_carries_the_other_sides_edit() {
 
 #[test]
 fn overlapping_nested_moves_compose_without_a_conflict() {
-    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let binary = env!("CARGO_BIN_EXE_git-rbx");
     let scratch =
         std::env::temp_dir().join(format!("rbx-diff-nested-pivot-test-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
@@ -793,7 +793,7 @@ fn overlapping_nested_moves_compose_without_a_conflict() {
 
 #[test]
 fn nested_rotated_pivot_choices_reconstruct_and_compose_in_top_down_order() {
-    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let binary = env!("CARGO_BIN_EXE_git-rbx");
     let scratch = std::env::temp_dir().join(format!(
         "rbx-diff-nested-rotation-frame-test-{}",
         std::process::id()
@@ -869,7 +869,7 @@ fn nested_rotated_pivot_choices_reconstruct_and_compose_in_top_down_order() {
 
 #[test]
 fn automatic_rotated_parent_is_deferred_with_a_child_pivot_conflict() {
-    let binary = env!("CARGO_BIN_EXE_rbx-diff");
+    let binary = env!("CARGO_BIN_EXE_git-rbx");
     let scratch = std::env::temp_dir().join(format!(
         "rbx-diff-deferred-parent-frame-test-{}",
         std::process::id()

@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const BIN: &str = env!("CARGO_BIN_EXE_rbx-diff");
+const BIN: &str = env!("CARGO_BIN_EXE_git-rbx");
 
 fn folder(name: &str) -> InstanceBuilder {
     InstanceBuilder::new("Folder").with_name(name)
@@ -48,7 +48,7 @@ fn run(args: &[&str]) -> Output {
     Command::new(BIN)
         .args(args)
         .output()
-        .expect("rbx-diff binary runs")
+        .expect("git-rbx binary runs")
 }
 
 fn stdout_json(output: &Output) -> Value {

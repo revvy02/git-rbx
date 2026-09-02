@@ -1,8 +1,8 @@
 --[[
-	rbx-diff studio resolver — visual front end over the in-file conflict state.
+	git-rbx studio resolver — visual front end over the in-file conflict state.
 
 	Run against the conflicted file (places open directly; models import
-	into a preview folder). `rbx-diff resolve <file> --studio` launches this
+	into a preview folder). `git rbx resolve <file> --studio` launches this
 	tree straight from the checkout; by hand:
 
 	  rodeo run --place ./merged.rbxl --focus src/init.luau -- ./merged.rbxl
@@ -12,12 +12,12 @@
 	session completes — pass --detach to keep it open.
 
 	Discovery is entirely in-DOM (the __RbxDiffMerge container + RbxDiffConflict
-	tags that `rbx-diff merge` stamped). Decisions are STAGED in the session —
+	tags that `git rbx merge` stamped). Decisions are STAGED in the session —
 	nothing touches the disk file until Complete, which batches the canonical
 	CLI calls host-side via @rodeo/process:
 
-	  rbx-diff resolve <file> --take <side> --entry <Conflict_N>   (per decision)
-	  rbx-diff resolve <file> --finalize
+	  git rbx resolve <file> --take <side> --entry <Conflict_N>   (per decision)
+	  git rbx resolve <file> --finalize
 
 	The Studio DOM is a COPY of the file — the disk file stays authoritative and
 	only rbx-diff writes it, only at Complete. Abandoning the session leaves the

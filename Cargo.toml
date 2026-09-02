@@ -2,7 +2,14 @@
 name = "rbx-diff"
 version = "0.1.0"
 edition = "2021"
-description = "Diff tool for comparing Roblox rbxm/rbxmx files"
+description = "Semantic diff, three-way merge, and conflict resolution for Roblox place/model files, as a git extension (git rbx)"
+autobins = false
+
+# The library keeps the descriptive crate name; the CLI ships as a git
+# extension so `git rbx <subcommand>` resolves to it.
+[[bin]]
+name = "git-rbx"
+path = "src/main.rs"
 
 [dependencies]
 rbx_dom_weak = { path = "rbx-dom/rbx_dom_weak" }

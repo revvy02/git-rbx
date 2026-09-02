@@ -39,7 +39,7 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rbx-diff"))
+    Command::new(env!("CARGO_BIN_EXE_git-rbx"))
         .args(args)
         .output()
         .unwrap()
