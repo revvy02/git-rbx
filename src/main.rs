@@ -66,11 +66,11 @@ enum Command {
     /// Git LFS-aware; one section per file. Built for CI (step summaries,
     /// pull-request comments) and for `git rbx changes HEAD~1 HEAD` locally
     Changes {
-        /// Base revision (commit, branch, tag, or any rev git understands)
+        /// Base revision, or a `<base>..<head>` range
         base: String,
 
-        /// Head revision
-        head: String,
+        /// Head revision (omit when BASE is a `..` range)
+        head: Option<String>,
 
         /// Output format
         #[arg(long, value_enum, default_value_t = Format::Markdown)]
@@ -253,7 +253,16 @@ fn main() -> Result<()> {
             head,
             format,
             max_rows,
-        } => cmd_changes(&base, &head, format, max_rows),
+        } => {
+            let (base, head) = match (head, base.split_once("..")) {
+                (Some(head), _) => (base.clone(), head),
+                (None, Some((range_base, range_head))) if !range_head.is_empty() => {
+                    (range_base.to_string(), range_head.to_string())
+                }
+                (None, _) => bail!("changes needs <base> <head> or <base>..<head>"),
+            };
+            cmd_changes(&base, &head, format, max_rows)
+        }
         Command::Merge {
             base,
             ours,

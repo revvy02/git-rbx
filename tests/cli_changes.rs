@@ -165,3 +165,24 @@ fn changes_handles_instances_with_attributes() {
     let md = String::from_utf8(output.stdout).unwrap();
     assert!(md.contains("| `Car` | Attributes.Speed | `1` | `2` |"), "{md}");
 }
+
+#[test]
+fn changes_accepts_range_syntax() {
+    let repo = Repo::new("changes-range");
+    prepare(&repo);
+    write_model(&repo.dir.join("map.rbxm"), &map(0.0, 0.0));
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+    repo.git(&["tag", "before"]);
+    write_model(&repo.dir.join("map.rbxm"), &map(0.2, 0.0));
+    repo.git(&["commit", "-q", "-am", "edit"]);
+
+    let two_args = repo.rbx(&["changes", "before", "HEAD"]);
+    let range = repo.rbx(&["changes", "before..HEAD"]);
+    assert_eq!(two_args.stdout, range.stdout);
+    assert!(String::from_utf8_lossy(&range.stdout).contains("`0.2`"));
+
+    let bad = repo.rbx_output(&["changes", "before"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("<base>..<head>"));
+}
