@@ -2,7 +2,7 @@
 //! Roblox place/model files, as a git extension (`git rbx <subcommand>`).
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::Path;
 use std::time::Instant;
 use tracing::info_span;
@@ -10,7 +10,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 mod git_lfs;
 
-use rbx_diff::output::{print_diff, OutputFormat};
+use rbx_diff::output::{print_diff, render_markdown, DiffCounts, OutputFormat, DEFAULT_MARKDOWN_ROWS};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_diff::{
     apply_pivot_ops, apply_pivot_ops_to_compact_branch, conflict_report, detect_rigid_groups,
@@ -41,17 +41,44 @@ enum Command {
         /// Second (new) file
         new_file: String,
 
-        /// Only show summary counts
+        /// Only show summary counts (same as --format summary)
         #[arg(long)]
         summary_only: bool,
 
-        /// Output as JSON
+        /// Output as JSON (same as --format json)
         #[arg(long)]
         json: bool,
+
+        /// Output format; takes precedence over --json/--summary-only
+        #[arg(long, value_enum)]
+        format: Option<Format>,
+
+        /// Markdown: rows per table before "… and N more"
+        #[arg(long, default_value_t = DEFAULT_MARKDOWN_ROWS)]
+        max_rows: usize,
 
         /// Show timing information
         #[arg(long, short = 't')]
         timing: bool,
+    },
+    /// Semantic diff of every Roblox file changed between two revisions —
+    /// what `git diff --stat` cannot say about binaries. Rename-aware and
+    /// Git LFS-aware; one section per file. Built for CI (step summaries,
+    /// pull-request comments) and for `git rbx changes HEAD~1 HEAD` locally
+    Changes {
+        /// Base revision (commit, branch, tag, or any rev git understands)
+        base: String,
+
+        /// Head revision
+        head: String,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Markdown)]
+        format: Format,
+
+        /// Markdown: rows per table before "… and N more"
+        #[arg(long, default_value_t = DEFAULT_MARKDOWN_ROWS)]
+        max_rows: usize,
     },
     /// Three-way merge (git merge driver: git-rbx merge %O %A %B --path %P).
     /// Writes the merged result to OURS (or --output) and exits nonzero
@@ -208,8 +235,25 @@ fn main() -> Result<()> {
             new_file,
             summary_only,
             json,
+            format,
+            max_rows,
             timing,
-        } => cmd_diff(&old_file, &new_file, summary_only, json, timing),
+        } => {
+            let format = format.unwrap_or(if json {
+                Format::Json
+            } else if summary_only {
+                Format::Summary
+            } else {
+                Format::Pretty
+            });
+            cmd_diff(&old_file, &new_file, format, max_rows, timing)
+        }
+        Command::Changes {
+            base,
+            head,
+            format,
+            max_rows,
+        } => cmd_changes(&base, &head, format, max_rows),
         Command::Merge {
             base,
             ours,
@@ -280,11 +324,30 @@ fn main() -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Format {
+    Pretty,
+    Summary,
+    Json,
+    Markdown,
+}
+
+impl From<Format> for OutputFormat {
+    fn from(format: Format) -> Self {
+        match format {
+            Format::Pretty => OutputFormat::Pretty,
+            Format::Summary => OutputFormat::Summary,
+            Format::Json => OutputFormat::Json,
+            Format::Markdown => OutputFormat::Markdown,
+        }
+    }
+}
+
 fn cmd_diff(
     old_file: &str,
     new_file: &str,
-    summary_only: bool,
-    json: bool,
+    format: Format,
+    max_rows: usize,
     timing: bool,
 ) -> Result<()> {
     let total_start = Instant::now();
@@ -304,14 +367,14 @@ fn cmd_diff(
     let new_load_time = load_start.elapsed();
 
     let diff_start = Instant::now();
-    let format = if json {
-        OutputFormat::Json
-    } else if summary_only {
-        OutputFormat::Summary
+    let pivot_stats = if format == Format::Markdown {
+        let (diffs, pivots) =
+            diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &DiffConfig::default());
+        print!("{}", render_markdown(&diffs, max_rows));
+        pivots.as_ref().map(|p| (p.pivots.len(), p.detected))
     } else {
-        OutputFormat::Pretty
+        diff_and_print(&old_dom, &mut new_dom, format.into())
     };
-    let pivot_stats = diff_and_print(&old_dom, &mut new_dom, format);
     let diff_time = diff_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -402,6 +465,150 @@ fn cmd_git_diff(summary_only: bool, args: &[String]) -> Result<()> {
         OutputFormat::Pretty
     };
     diff_and_print(&old_dom, &mut new_dom, format);
+    Ok(())
+}
+
+/// One Roblox file changed between two revisions.
+struct ChangedFile {
+    status: char,
+    old_path: Option<String>,
+    new_path: Option<String>,
+}
+
+impl ChangedFile {
+    fn display_path(&self) -> &str {
+        self.new_path
+            .as_deref()
+            .or(self.old_path.as_deref())
+            .unwrap_or("?")
+    }
+}
+
+/// `git diff --name-status -z -M` restricted to Roblox files. NUL-separated:
+/// status, path, and for renames/copies a second path.
+fn changed_roblox_files(base: &str, head: &str) -> Result<Vec<ChangedFile>> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-status", "-z", "-M", base, head, "--"])
+        .args(ROBLOX_GLOBS)
+        .output()
+        .context("running git diff")?;
+    if !output.status.success() {
+        bail!(
+            "git diff {base} {head} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let kind = status.chars().next().unwrap_or('?');
+        let first = fields.next().map(str::to_string);
+        let file = match kind {
+            'A' => ChangedFile {
+                status: kind,
+                old_path: None,
+                new_path: first,
+            },
+            'D' => ChangedFile {
+                status: kind,
+                old_path: first,
+                new_path: None,
+            },
+            'R' | 'C' => ChangedFile {
+                status: kind,
+                old_path: first,
+                new_path: fields.next().map(str::to_string),
+            },
+            _ => ChangedFile {
+                status: kind,
+                old_path: first.clone(),
+                new_path: first,
+            },
+        };
+        files.push(file);
+    }
+    Ok(files)
+}
+
+/// Load `<rev>:<path>` as a compact DOM; an absent side is an empty DOM.
+fn load_revision_side(rev: &str, path: Option<&str>) -> Result<DiffDom> {
+    let Some(path) = path else {
+        return Ok(DiffDom::from_weak_dom_owned(WeakDom::new(
+            InstanceBuilder::new("DataModel"),
+        )));
+    };
+    let spec = format!("{rev}:{path}");
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "blob", &spec])
+        .output()
+        .context("running git cat-file")?;
+    if !output.status.success() {
+        bail!(
+            "git cat-file {spec} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let (bytes, source) = source_from_bytes(&spec, output.stdout, Some(path))?;
+    diff_dom_from_bytes(&bytes, source.format)
+}
+
+fn cmd_changes(base: &str, head: &str, format: Format, max_rows: usize) -> Result<()> {
+    let files = changed_roblox_files(base, head)?;
+    let config = DiffConfig::default();
+
+    if files.is_empty() {
+        match format {
+            Format::Json => println!("[]"),
+            Format::Markdown => println!("_No Roblox files changed._"),
+            _ => println!("No Roblox files changed between {base} and {head}."),
+        }
+        return Ok(());
+    }
+
+    let mut json_files = Vec::new();
+    for file in &files {
+        let old_dom = load_revision_side(base, file.old_path.as_deref())?;
+        let mut new_dom = load_revision_side(head, file.new_path.as_deref())?;
+        let (diffs, _) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
+        let status_note = match file.status {
+            'A' => " (added)".to_string(),
+            'D' => " (deleted)".to_string(),
+            'R' => format!(" (renamed from `{}`)", file.old_path.as_deref().unwrap_or("?")),
+            'C' => format!(" (copied from `{}`)", file.old_path.as_deref().unwrap_or("?")),
+            _ => String::new(),
+        };
+        match format {
+            Format::Markdown => {
+                println!("### `{}`{status_note}\n", file.display_path());
+                print!("{}", render_markdown(&diffs, max_rows));
+            }
+            Format::Json => {
+                let counts = DiffCounts::of(&diffs);
+                json_files.push(serde_json::json!({
+                    "path": file.display_path(),
+                    "status": file.status.to_string(),
+                    "oldPath": file.old_path,
+                    "counts": {
+                        "added": counts.added,
+                        "removed": counts.removed,
+                        "modified": counts.modified,
+                        "moved": counts.moved,
+                        "pivoted": counts.pivoted,
+                    },
+                    "diffs": diffs,
+                }));
+            }
+            Format::Pretty | Format::Summary => {
+                println!("== {}{} ==", file.display_path(), status_note);
+                print_diff(&diffs, format.into());
+                println!();
+            }
+        }
+    }
+    if format == Format::Json {
+        println!("{}", serde_json::to_string_pretty(&json_files)?);
+    }
     Ok(())
 }
 
@@ -1204,18 +1411,29 @@ struct Source {
 ///    (`.merge_file_XXXXXX`), and the content is unambiguous: binary files
 ///    open with the `<roblox!` magic, XML with `<roblox`.
 fn read_source(path: &str, hint: Option<&str>) -> Result<(Vec<u8>, Source)> {
-    let mut bytes = std::fs::read(path).with_context(|| format!("opening {path}"))?;
+    let bytes = std::fs::read(path).with_context(|| format!("opening {path}"))?;
+    source_from_bytes(path, bytes, hint)
+}
+
+/// The content-resolution half of [`read_source`], for bytes that did not
+/// come from a file on disk (e.g. `git cat-file`). `label` names the input
+/// in messages and supplies the fallback extension.
+fn source_from_bytes(
+    label: &str,
+    mut bytes: Vec<u8>,
+    hint: Option<&str>,
+) -> Result<(Vec<u8>, Source)> {
     let lfs_pointer = git_lfs::is_pointer(&bytes);
     if lfs_pointer {
-        bytes = git_lfs::smudge(&bytes, hint.unwrap_or(path))
-            .with_context(|| format!("{path} is a Git LFS pointer; resolving its content"))?;
+        bytes = git_lfs::smudge(&bytes, hint.unwrap_or(label))
+            .with_context(|| format!("{label} is a Git LFS pointer; resolving its content"))?;
     }
     let format = match hint
         .and_then(format_from_extension)
-        .or_else(|| format_from_extension(path))
+        .or_else(|| format_from_extension(label))
     {
         Some(format) => format,
-        None => sniff_format(path, &bytes)?,
+        None => sniff_format(label, &bytes)?,
     };
     Ok((
         bytes,
@@ -1224,6 +1442,13 @@ fn read_source(path: &str, hint: Option<&str>) -> Result<(Vec<u8>, Source)> {
             lfs_pointer,
         },
     ))
+}
+
+fn diff_dom_from_bytes(bytes: &[u8], format: FileFormat) -> Result<DiffDom> {
+    Ok(match format {
+        FileFormat::Binary => DiffDom::from_binary_reader(bytes)?,
+        FileFormat::Xml => DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(bytes)?),
+    })
 }
 
 fn format_from_extension(path: &str) -> Option<FileFormat> {
@@ -1264,13 +1489,7 @@ fn load_file(path: &str, hint: Option<&str>) -> Result<(rbx_dom_weak::WeakDom, S
 /// supports it. XML still uses WeakDom as its parser output.
 fn load_diff_file(path: &str, hint: Option<&str>) -> Result<(DiffDom, Source)> {
     let (bytes, source) = read_source(path, hint)?;
-    let dom = match source.format {
-        FileFormat::Binary => DiffDom::from_binary_reader(bytes.as_slice())?,
-        FileFormat::Xml => {
-            DiffDom::from_weak_dom_owned(rbx_xml::from_reader_default(bytes.as_slice())?)
-        }
-    };
-    Ok((dom, source))
+    Ok((diff_dom_from_bytes(&bytes, source.format)?, source))
 }
 
 /// Write a DOM back the way its source arrived: same encoding, and through

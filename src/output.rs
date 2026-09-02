@@ -14,7 +14,15 @@ pub enum OutputFormat {
     Summary,
     /// JSON output for machine processing
     Json,
+    /// GitHub-flavored markdown (tables in collapsible sections) for CI
+    /// step summaries and pull-request comments
+    Markdown,
 }
+
+/// Rows shown per markdown section before "… and N more"; keeps a
+/// per-file section comfortably inside GitHub's 65,536-character comment
+/// limit for typical changes.
+pub const DEFAULT_MARKDOWN_ROWS: usize = 50;
 
 /// Print diff results to stdout.
 pub fn print_diff(diffs: &[DiffEntry], format: OutputFormat) {
@@ -22,6 +30,7 @@ pub fn print_diff(diffs: &[DiffEntry], format: OutputFormat) {
         OutputFormat::Pretty => print_pretty(diffs),
         OutputFormat::Summary => print_summary(diffs),
         OutputFormat::Json => print_json(diffs),
+        OutputFormat::Markdown => print!("{}", render_markdown(diffs, DEFAULT_MARKDOWN_ROWS)),
     }
 }
 
@@ -476,6 +485,162 @@ fn print_summary_line(
         moved.len().to_string().cyan(),
         pivoted.len().to_string().cyan(),
     );
+}
+
+/// Counts per change kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffCounts {
+    pub added: usize,
+    pub removed: usize,
+    pub modified: usize,
+    pub moved: usize,
+    pub pivoted: usize,
+}
+
+impl DiffCounts {
+    pub fn of(diffs: &[DiffEntry]) -> Self {
+        let mut counts = Self::default();
+        for diff in diffs {
+            match diff {
+                DiffEntry::Added { .. } => counts.added += 1,
+                DiffEntry::Removed { .. } => counts.removed += 1,
+                DiffEntry::Modified { .. } => counts.modified += 1,
+                DiffEntry::Moved { .. } => counts.moved += 1,
+                DiffEntry::Pivoted { .. } => counts.pivoted += 1,
+            }
+        }
+        counts
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Markdown table cell: paths and values may contain `|`, backticks, or
+/// newlines, any of which would break the table.
+fn md_cell(text: &str) -> String {
+    let escaped: String = text
+        .chars()
+        .map(|c| match c {
+            '|' => "\\|".to_string(),
+            '\n' | '\r' => " ".to_string(),
+            '`' => "\u{2019}".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    escaped
+}
+
+fn md_code(text: &str) -> String {
+    format!("`{}`", md_cell(text))
+}
+
+/// One collapsible table section. Small sections start open so a reader
+/// sees them without a click; large ones collapse.
+fn md_section(out: &mut String, title: &str, header: &[&str], rows: &[Vec<String>], max_rows: usize) {
+    if rows.is_empty() {
+        return;
+    }
+    let open = if rows.len() <= 10 { " open" } else { "" };
+    out.push_str(&format!(
+        "<details{open}><summary><b>{title}</b> ({})</summary>\n\n",
+        rows.len()
+    ));
+    out.push_str(&format!("| {} |\n", header.join(" | ")));
+    out.push_str(&format!("|{}|\n", header.iter().map(|_| "---").collect::<Vec<_>>().join("|")));
+    for row in rows.iter().take(max_rows) {
+        out.push_str(&format!("| {} |\n", row.join(" | ")));
+    }
+    if rows.len() > max_rows {
+        out.push_str(&format!("\n_… and {} more_\n", rows.len() - max_rows));
+    }
+    out.push_str("\n</details>\n\n");
+}
+
+/// Render a diff as GitHub-flavored markdown: a bold count line, then one
+/// collapsible table per change kind. No heading — callers that render
+/// several files add their own.
+pub fn render_markdown(diffs: &[DiffEntry], max_rows: usize) -> String {
+    let counts = DiffCounts::of(diffs);
+    let mut out = String::new();
+    if counts.is_empty() {
+        out.push_str("_No semantic differences._\n\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "**{} added · {} removed · {} modified · {} moved · {} pivoted**\n\n",
+        counts.added, counts.removed, counts.modified, counts.moved, counts.pivoted
+    ));
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+    let mut moved = Vec::new();
+    let mut pivoted = Vec::new();
+    for diff in diffs {
+        match diff {
+            DiffEntry::Added { path, class, .. } => {
+                added.push(vec![md_code(path), md_cell(class)]);
+            }
+            DiffEntry::Removed { path, class, .. } => {
+                removed.push(vec![md_code(path), md_cell(class)]);
+            }
+            DiffEntry::Modified {
+                path,
+                property_changes,
+                ..
+            } => {
+                for change in property_changes {
+                    let before = change
+                        .old_value
+                        .as_ref()
+                        .map(format_property_value)
+                        .unwrap_or_else(|| "—".to_string());
+                    let after = change
+                        .new_value
+                        .as_ref()
+                        .map(format_property_value)
+                        .unwrap_or_else(|| "—".to_string());
+                    modified.push(vec![
+                        md_code(path),
+                        md_cell(&change.name),
+                        md_code(&before),
+                        md_code(&after),
+                    ]);
+                }
+            }
+            DiffEntry::Moved {
+                old_path,
+                path,
+                class,
+                ..
+            } => {
+                moved.push(vec![md_code(old_path), md_code(path), md_cell(class)]);
+            }
+            DiffEntry::Pivoted {
+                path, class, delta, ..
+            } => {
+                pivoted.push(vec![
+                    md_code(path),
+                    md_cell(class),
+                    md_code(&format_delta(delta)),
+                ]);
+            }
+        }
+    }
+    md_section(&mut out, "Pivoted", &["Model", "Class", "Delta"], &pivoted, max_rows);
+    md_section(&mut out, "Added", &["Instance", "Class"], &added, max_rows);
+    md_section(&mut out, "Removed", &["Instance", "Class"], &removed, max_rows);
+    md_section(&mut out, "Moved", &["From", "To", "Class"], &moved, max_rows);
+    md_section(
+        &mut out,
+        "Modified",
+        &["Instance", "Property", "Before", "After"],
+        &modified,
+        max_rows,
+    );
+    out
 }
 
 fn print_json(diffs: &[DiffEntry]) {

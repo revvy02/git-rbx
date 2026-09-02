@@ -180,3 +180,19 @@ fn pointer_text_in_a_named_file_is_resolved() {
         "{output:?}"
     );
 }
+
+/// `changes` reads blobs through `git cat-file`, which yields pointers for
+/// LFS-tracked files; both sides must be resolved.
+#[test]
+fn changes_resolves_lfs_pointer_blobs() {
+    if !lfs_available() {
+        return;
+    }
+    let repo = lfs_repo("changes");
+    repo.commit_map(&map(0.0, 0.0), "base");
+    repo.commit_map(&map(0.6, 0.0), "edit");
+    assert_pointer(&repo.blob("HEAD:map.rbxm"));
+    let output = repo.rbx(&["changes", "HEAD~1", "HEAD"]);
+    let md = String::from_utf8(output.stdout).unwrap();
+    assert!(md.contains("| `Q` | Transparency | `0` | `0.6` |"), "{md}");
+}
