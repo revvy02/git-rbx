@@ -142,6 +142,40 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Configure git to merge Roblox files through git-rbx: writes the merge
+    /// driver + mergetool config, and a managed block in the repository's
+    /// .gitattributes routing *.rbxl/*.rbxlx/*.rbxm/*.rbxmx through it.
+    /// Idempotent; re-run to update
+    Install {
+        /// Write config to ~/.gitconfig (default) so every repository can use
+        /// it; each teammate runs this once per machine
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
+
+        /// Write config to this repository only
+        #[arg(long)]
+        local: bool,
+
+        /// Only manage git config; leave .gitattributes alone
+        #[arg(long)]
+        no_attributes: bool,
+
+        /// Also install a pre-commit hook that refuses to commit files still
+        /// carrying merge conflict state (`git rbx check`)
+        #[arg(long)]
+        hooks: bool,
+
+        /// Embed this executable path in the driver commands instead of
+        /// relying on `git-rbx` being on PATH
+        #[arg(long, value_name = "PATH")]
+        exe: Option<String>,
+
+        /// Report what is and isn't configured, change nothing; exit 1 on
+        /// any drift (attributes present but driver missing is the classic
+        /// silent failure — git quietly keeps "ours")
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -206,6 +240,27 @@ fn main() -> Result<()> {
             }
         }
         Command::Check { file, json } => cmd_check(&file, json),
+        Command::Install {
+            global,
+            local,
+            no_attributes,
+            hooks,
+            exe,
+            check,
+        } => cmd_install(InstallOptions {
+            scope: if local {
+                ConfigScope::Local
+            } else {
+                // --global is also the default; the flag exists for
+                // explicitness in docs and scripts
+                let _ = global;
+                ConfigScope::Global
+            },
+            attributes: !no_attributes,
+            hooks,
+            exe,
+            check,
+        }),
     }
 }
 
@@ -731,6 +786,302 @@ fn cmd_check(file: &str, json: bool) -> Result<()> {
             Ok(())
         }
     }
+}
+
+// ============================================================================
+// install: git wiring
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigScope {
+    Global,
+    Local,
+}
+
+impl ConfigScope {
+    fn flag(self) -> &'static str {
+        match self {
+            ConfigScope::Global => "--global",
+            ConfigScope::Local => "--local",
+        }
+    }
+}
+
+struct InstallOptions {
+    scope: ConfigScope,
+    attributes: bool,
+    hooks: bool,
+    exe: Option<String>,
+    check: bool,
+}
+
+/// The managed region of .gitattributes. Everything between the markers is
+/// rewritten on every install; user content outside is preserved verbatim.
+const ATTRIBUTES_BEGIN: &str = "# >>> git-rbx (managed; re-run `git rbx install` to update)";
+const ATTRIBUTES_END: &str = "# <<< git-rbx";
+const ROBLOX_GLOBS: [&str; 4] = ["*.rbxl", "*.rbxlx", "*.rbxm", "*.rbxmx"];
+const HOOK_MARKER: &str = "# git-rbx pre-commit";
+
+fn attributes_block() -> String {
+    let mut block = String::new();
+    block.push_str(ATTRIBUTES_BEGIN);
+    block.push('\n');
+    for glob in ROBLOX_GLOBS {
+        // -text: never let git normalize line endings or attempt a text
+        // merge on these; merge=rbx: route three-way merges to the driver.
+        block.push_str(&format!("{glob:<8} merge=rbx -text\n"));
+    }
+    block.push_str(ATTRIBUTES_END);
+    block.push('\n');
+    block
+}
+
+/// Shell-safe reference to the executable inside git config commands.
+fn exe_reference(exe: Option<&str>) -> String {
+    let exe = exe.unwrap_or("git-rbx");
+    if exe.chars().any(char::is_whitespace) {
+        format!("\"{exe}\"")
+    } else {
+        exe.to_string()
+    }
+}
+
+/// (key, value) pairs the driver needs. `recursive = binary` matters on
+/// criss-cross merges: git synthesizes a virtual ancestor by merging, and a
+/// conflict-stamped file must never become the ancestor of the real merge.
+fn config_entries(exe: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "merge.rbx.name",
+            "git-rbx semantic merge for Roblox files".to_string(),
+        ),
+        (
+            "merge.rbx.driver",
+            format!("{exe} merge %O %A %B --path %P"),
+        ),
+        ("merge.rbx.recursive", "binary".to_string()),
+        (
+            "mergetool.rbx.cmd",
+            format!("{exe} resolve \"$MERGED\" --studio"),
+        ),
+        ("mergetool.rbx.trustExitCode", "true".to_string()),
+    ]
+}
+
+fn git_output(args: &[&str]) -> Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .context("running git (is it installed and on PATH?)")?;
+    if output.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim_end().to_string(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn git_run(args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .context("running git (is it installed and on PATH?)")?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn repository_toplevel() -> Result<Option<std::path::PathBuf>> {
+    Ok(git_output(&["rev-parse", "--show-toplevel"])?.map(std::path::PathBuf::from))
+}
+
+fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(program);
+        candidate.is_file() || dir.join(format!("{program}.exe")).is_file()
+    })
+}
+
+/// Replace (or append) the managed block, preserving everything else.
+fn merge_attributes(existing: &str, block: &str) -> String {
+    let mut lines: Vec<&str> = existing.lines().collect();
+    let begin = lines.iter().position(|line| line.trim() == ATTRIBUTES_BEGIN);
+    let end = lines.iter().position(|line| line.trim() == ATTRIBUTES_END);
+    let mut result = String::new();
+    match (begin, end) {
+        (Some(begin), Some(end)) if end >= begin => {
+            lines.drain(begin..=end);
+            for (index, line) in lines.iter().enumerate() {
+                if index == begin {
+                    result.push_str(block);
+                }
+                result.push_str(line);
+                result.push('\n');
+            }
+            if begin >= lines.len() {
+                result.push_str(block);
+            }
+        }
+        _ => {
+            result.push_str(existing);
+            if !existing.is_empty() && !existing.ends_with('\n') {
+                result.push('\n');
+            }
+            if !existing.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(block);
+        }
+    }
+    result
+}
+
+fn hook_script(exe: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+{HOOK_MARKER}: refuse to commit Roblox files still carrying merge conflict state.
+git diff --cached --name-only --diff-filter=ACM -- '*.rbxl' '*.rbxlx' '*.rbxm' '*.rbxmx' |
+while IFS= read -r file; do
+    if ! {exe} check "$file" >/dev/null 2>&1; then
+        echo "git-rbx: $file has unresolved merge conflict state" >&2
+        echo "         resolve it first: git rbx resolve \"$file\" --list" >&2
+        exit 1
+    fi
+done
+"#
+    )
+}
+
+fn cmd_install(options: InstallOptions) -> Result<()> {
+    let exe = exe_reference(options.exe.as_deref());
+    let entries = config_entries(&exe);
+    let toplevel = repository_toplevel()?;
+    if options.scope == ConfigScope::Local && toplevel.is_none() {
+        bail!("--local requires running inside a git repository");
+    }
+    let attributes_path = toplevel.as_ref().map(|top| top.join(".gitattributes"));
+
+    if options.check {
+        return install_check(options.scope, &entries, attributes_path.as_deref());
+    }
+
+    if options.exe.is_none() && !on_path("git-rbx") {
+        eprintln!(
+            "warning: `git-rbx` is not on PATH; the driver git runs will not be found. \
+             Put it on PATH, or re-run with --exe {}",
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<path to git-rbx>".to_string())
+        );
+    }
+
+    for (key, value) in &entries {
+        git_run(&["config", options.scope.flag(), key, value])?;
+    }
+    eprintln!(
+        "Wrote {} git config: merge.rbx.* (driver) and mergetool.rbx.* (Studio resolver)",
+        match options.scope {
+            ConfigScope::Global => "global",
+            ConfigScope::Local => "repository",
+        }
+    );
+
+    if options.attributes {
+        match &attributes_path {
+            Some(path) => {
+                let existing = std::fs::read_to_string(path).unwrap_or_default();
+                let updated = merge_attributes(&existing, &attributes_block());
+                if updated != existing {
+                    std::fs::write(path, updated)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    eprintln!(
+                        "Updated {} (commit it so every clone routes Roblox files through git-rbx)",
+                        path.display()
+                    );
+                } else {
+                    eprintln!("{} already up to date", path.display());
+                }
+            }
+            None => eprintln!(
+                "Not inside a git repository: skipped .gitattributes. Run `git rbx install` \
+                 in each repository once to add the merge=rbx attributes"
+            ),
+        }
+    }
+
+    if options.hooks {
+        let hooks_dir = git_output(&["rev-parse", "--git-path", "hooks"])?
+            .ok_or_else(|| anyhow::anyhow!("--hooks requires running inside a git repository"))?;
+        let hook_path = Path::new(&hooks_dir).join("pre-commit");
+        if let Ok(existing) = std::fs::read_to_string(&hook_path) {
+            if !existing.contains(HOOK_MARKER) {
+                bail!(
+                    "{} already exists and is not managed by git-rbx; add this to it manually:\n\n{}",
+                    hook_path.display(),
+                    hook_script(&exe)
+                );
+            }
+        }
+        std::fs::create_dir_all(&hooks_dir)?;
+        std::fs::write(&hook_path, hook_script(&exe))
+            .with_context(|| format!("writing {}", hook_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        eprintln!("Installed pre-commit hook at {}", hook_path.display());
+    }
+
+    if options.scope == ConfigScope::Global {
+        eprintln!("Done. Each teammate runs `git rbx install` once; the .gitattributes change ships with the repository.");
+    }
+    Ok(())
+}
+
+fn install_check(
+    scope: ConfigScope,
+    entries: &[(&str, String)],
+    attributes_path: Option<&Path>,
+) -> Result<()> {
+    let mut drift = false;
+    let mut report = |ok: bool, what: String| {
+        eprintln!("  [{}] {what}", if ok { "ok" } else { "MISSING" });
+        drift |= !ok;
+    };
+    for (key, expected) in entries {
+        // Any scope may satisfy it at runtime, but report the requested one
+        // so `--local --check` is a precise question.
+        let actual = git_output(&["config", scope.flag(), "--get", key])?;
+        let ok = actual.as_deref() == Some(expected.as_str());
+        report(ok, format!("{key} = {expected}"));
+    }
+    match attributes_path {
+        Some(path) => {
+            let existing = std::fs::read_to_string(path).unwrap_or_default();
+            let ok = existing.contains(&attributes_block());
+            report(ok, format!("{}: managed git-rbx block", path.display()));
+        }
+        None => eprintln!("  [skip] .gitattributes (not inside a git repository)"),
+    }
+    if drift {
+        eprintln!("git-rbx is not fully installed; run: git rbx install{}", match scope {
+            ConfigScope::Global => "",
+            ConfigScope::Local => " --local",
+        });
+        std::process::exit(1);
+    }
+    eprintln!("git-rbx is installed");
+    Ok(())
 }
 
 /// On-disk encoding of a Roblox file. Independent of whether the content is
