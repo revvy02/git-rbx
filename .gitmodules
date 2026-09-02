@@ -1,9 +1,3 @@
-[submodule "rojo"]
-	path = rojo
-	url = https://github.com/rojo-rbx/rojo.git
-[submodule "rensselaer"]
-	path = rensselaer
-	url = https://github.com/example/private-fixture-source.git
 [submodule "rbx-dom"]
 	path = rbx-dom
 	url = https://github.com/revvy02/rbx-dom.git
