@@ -141,3 +141,52 @@ impl Drop for Repo {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+
+// ----------------------------------------------------------------------------
+// Real-world fixtures (private submodule)
+// ----------------------------------------------------------------------------
+
+/// Root of the Rensselaer County fixture set, if available:
+/// `GIT_RBX_FIXTURES` when set, else the `fixtures/` submodule when it has
+/// been initialized. `None` means fixture-backed tests skip — unless
+/// `GIT_RBX_FIXTURES_REQUIRED` is set (CI), in which case they fail loudly
+/// so a missing checkout can never masquerade as a green run.
+pub fn fixtures_root() -> Option<PathBuf> {
+    let candidate = match std::env::var_os("GIT_RBX_FIXTURES") {
+        Some(root) => PathBuf::from(root),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("rc-fixtures"),
+    };
+    // The README is the population marker: an un-initialized submodule is
+    // an empty directory.
+    if candidate.join("README.md").is_file() {
+        return Some(candidate);
+    }
+    if std::env::var_os("GIT_RBX_FIXTURES_REQUIRED").is_some() {
+        panic!(
+            "fixtures required but not found at {} (git submodule update --init rc-fixtures, \
+             or set GIT_RBX_FIXTURES)",
+            candidate.display()
+        );
+    }
+    eprintln!(
+        "SKIP: fixtures not present at {} (git submodule update --init rc-fixtures)",
+        candidate.display()
+    );
+    None
+}
+
+/// Absolute path of a fixture relative to the fixture root, or `None`
+/// (with a skip note) when the fixtures are not available.
+pub fn fixture(relative: &str) -> Option<PathBuf> {
+    fixtures_root().map(|root| root.join(relative))
+}
+
+/// Like [`fixture`] but as a `String`; resolves to a path that does not
+/// exist when fixtures are absent, so existing `exists()` skip guards in
+/// tests keep working unchanged.
+pub fn fixture_str(relative: &str) -> String {
+    fixture(relative)
+        .unwrap_or_else(|| Path::new("/nonexistent/git-rbx-fixtures").join(relative))
+        .to_string_lossy()
+        .into_owned()
+}

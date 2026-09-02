@@ -1,8 +1,12 @@
-//! Regression tests over the real fixture files in tests/ and tests-new/.
+//! Regression tests over the real-world fixture files (the private
+//! `fixtures/` submodule; see tests/common for how they are located).
 //!
 //! Small fixtures run on every `cargo test`. The multi-megabyte place files
 //! are `#[ignore]`d because debug-mode decoding is slow — run them with
 //! `cargo test --release -- --ignored`.
+
+mod common;
+use common::fixture_str;
 
 use rbx_diff::{
     diff_doms, diff_model_compact_doms_with_config, DiffConfig, DiffDom, DiffEntry,
@@ -63,8 +67,8 @@ fn counts(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
 #[test]
 fn union_operation_replaces_parts() {
     let Some(diffs) = diff_files(
-        "tests-new/union-operation/separated-parts.rbxm",
-        "tests-new/union-operation/unioned-parts.rbxm",
+        &fixture_str("union-operation/separated-parts.rbxm"),
+        &fixture_str("union-operation/unioned-parts.rbxm"),
     ) else {
         return;
     };
@@ -81,8 +85,8 @@ fn union_geometry_change_is_detected() {
     // Same size and position, only the CSG geometry differs — exercises the
     // CONTENT_PROPERTY_EXCEPTIONS allowlist (MeshData/ChildData).
     let Some(diffs) = diff_files(
-        "tests-new/union-operation/unioned-parts.rbxm",
-        "tests-new/union-operation/unioned-parts-in-same-spot-but-diff-geometry.rbxm",
+        &fixture_str("union-operation/unioned-parts.rbxm"),
+        &fixture_str("union-operation/unioned-parts-in-same-spot-but-diff-geometry.rbxm"),
     ) else {
         return;
     };
@@ -107,8 +111,8 @@ fn primary_part_retarget_among_same_named_siblings() {
     // Regression for the Ref hashing bug where name+class-only target identity
     // made this invisible to subtree pruning.
     let Some(diffs) = diff_files(
-        "tests-new/referential-properties/primary-part/model-with-grey-primary-part-and-has-dupe-children-names.rbxm",
-        "tests-new/referential-properties/primary-part/model-with-yellow-primary-part-and-has-dupe-children-names.rbxm",
+        &fixture_str("referential-properties/primary-part/model-with-grey-primary-part-and-has-dupe-children-names.rbxm"),
+        &fixture_str("referential-properties/primary-part/model-with-yellow-primary-part-and-has-dupe-children-names.rbxm"),
     ) else {
         return;
     };
@@ -132,8 +136,8 @@ fn primary_part_retarget_among_same_named_siblings() {
 #[ignore = "23MB fixtures; run with cargo test --release -- --ignored"]
 fn case_1_baseline() {
     let Some(diffs) = diff_files(
-        "tests/case_1/map_2.rbxm",
-        "tests/case_1/rcdev_map_current.rbxm",
+        &fixture_str("rcdev-maps/case_1/map_2.rbxm"),
+        &fixture_str("rcdev-maps/case_1/rcdev_map_current.rbxm"),
     ) else {
         return;
     };
@@ -153,8 +157,8 @@ fn case_1_baseline() {
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn save_vs_save_tree_move_is_cframe_changes_only() {
     let Some(diffs) = diff_files(
-        "tests-new/fixtures/rc_manually_saved_build.rbxl",
-        "tests-new/models-moved/rc_build_saved_manually_with_1_tree_moved.rbxl",
+        &fixture_str("rc-builds/rc_manually_saved_build.rbxl"),
+        &fixture_str("models-moved/rc_build_saved_manually_with_1_tree_moved.rbxl"),
     ) else {
         return;
     };
@@ -172,8 +176,8 @@ fn save_vs_save_tree_move_is_cframe_changes_only() {
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn fresh_build_to_manual_save_is_only_known_studio_materialization() {
     let Some(diffs) = diff_files(
-        "tests-new/fixtures/rc_fresh_build.rbxl",
-        "tests-new/fixtures/rc_manually_saved_build.rbxl",
+        &fixture_str("rc-builds/rc_fresh_build.rbxl"),
+        &fixture_str("rc-builds/rc_manually_saved_build.rbxl"),
     ) else {
         return;
     };
@@ -199,11 +203,11 @@ fn fresh_build_to_manual_save_is_only_known_studio_materialization() {
 #[test]
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn two_tree_moves_collapse_to_two_pivots_and_camera_state() {
-    let Some(base) = load_compact("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
+    let Some(base) = load_compact(&fixture_str("rc-builds/rc_manually_saved_build.rbxl")) else {
         return;
     };
     let Some(mut side) =
-        load_compact("tests-new/models-moved/rc_build_saved_manually_with_2_trees_moved.rbxl")
+        load_compact(&fixture_str("models-moved/rc_build_saved_manually_with_2_trees_moved.rbxl"))
     else {
         return;
     };
@@ -243,11 +247,11 @@ fn two_tree_moves_collapse_to_two_pivots_and_camera_state() {
 #[test]
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn police_station_and_nested_moves_collapse_to_three_pivots() {
-    let Some(base) = load_compact("tests-new/fixtures/rc_manually_saved_build.rbxl") else {
+    let Some(base) = load_compact(&fixture_str("rc-builds/rc_manually_saved_build.rbxl")) else {
         return;
     };
     let Some(mut side) = load_compact(
-        "tests-new/models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl",
+        &fixture_str("models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl"),
     ) else {
         return;
     };
@@ -285,8 +289,8 @@ fn police_station_and_nested_moves_collapse_to_three_pivots() {
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn save_vs_save_menu_gui_removal() {
     let Some(diffs) = diff_files(
-        "tests-new/fixtures/rc_manually_saved_build.rbxl",
-        "tests-new/fixtures/rc_menu_gui_removed.rbxl",
+        &fixture_str("rc-builds/rc_manually_saved_build.rbxl"),
+        &fixture_str("rc-builds/rc_menu_gui_removed.rbxl"),
     ) else {
         return;
     };
@@ -305,7 +309,7 @@ fn obj_value_identical_twins_diff_shape() {
     // Two identical "Uniform Giver" models: setting each PrimaryPart to its
     // own ClickPart must diff as exactly two modifications — twin identity
     // must not cross the refs up.
-    let d = "tests-new/referential-properties/obj-value";
+    let d = &fixture_str("referential-properties/obj-value");
     let Some(diffs) = diff_files(
         &format!("{d}/police-station.rbxm"),
         &format!("{d}/police-station-with-2-identical-uni-givers-with-primary-part.rbxm"),

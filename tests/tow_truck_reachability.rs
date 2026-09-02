@@ -5,6 +5,9 @@
 //! tree-shape fingerprint rejects impossible candidates before the expensive
 //! full DOM diff.
 
+mod common;
+use common::fixture;
+
 use rbx_diff::{
     diff_doms, finalize, find_container, list_entries, mark_entry, normalize_model_dom_to_base,
     verify_mesh_geometry,
@@ -16,7 +19,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
 
-const FIXTURE: &str = "tests-new/tow-truck/origin-merge-into-tow-truck";
+const FIXTURE: &str = "tow-truck/origin-merge-into-tow-truck";
 
 fn load(path: &Path) -> WeakDom {
     rbx_binary::from_reader(BufReader::new(File::open(path).unwrap())).unwrap()
@@ -109,7 +112,9 @@ fn resolve_mask(conflicted_bytes: &[u8], mask: usize) -> WeakDom {
 
 #[test]
 fn human_merge_is_reachable_from_binary_conflict_decisions() {
-    let fixture = Path::new(FIXTURE);
+    let Some(fixture) = fixture(FIXTURE) else {
+        return;
+    };
     if !fixture.join("merged-expected.rbxm").exists() {
         eprintln!("SKIP: origin tow-truck fixture not present");
         return;

@@ -1,6 +1,9 @@
 //! Edit-script round-trip tests: applying compute_edit_script(old, new) to
 //! `old` must produce a DOM with an empty diff against `new`.
 
+mod common;
+use common::fixture_str;
+
 use rbx_diff::{apply_edit_script, compute_edit_script, diff_doms, DiffConfig, EditOp};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Color3uint8, Content, Matrix3, Variant, Vector3};
@@ -398,24 +401,24 @@ fn assert_file_round_trip(old_path: &str, new_path: &str) {
 #[test]
 fn round_trip_union_fixture() {
     assert_file_round_trip(
-        "tests-new/union-operation/separated-parts.rbxm",
-        "tests-new/union-operation/unioned-parts.rbxm",
+        &fixture_str("union-operation/separated-parts.rbxm"),
+        &fixture_str("union-operation/unioned-parts.rbxm"),
     );
 }
 
 #[test]
 fn round_trip_union_geometry_fixture() {
     assert_file_round_trip(
-        "tests-new/union-operation/unioned-parts.rbxm",
-        "tests-new/union-operation/unioned-parts-in-same-spot-but-diff-geometry.rbxm",
+        &fixture_str("union-operation/unioned-parts.rbxm"),
+        &fixture_str("union-operation/unioned-parts-in-same-spot-but-diff-geometry.rbxm"),
     );
 }
 
 #[test]
 fn round_trip_primary_part_fixture() {
     assert_file_round_trip(
-        "tests-new/referential-properties/primary-part/model-with-grey-primary-part-and-has-dupe-children-names.rbxm",
-        "tests-new/referential-properties/primary-part/model-with-yellow-primary-part-and-has-dupe-children-names.rbxm",
+        &fixture_str("referential-properties/primary-part/model-with-grey-primary-part-and-has-dupe-children-names.rbxm"),
+        &fixture_str("referential-properties/primary-part/model-with-yellow-primary-part-and-has-dupe-children-names.rbxm"),
     );
 }
 
@@ -423,8 +426,8 @@ fn round_trip_primary_part_fixture() {
 #[ignore = "46MB fixtures; run with cargo test --release -- --ignored"]
 fn round_trip_full_place() {
     assert_file_round_trip(
-        "tests-new/fixtures/rc_manually_saved_build.rbxl",
-        "tests-new/models-moved/rc_build_saved_manually_with_1_tree_moved.rbxl",
+        &fixture_str("rc-builds/rc_manually_saved_build.rbxl"),
+        &fixture_str("models-moved/rc_build_saved_manually_with_1_tree_moved.rbxl"),
     );
 }
 
@@ -474,7 +477,7 @@ fn round_trip_obj_value_cross_refs_between_identical_twins() {
     // pointing at the OTHER twin's ClickPart. After applying the edit script,
     // the topology the fixture README specifies must hold with the right
     // polarity — a symmetric swap would slip past a diff-empty check alone.
-    let d = "tests-new/referential-properties/obj-value";
+    let d = fixture_str("referential-properties/obj-value");
     let old_path = format!("{d}/police-station-with-2-identical-uni-givers-with-primary-part.rbxm");
     let new_path = format!("{d}/police-station-with-the-uni-primary-parts-but-with-obj-value-that-references-the-other-uni-giver.rbxm");
     let (Some(mut old), Some(new)) = (load(&old_path), load(&new_path)) else {

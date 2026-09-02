@@ -11,6 +11,9 @@
 //!
 //! Run with: cargo test --release --test precision_probe -- --ignored --nocapture
 
+mod common;
+use common::fixture_str;
+
 use rbx_dom_weak::types::{Ref, Variant};
 use rbx_dom_weak::WeakDom;
 use std::collections::HashMap;
@@ -18,10 +21,11 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-const BASE: &str = "tests-new/fixtures/rc_manually_saved_build.rbxl";
-const MOVED: &str = "tests-new/models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl";
+const BASE: &str = "rc-builds/rc_manually_saved_build.rbxl";
+const MOVED: &str = "models-moved/rc_police_station_model_moved_with_internal_models_moved_too.rbxl";
 
-fn load(path: &str) -> Option<WeakDom> {
+fn load(relative: &str) -> Option<WeakDom> {
+    let path = &fixture_str(relative);
     if !Path::new(path).exists() {
         eprintln!("SKIP: fixture {path} not present");
         return None;

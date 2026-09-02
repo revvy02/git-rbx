@@ -1,7 +1,10 @@
 //! Contracts for the real-world fixture directories that are too specialized
 //! for the focused unit tests. The final inventory test makes adding a binary
-//! under `tests-new` an explicit decision: every asset must belong to a named
+//! in the fixture set an explicit decision: every asset must belong to a named
 //! behavior contract rather than merely being parseable test data.
+
+mod common;
+use common::{fixture, fixtures_root};
 
 use rbx_diff::{
     diff_doms, diff_model_doms_with_config, find_container, list_entries, DiffConfig, DiffEntry,
@@ -15,13 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const PIVOT_FRAME: &str = "tests-new/model-pivot-reference-frame";
-const ASSEMBLY: &str = "tests-new/tow-truck/assembly-refactor-boundary";
-const ROLLBACK: &str = "tests-new/tow-truck/rollback-tow-remerge";
-
-fn fixture_path(root: &str, name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(root).join(name)
-}
+const PIVOT_FRAME: &str = "model-pivot-reference-frame";
+const ASSEMBLY: &str = "tow-truck/assembly-refactor-boundary";
+const ROLLBACK: &str = "tow-truck/rollback-tow-remerge";
 
 fn load(path: &Path) -> WeakDom {
     rbx_binary::from_reader(BufReader::new(File::open(path).unwrap())).unwrap()
@@ -359,10 +358,13 @@ fn named_property(dom: &WeakDom, instance_name: &str, property: &str) -> Variant
 
 #[test]
 fn model_pivot_reference_frame_separates_content_placement_from_world_pivot() {
-    let base_path = fixture_path(PIVOT_FRAME, "base.rbxm");
-    let ours_path = fixture_path(PIVOT_FRAME, "ours.rbxm");
-    let theirs_path = fixture_path(PIVOT_FRAME, "theirs.rbxm");
-    let expected_path = fixture_path(PIVOT_FRAME, "expected.rbxm");
+    let Some(dir) = fixture(PIVOT_FRAME) else {
+        return;
+    };
+    let base_path = dir.join("base.rbxm");
+    let ours_path = dir.join("ours.rbxm");
+    let theirs_path = dir.join("theirs.rbxm");
+    let expected_path = dir.join("expected.rbxm");
     let base = load(&base_path);
     let ours = load(&ours_path);
     let theirs = load(&theirs_path);
@@ -445,8 +447,11 @@ fn model_pivot_reference_frame_separates_content_placement_from_world_pivot() {
 
 #[test]
 fn assembly_refactor_fixture_preserves_graph_markers_and_stable_geometry() {
-    let before = load(&fixture_path(ASSEMBLY, "before-refactor.rbxm"));
-    let after = load(&fixture_path(ASSEMBLY, "after-refactor-part-graphs.rbxm"));
+    let Some(dir) = fixture(ASSEMBLY) else {
+        return;
+    };
+    let before = load(&dir.join("before-refactor.rbxm"));
+    let after = load(&dir.join("after-refactor-part-graphs.rbxm"));
     let diffs = diff_doms(&before, &after);
     assert_eq!(counts(&diffs), (56, 116, 1608, 24, 0), "{diffs:#?}");
 
@@ -485,10 +490,13 @@ fn assembly_refactor_fixture_preserves_graph_markers_and_stable_geometry() {
 
 #[test]
 fn rollback_remerge_resolves_and_preserves_the_semantic_oracle() {
-    let base_path = fixture_path(ROLLBACK, "base.rbxm");
-    let ours_path = fixture_path(ROLLBACK, "ours-rollback-tow-new-model.rbxm");
-    let theirs_path = fixture_path(ROLLBACK, "theirs-tow-truck-improvements.rbxm");
-    let expected_path = fixture_path(ROLLBACK, "merged-expected.rbxm");
+    let Some(dir) = fixture(ROLLBACK) else {
+        return;
+    };
+    let base_path = dir.join("base.rbxm");
+    let ours_path = dir.join("ours-rollback-tow-new-model.rbxm");
+    let theirs_path = dir.join("theirs-tow-truck-improvements.rbxm");
+    let expected_path = dir.join("merged-expected.rbxm");
     let scratch = scratch("rollback-remerge");
     let conflicted = scratch.join("conflicted.rbxm");
 
@@ -564,9 +572,14 @@ fn rollback_remerge_resolves_and_preserves_the_semantic_oracle() {
 #[test]
 fn every_tests_new_binary_fixture_has_an_explicit_contract() {
     const COVERED: &[&str] = &[
-        "fixtures/rc_fresh_build.rbxl",
-        "fixtures/rc_manually_saved_build.rbxl",
-        "fixtures/rc_menu_gui_removed.rbxl",
+        "rc-builds/rc_fresh_build.rbxl",
+        "rc-builds/rc_manually_saved_build.rbxl",
+        "rc-builds/rc_menu_gui_removed.rbxl",
+        "rcdev-maps/case_1/map_2.rbxm",
+        "rcdev-maps/case_1/rcdev_map_current.rbxm",
+        "rcdev-maps/case_2/rcdev_current.rbxl",
+        "rcdev-maps/case_2/rcdev_old.rbxl",
+        "rcdev-maps/case_3/rcdev.rbxl",
         "model-pivot-reference-frame/base.rbxm",
         "model-pivot-reference-frame/expected.rbxm",
         "model-pivot-reference-frame/ours.rbxm",
@@ -616,7 +629,9 @@ fn every_tests_new_binary_fixture_has_an_explicit_contract() {
         }
     }
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests-new");
+    let Some(root) = fixtures_root() else {
+        return;
+    };
     let mut actual = BTreeSet::new();
     visit(&root, &root, &mut actual);
     let covered: BTreeSet<_> = COVERED.iter().map(|path| (*path).to_string()).collect();

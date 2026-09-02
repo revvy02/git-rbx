@@ -3,6 +3,9 @@
 //! tested. These assertions compare the raw serialized CFrames after each
 //! resolution against the corresponding original branch.
 
+mod common;
+use common::fixture;
+
 use rbx_diff::{diff_model_doms_with_config, DiffConfig, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{Attributes, CFrame, Matrix3, Variant, Vector3};
@@ -640,11 +643,9 @@ fn run(binary: &str, args: &[&str], expected_success: bool) {
 
 #[test]
 fn tow_truck_content_and_property_pivot_choices_reconstruct_each_raw_branch() {
-    let fixture = Path::new("tests-new/tow-truck-rotation");
-    if !fixture.join("base.rbxm").exists() {
-        eprintln!("SKIP: tow-truck-rotation fixture not present");
+    let Some(fixture) = fixture("tow-truck-rotation") else {
         return;
-    }
+    };
 
     let binary = env!("CARGO_BIN_EXE_git-rbx");
     let scratch = std::env::temp_dir().join(format!("rbx-diff-pivot-test-{}", std::process::id()));

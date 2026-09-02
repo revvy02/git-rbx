@@ -292,8 +292,16 @@ diffs cleanly against its base apart from the conflicts themselves.
 ```sh
 cargo build --release
 cargo test --release                  # ~180 tests, including real-git and git-lfs flows
-cargo test --release -- --ignored     # large real-world fixtures (tens of MB)
+cargo test --release -- --ignored     # the multi-megabyte real-world place captures
 ```
+
+Real-world fixtures (Rensselaer County place and model captures) live in a
+private repository mounted as the `rc-fixtures/` submodule. Tests that
+need them skip when it is not checked out, so the suite is green without
+access; with access, `git submodule update --init rc-fixtures` (about
+450 MB through Git LFS) enables them, and `GIT_RBX_FIXTURES_REQUIRED=1`
+turns a missing fixture into a failure (CI sets it). Synthetic fixtures
+built in code stay in `tests/`.
 
 The library (`rbx-diff`) holds the engine — `match_instances` (per-parent
 identity), `move_detect` (global pairing), `hash` (content hashes),

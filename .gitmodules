@@ -2,3 +2,6 @@
 	path = rbx-dom
 	url = https://github.com/revvy02/rbx-dom.git
 	branch = rbx-diff-direct-dom
+[submodule "fixtures"]
+	path = rc-fixtures
+	url = https://github.com/revvy02/git-rbx-rensselaer-county-fixtures.git
