@@ -10,9 +10,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 mod git_lfs;
 
-use rbx_diff::output::{print_diff, render_markdown, DiffCounts, OutputFormat, DEFAULT_MARKDOWN_ROWS};
+use git_rbx::output::{print_diff, render_markdown, DiffCounts, OutputFormat, DEFAULT_MARKDOWN_ROWS};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
-use rbx_diff::{
+use git_rbx::{
     apply_pivot_ops, apply_pivot_ops_to_compact_branch, conflict_report, detect_rigid_groups,
     diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
     mark_entry_custom, merge_compact_doms, merge_compact_doms_with_matches_and_pivots,
@@ -866,7 +866,7 @@ fn cmd_merge(
 /// Compact one-line summary of a rigid delta for merge/normalization output —
 /// the same axis-angle formatting the pivoted diff rows use.
 fn format_delta(cf: &rbx_types::CFrame) -> String {
-    rbx_diff::output::format_delta(&(*cf).into())
+    git_rbx::output::format_delta(&(*cf).into())
 }
 
 fn is_model_asset_path(path: &str) -> bool {

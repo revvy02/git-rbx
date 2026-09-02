@@ -6,7 +6,7 @@
 mod common;
 use common::{fixture, fixtures_root};
 
-use rbx_diff::{
+use git_rbx::{
     diff_doms, diff_model_doms_with_config, find_container, list_entries, DiffConfig, DiffEntry,
 };
 use rbx_dom_weak::{types::Ref, WeakDom};

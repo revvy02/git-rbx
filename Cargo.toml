@@ -1,12 +1,12 @@
 [package]
-name = "rbx-diff"
-version = "0.1.0"
+name = "git-rbx"
+version = "0.0.1"
 edition = "2021"
 description = "Semantic diff, three-way merge, and conflict resolution for Roblox place/model files, as a git extension (git rbx)"
 autobins = false
 
-# The library keeps the descriptive crate name; the CLI ships as a git
-# extension so `git rbx <subcommand>` resolves to it.
+# The CLI ships as a git extension so `git rbx <subcommand>` resolves to it;
+# the library is `git_rbx`.
 [[bin]]
 name = "git-rbx"
 path = "src/main.rs"

@@ -2,7 +2,7 @@
 //! `merge --json`): everything an automated resolver needs is read back from
 //! the stamped file, and it tracks resolution state as entries are marked.
 
-use rbx_diff::{
+use git_rbx::{
     conflict_report, find_container, list_entries, mark_entry, mark_entry_custom, merge_doms,
     stamp_conflicts, ConflictReport, DiffConfig, SCHEMA_VERSION,
 };

@@ -3,7 +3,7 @@
 //! conflicts must cluster into a single group, while a part moved
 //! differently stays ungrouped. Resolving by group name fans out to members.
 
-use rbx_diff::{
+use git_rbx::{
     detect_rigid_groups, finalize, find_container, list_entries, mark_entry, merge_doms,
     stamp_conflicts, stamp_rigid_groups, DiffConfig,
 };
@@ -169,7 +169,7 @@ fn model_pivots_keep_unrelated_identical_moves_separate() {
             .collect();
         assert!(properties.iter().any(|kind| matches!(
             kind,
-            rbx_diff::ConflictKind::Property { name } if name == "WorldPivotData"
+            git_rbx::ConflictKind::Property { name } if name == "WorldPivotData"
         )));
     }
 }

@@ -2,7 +2,7 @@
 //! tolerate representation noise according to each property's useful
 //! authoring precision.
 
-use rbx_diff::{diff_doms, merge_doms, DiffConfig, DiffEntry};
+use git_rbx::{diff_doms, merge_doms, DiffConfig, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Matrix3, Variant, Vector3};
 

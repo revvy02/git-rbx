@@ -182,7 +182,7 @@ fn agent_loop_merge_list_take_finalize_check() {
     assert_eq!(transparency(&final_dom, "Q"), Some(0.2));
     assert_eq!(transparency(&final_dom, "R"), Some(0.9));
     assert!(
-        final_dom.descendants().all(|i| i.name != rbx_diff::CONTAINER_NAME),
+        final_dom.descendants().all(|i| i.name != git_rbx::CONTAINER_NAME),
         "finalize strips the container"
     );
 

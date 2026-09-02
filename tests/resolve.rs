@@ -1,7 +1,7 @@
 //! In-file conflict state tests: conflicted merge → stamp → (serialize/reload)
 //! → mark → finalize → clean file with the chosen content.
 
-use rbx_diff::{
+use git_rbx::{
     diff_doms, finalize, find_container, list_entries, mark_entry, merge_doms, stamp_conflicts,
     DiffConfig, VIRTUAL_TREES_NAME,
 };
@@ -42,7 +42,7 @@ fn conflicted_mesh_merge() -> WeakDom {
     assert_eq!(result.conflicts.len(), 1, "{:#?}", result.conflicts);
     assert!(matches!(
         &result.conflicts[0].kind,
-        rbx_diff::ConflictKind::PropertyBundle { name, properties }
+        git_rbx::ConflictKind::PropertyBundle { name, properties }
             if name == "Mesh geometry"
                 && properties.iter().any(|property| property == "MeshContent")
                 && properties.iter().any(|property| property == "InitialSize")
@@ -408,7 +408,7 @@ fn delete_vs_edit_snapshot_preserves_internal_references() {
     assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
     assert_eq!(
         result.conflicts[0].kind,
-        rbx_diff::ConflictKind::DeleteVsEdit
+        git_rbx::ConflictKind::DeleteVsEdit
     );
 
     stamp_conflicts(&mut base, &ours, &theirs, &result);
@@ -496,7 +496,7 @@ fn stamped_file_diffs_cleanly_against_base() {
     let residual = diff_doms(&base_dom(), &dom);
     let structural: Vec<_> = residual
         .iter()
-        .filter(|d| !matches!(d, rbx_diff::DiffEntry::Modified { .. }))
+        .filter(|d| !matches!(d, git_rbx::DiffEntry::Modified { .. }))
         .collect();
     assert!(
         structural.is_empty(),
@@ -513,7 +513,7 @@ fn custom_resolution_applies_the_supplied_value() {
     let container = find_container(&dom).unwrap();
     let entry = list_entries(&dom, container)[0].entry_ref;
 
-    rbx_diff::mark_entry_custom(&mut dom, entry, &serde_json::json!(0.5)).unwrap();
+    git_rbx::mark_entry_custom(&mut dom, entry, &serde_json::json!(0.5)).unwrap();
 
     // The custom value must survive the file format like every other bit of
     // conflict state
@@ -539,7 +539,7 @@ fn custom_resolution_rejects_wrong_shapes() {
     let entry = list_entries(&dom, container)[0].entry_ref;
 
     // Transparency is a number; a string must be rejected with the property named
-    let err = rbx_diff::mark_entry_custom(&mut dom, entry, &serde_json::json!("nope")).unwrap_err();
+    let err = git_rbx::mark_entry_custom(&mut dom, entry, &serde_json::json!("nope")).unwrap_err();
     assert!(err.to_string().contains("Transparency"), "{err}");
 
     // Unresolved after the failed mark: finalize still refuses
@@ -561,7 +561,7 @@ fn custom_resolution_rejects_non_property_conflicts() {
 
     let container = find_container(&base).unwrap();
     let entry = list_entries(&base, container)[0].entry_ref;
-    let err = rbx_diff::mark_entry_custom(&mut base, entry, &serde_json::json!(1.0)).unwrap_err();
+    let err = git_rbx::mark_entry_custom(&mut base, entry, &serde_json::json!(1.0)).unwrap_err();
     assert!(err.to_string().contains("DeleteVsEdit"), "{err}");
 }
 
@@ -584,7 +584,7 @@ fn custom_resolution_handles_color3uint8_properties() {
 
     let container = find_container(&base).unwrap();
     let entry = list_entries(&base, container)[0].entry_ref;
-    rbx_diff::mark_entry_custom(&mut base, entry, &serde_json::json!([0.2353, 0.4706, 1.0]))
+    git_rbx::mark_entry_custom(&mut base, entry, &serde_json::json!([0.2353, 0.4706, 1.0]))
         .unwrap();
 
     // Survive the file format (Color3 attribute round-trip)

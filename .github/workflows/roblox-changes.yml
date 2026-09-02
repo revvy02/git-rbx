@@ -48,8 +48,21 @@ jobs:
       - name: Fetch LFS objects for both revisions
         run: git lfs fetch origin "${{ steps.revs.outputs.base }}" "${{ steps.revs.outputs.head }}" || true
 
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          # Only git-rbx is needed here; don't install the tools listed in
+          # this repository's own mise.toml.
+          install: false
+
       - name: Install git-rbx
-        run: cargo install --locked --git https://github.com/revvy02/git-rbx
+        # Release binaries are on github.com/revvy02/git-rbx/releases. That
+        # repository is private, so the token must be able to read it: the
+        # default job token works for workflows inside git-rbx itself; from
+        # another repository use a PAT secret with access to git-rbx.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GIT_RBX_TOKEN || github.token }}
+        run: mise use -g ubi:revvy02/git-rbx@latest
 
       - name: Render semantic changes
         shell: bash

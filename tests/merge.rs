@@ -2,7 +2,7 @@
 //! conflict kind. The merged DOM is verified by diffing against a hand-built
 //! expected DOM (empty diff = exact merge).
 
-use rbx_diff::{
+use git_rbx::{
     diff_doms, merge_compact_doms, merge_doms, ConflictKind, DiffConfig, DiffDom, MergeResult,
 };
 use rbx_dom_weak::{InstanceBuilder, WeakDom};

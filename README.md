@@ -29,8 +29,23 @@ see in Studio — leave it; resolving removes it). Resolve with:
 
 ## Install
 
-Build the binary and put it on your `PATH` as `git-rbx`; git then dispatches
-`git rbx <subcommand>` to it.
+The binary has to be on your `PATH` as `git-rbx`; git then dispatches
+`git rbx <subcommand>` to it. Prebuilt binaries ship on every
+[release](https://github.com/revvy02/git-rbx/releases) for macOS (Apple
+silicon and Intel), Linux x86_64, and Windows x86_64.
+
+With [mise](https://mise.jdx.dev), add it to your project's `mise.toml` (or
+`mise use -g ubi:revvy02/git-rbx@latest` for every project):
+
+```toml
+[tools]
+"ubi:revvy02/git-rbx" = "latest"
+```
+
+The repository is private, so mise needs a `GITHUB_TOKEN` in the environment
+with access to it to fetch the release asset.
+
+Or build from source:
 
 ```sh
 cargo install --locked --git https://github.com/revvy02/git-rbx
@@ -303,7 +318,7 @@ access; with access, `git submodule update --init rc-fixtures` (about
 turns a missing fixture into a failure (CI sets it). Synthetic fixtures
 built in code stay in `tests/`.
 
-The library (`rbx-diff`) holds the engine — `match_instances` (per-parent
+The library (`git_rbx`) holds the engine — `match_instances` (per-parent
 identity), `move_detect` (global pairing), `hash` (content hashes),
 `edit_script` (semantic change sets and materialization), `merge` (the
 three-way combiner), `model_normalize`/`placement` (pivot factoring),

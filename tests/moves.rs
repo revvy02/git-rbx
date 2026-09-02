@@ -1,7 +1,7 @@
 //! Move detection integration tests: build old/new DOMs directly and assert
 //! on the diff taxonomy (added / removed / modified / moved).
 
-use rbx_diff::{diff_doms, DiffEntry};
+use git_rbx::{diff_doms, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{Content, Variant};
 

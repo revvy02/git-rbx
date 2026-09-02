@@ -4,7 +4,7 @@
 //! into the subtree regardless of how (or before) the move conflict is
 //! resolved, and travel with the subtree to whichever destination wins.
 
-use rbx_diff::{
+use git_rbx::{
     finalize, find_container, list_entries, mark_entry, merge_doms, stamp_conflicts,
     ConflictKind, DiffConfig,
 };

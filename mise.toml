@@ -18,7 +18,6 @@ cargo build --release
 mkdir -p bin
 cp target/release/git-rbx bin/git-rbx.new
 mv -f bin/git-rbx.new bin/git-rbx
-rm -f bin/rbx-diff
 """
 
 [tasks.icons]

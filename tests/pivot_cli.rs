@@ -6,7 +6,7 @@
 mod common;
 use common::fixture;
 
-use rbx_diff::{diff_model_doms_with_config, DiffConfig, DiffEntry};
+use git_rbx::{diff_model_doms_with_config, DiffConfig, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{Attributes, CFrame, Matrix3, Variant, Vector3};
 use std::fs::File;

@@ -1,4 +1,4 @@
-use rbx_diff::diff_doms;
+use git_rbx::diff_doms;
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Content, Matrix3, Variant, Vector3};
 

@@ -292,6 +292,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-rbx"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clap",
+ "colored",
+ "rbx_binary",
+ "rbx_dom_weak",
+ "rbx_reflection",
+ "rbx_reflection_database",
+ "rbx_types",
+ "rbx_xml",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -515,27 +536,6 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
-
-[[package]]
-name = "rbx-diff"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "clap",
- "colored",
- "rbx_binary",
- "rbx_dom_weak",
- "rbx_reflection",
- "rbx_reflection_database",
- "rbx_types",
- "rbx_xml",
- "rustc-hash",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "rbx_binary"

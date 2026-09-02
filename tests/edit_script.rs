@@ -4,7 +4,7 @@
 mod common;
 use common::fixture_str;
 
-use rbx_diff::{apply_edit_script, compute_edit_script, diff_doms, DiffConfig, EditOp};
+use git_rbx::{apply_edit_script, compute_edit_script, diff_doms, DiffConfig, EditOp};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use rbx_types::{CFrame, Color3uint8, Content, Matrix3, Variant, Vector3};
 use std::fs::File;

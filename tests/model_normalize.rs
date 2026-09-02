@@ -1,4 +1,4 @@
-use rbx_diff::{
+use git_rbx::{
     apply_pivot_ops, diff_doms, diff_model_compact_doms_with_config,
     diff_model_compact_old_with_config, diff_model_doms_with_config, finalize, find_container,
     list_entries, mark_entry, merge_compact_doms_with_matches_and_pivots, merge_doms,

@@ -8,7 +8,7 @@
 mod common;
 use common::fixture;
 
-use rbx_diff::{
+use git_rbx::{
     diff_doms, finalize, find_container, list_entries, mark_entry, normalize_model_dom_to_base,
     verify_mesh_geometry,
 };

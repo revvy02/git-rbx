@@ -4,7 +4,7 @@
 //! here started as a confirmed false conflict (or lost move) — keep them
 //! passing when touching match_instances, move_detect, or the merge combiner.
 
-use rbx_diff::{diff_doms, merge_doms, DiffConfig};
+use git_rbx::{diff_doms, merge_doms, DiffConfig};
 use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
 use rbx_types::Variant;
 
@@ -191,13 +191,13 @@ fn probe_rename_plus_reparent_diff() {
     assert!(
         diffs
             .iter()
-            .any(|d| matches!(d, rbx_diff::DiffEntry::Moved { .. })),
+            .any(|d| matches!(d, git_rbx::DiffEntry::Moved { .. })),
         "expected a Moved entry: {diffs:#?}"
     );
     assert!(
         !diffs.iter().any(|d| matches!(
             d,
-            rbx_diff::DiffEntry::Removed { .. } | rbx_diff::DiffEntry::Added { .. }
+            git_rbx::DiffEntry::Removed { .. } | git_rbx::DiffEntry::Added { .. }
         )),
         "rename+reparent must not decay to remove+add: {diffs:#?}"
     );

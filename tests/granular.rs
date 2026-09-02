@@ -2,7 +2,7 @@
 //! finalize per key (`Attributes.<key>` / `Tags.<tag>`), so branches touching
 //! different keys compose instead of conflicting.
 
-use rbx_diff::{
+use git_rbx::{
     apply_edit_script, compute_edit_script, diff_doms, finalize, find_container, list_entries,
     mark_entry, mark_entry_custom, merge_doms, stamp_conflicts, ConflictKind, DiffConfig,
     DiffEntry, PropertyValue,

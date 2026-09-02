@@ -8,7 +8,7 @@
 mod common;
 use common::fixture_str;
 
-use rbx_diff::{
+use git_rbx::{
     diff_doms, diff_model_compact_doms_with_config, DiffConfig, DiffDom, DiffEntry,
 };
 use rbx_dom_weak::WeakDom;
