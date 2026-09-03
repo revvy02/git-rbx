@@ -1,5 +1,5 @@
-//! Move detection integration tests: build old/new DOMs directly and assert
-//! on the diff taxonomy (added / removed / modified / moved).
+//! Reparent detection integration tests: build old/new DOMs directly and assert
+//! on the diff taxonomy (added / removed / modified / reparented).
 
 use git_rbx::{diff_doms, DiffEntry};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
@@ -31,7 +31,7 @@ fn summarize(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
             DiffEntry::Added { .. } => counts.0 += 1,
             DiffEntry::Removed { .. } => counts.1 += 1,
             DiffEntry::Modified { .. } => counts.2 += 1,
-            DiffEntry::Moved { .. } => counts.3 += 1,
+            DiffEntry::Reparented { .. } => counts.3 += 1,
             DiffEntry::Pivoted { .. } => {}
         }
     }
@@ -53,15 +53,15 @@ fn pure_move_is_reported_as_moved_not_add_remove() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
+    let (added, removed, modified, reparented) = summarize(&diffs);
 
-    assert_eq!(moved, 1, "expected exactly one move, got diffs: {:?}", diffs);
+    assert_eq!(reparented, 1, "expected exactly one reparent, got diffs: {:?}", diffs);
     assert_eq!(added, 0);
     assert_eq!(removed, 0);
     assert_eq!(modified, 0);
 
-    match diffs.iter().find(|d| matches!(d, DiffEntry::Moved { .. })).unwrap() {
-        DiffEntry::Moved {
+    match diffs.iter().find(|d| matches!(d, DiffEntry::Reparented { .. })).unwrap() {
+        DiffEntry::Reparented {
             old_path,
             path,
             class,
@@ -76,8 +76,8 @@ fn pure_move_is_reported_as_moved_not_add_remove() {
 }
 
 #[test]
-fn move_with_edit_reports_primitive_moved_and_modified_entries() {
-    // P moves from A to B and its Transparency changes
+fn reparent_with_edit_reports_primitive_reparented_and_modified_entries() {
+    // P is reparented from A to B and its Transparency changes
     let old = WeakDom::new(
         folder("root")
             .with_child(folder("A").with_child(part("P")))
@@ -97,9 +97,9 @@ fn move_with_edit_reports_primitive_moved_and_modified_entries() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
+    let (added, removed, modified, reparented) = summarize(&diffs);
 
-    assert_eq!(moved, 1, "expected one move, got diffs: {:?}", diffs);
+    assert_eq!(reparented, 1, "expected one reparent, got diffs: {:?}", diffs);
     assert_eq!(
         modified, 1,
         "expected a separate modification, got diffs: {:?}",
@@ -124,7 +124,7 @@ fn move_with_edit_reports_primitive_moved_and_modified_entries() {
 }
 
 #[test]
-fn different_mesh_content_is_not_inferred_as_a_move() {
+fn different_mesh_content_is_not_inferred_as_a_reparent() {
     let old = WeakDom::new(
         folder("root")
             .with_child(folder("A").with_child(mesh_part("P", "rbxassetid://1")))
@@ -142,7 +142,7 @@ fn different_mesh_content_is_not_inferred_as_a_move() {
 
 #[test]
 fn moved_subtree_with_nested_edit_reports_nested_modification() {
-    // A whole folder moves, and a part inside it is edited
+    // A whole folder is reparented, and a part inside it is edited
     let old = WeakDom::new(
         folder("root")
             .with_child(folder("A").with_child(folder("Sub").with_child(part("P"))))
@@ -164,9 +164,9 @@ fn moved_subtree_with_nested_edit_reports_nested_modification() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
+    let (added, removed, modified, reparented) = summarize(&diffs);
 
-    assert_eq!(moved, 1, "expected one move (Sub), got diffs: {:?}", diffs);
+    assert_eq!(reparented, 1, "expected one reparent (Sub), got diffs: {:?}", diffs);
     assert_eq!(modified, 1, "expected nested edit on P, got diffs: {:?}", diffs);
     assert_eq!(added, 0);
     assert_eq!(removed, 0);
@@ -206,9 +206,9 @@ fn dissimilar_same_name_instances_stay_added_and_removed() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, _modified, moved) = summarize(&diffs);
+    let (added, removed, _modified, reparented) = summarize(&diffs);
 
-    assert_eq!(moved, 0, "dissimilar instances must not pair as a move: {:?}", diffs);
+    assert_eq!(reparented, 0, "dissimilar instances must not pair as a reparent: {:?}", diffs);
     assert_eq!(added, 1);
     assert_eq!(removed, 1);
 }
@@ -216,7 +216,7 @@ fn dissimilar_same_name_instances_stay_added_and_removed() {
 #[test]
 fn plain_add_and_remove_still_work() {
     // Different classes so neither the per-parent class fallback (which pairs
-    // same-class siblings as renames) nor move detection can pair them.
+    // same-class siblings as renames) nor reparent detection can pair them.
     let old = WeakDom::new(
         folder("root").with_child(folder("A").with_child(part("Gone"))),
     );
@@ -227,12 +227,12 @@ fn plain_add_and_remove_still_work() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
+    let (added, removed, modified, reparented) = summarize(&diffs);
 
     assert_eq!(added, 1);
     assert_eq!(removed, 1);
     assert_eq!(modified, 0);
-    assert_eq!(moved, 0);
+    assert_eq!(reparented, 0);
 }
 
 #[test]
@@ -259,15 +259,15 @@ fn unrelated_same_class_siblings_are_not_positional_renames() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
-    assert_eq!((added, removed, modified, moved), (2, 1, 0, 0), "{diffs:#?}");
+    let (added, removed, modified, reparented) = summarize(&diffs);
+    assert_eq!((added, removed, modified, reparented), (2, 1, 0, 0), "{diffs:#?}");
 }
 
 #[test]
 fn descendants_of_replaced_containers_are_not_moves() {
     // Both boundary containers are unrelated replacements. Even though each
     // contains an identical `Shared` Part, pairing the two interior nodes as a
-    // move would cannibalize the deleted tree when a merge keeps it.
+    // reparent would cannibalize the deleted tree when a merge keeps it.
     let old = WeakDom::new(folder("root").with_child(
         folder("Deleted")
             .with_child(part_with_color("Shared", 0.25))
@@ -281,12 +281,12 @@ fn descendants_of_replaced_containers_are_not_moves() {
     ));
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
-    assert_eq!((added, removed, modified, moved), (1, 1, 0, 0), "{diffs:#?}");
+    let (added, removed, modified, reparented) = summarize(&diffs);
+    assert_eq!((added, removed, modified, reparented), (1, 1, 0, 0), "{diffs:#?}");
 }
 
 #[test]
-fn move_into_added_group_is_detected() {
+fn reparent_into_added_group_is_detected() {
     // The group_workspace_dupes pattern: existing instances get gathered
     // under a brand-new container. The container is added; the contents are
     // moves, not remove+add pairs.
@@ -308,8 +308,8 @@ fn move_into_added_group_is_detected() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
-    assert_eq!(moved, 2, "both parts should move into the group: {diffs:?}");
+    let (added, removed, modified, reparented) = summarize(&diffs);
+    assert_eq!(reparented, 2, "both parts should be reparented into the group: {diffs:?}");
     assert_eq!(added, 1, "only the group itself is new: {diffs:?}");
     assert_eq!(removed, 0, "{diffs:?}");
     assert_eq!(modified, 0, "{diffs:?}");
@@ -332,8 +332,8 @@ fn move_out_of_removed_folder_is_detected() {
     );
 
     let diffs = diff_doms(&old, &new);
-    let (added, removed, modified, moved) = summarize(&diffs);
-    assert_eq!(moved, 1, "Keep should be a move: {diffs:?}");
+    let (added, removed, modified, reparented) = summarize(&diffs);
+    assert_eq!(reparented, 1, "Keep should be a reparent: {diffs:?}");
     assert_eq!(removed, 1, "Doomed (with Junk inside) is removed: {diffs:?}");
     assert_eq!(added, 0, "{diffs:?}");
     assert_eq!(modified, 0, "{diffs:?}");

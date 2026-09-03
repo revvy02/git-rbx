@@ -1,24 +1,24 @@
-//! Global move detection: pairs removed and added subtree roots across parents.
+//! Global reparent detection: pairs removed and added subtree roots across parents.
 //!
 //! The per-parent matcher (match_instances) can only see siblings, so an instance
 //! reparented elsewhere in the tree falls out as removed + added. This module
 //! reconciles those pools globally, git-rename-detection style:
 //!
-//! - Pass A: exact deep-hash pairing — identical subtree content = pure move.
-//! - Pass A2: exact name-less deep-hash pairing — rename + move. Only
+//! - Pass A: exact deep-hash pairing — identical subtree content = pure reparent.
+//! - Pass A2: exact name-less deep-hash pairing — rename + reparent. Only
 //!   mutually-unique content-bearing subtrees pair, so identical twins or
 //!   empty containers can never be claimed across names by accident.
-//! - Pass B: same (name, class) pairing with similarity scoring — move + edit.
+//! - Pass B: same (name, class) pairing with similarity scoring — reparent + edit.
 //!
 //! Pairs below the similarity threshold stay removed/added; a wrong move inference
 //! is worse than a noisy one (it would silently relocate edits in a future merge).
 //!
-//! Passes C/D extend the pools to *descendants*: an instance moved into a
+//! Passes C/D extend the pools to *descendants*: an instance reparented into a
 //! newly-added subtree (e.g. grouping existing content under a fresh Model)
 //! or out of a removed one still pairs. A node inside an already-paired
-//! subtree is excluded — it moved as part of its ancestor.
+//! subtree is excluded — it was reparented as part of its ancestor.
 //!
-//! Known limitation: rename+move+edit together is not detected (Pass A2
+//! Known limitation: rename+reparent+edit together is not detected (Pass A2
 //! requires exact content; similarity buckets are keyed by name).
 
 use blake3::Hasher;
@@ -32,7 +32,7 @@ use crate::diff_dom::{DomView, InstanceView};
 use crate::hash::{hash_variant, DeepHashCache};
 use crate::property_semantics::{pairing_compatible, PairingBasis};
 
-/// Minimum similarity score for a Pass B pairing to count as a move.
+/// Minimum similarity score for a Pass B pairing to count as a reparent.
 const SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Cap on pairwise similarity computations per (name, class) bucket.
@@ -41,7 +41,7 @@ const MAX_PAIRWISE: usize = 100_000;
 
 /// Pair removed/added subtree roots into moves: (old_ref, new_ref).
 /// Unpaired roots stay removed/added; the diff pass re-derives and reports them.
-pub fn detect_moves(
+pub fn detect_reparents(
     old_dom: &dyn DomView,
     new_dom: &dyn DomView,
     removed: Vec<Ref>,
@@ -51,7 +51,7 @@ pub fn detect_moves(
 ) -> Vec<(Ref, Ref)> {
     use std::cell::RefCell;
 
-    let matcher = MoveMatcher {
+    let matcher = ReparentMatcher {
         old_dom,
         new_dom,
         old_deep,
@@ -59,7 +59,7 @@ pub fn detect_moves(
     };
     let removed_count = removed.len();
     let added_count = added.len();
-    let mut moves: Vec<(Ref, Ref)> = Vec::new();
+    let mut reparents: Vec<(Ref, Ref)> = Vec::new();
     let claims_old = RefCell::new(Claims::default());
     let claims_new = RefCell::new(Claims::default());
 
@@ -69,13 +69,13 @@ pub fn detect_moves(
         let mut on_pair = |o: Ref, n: Ref| {
             claims_old.borrow_mut().claim(old_dom, o);
             claims_new.borrow_mut().claim(new_dom, n);
-            moves.push((o, n));
+            reparents.push((o, n));
         };
 
-        // Pass A: exact deep-hash over roots (pure moves)
+        // Pass A: exact deep-hash over roots (pure reparent)
         pair_by_exact_hash(&matcher, &removed, &added, &can_old, &can_new, &mut on_pair);
     }
-    let pass_a_count = moves.len();
+    let pass_a_count = reparents.len();
 
     {
         let can_old = |r: Ref| !claims_old.borrow().conflicts(old_dom, r);
@@ -83,15 +83,15 @@ pub fn detect_moves(
         let mut on_pair = |o: Ref, n: Ref| {
             claims_old.borrow_mut().claim(old_dom, o);
             claims_new.borrow_mut().claim(new_dom, n);
-            moves.push((o, n));
+            reparents.push((o, n));
         };
 
-        // Pass A2: exact name-less deep-hash over roots (rename + move)
+        // Pass A2: exact name-less deep-hash over roots (rename + reparent)
         pair_by_exact_hash_ignoring_name(
             &matcher, &removed, &added, &can_old, &can_new, &mut on_pair,
         );
     }
-    let pass_a2_count = moves.len() - pass_a_count;
+    let pass_a2_count = reparents.len() - pass_a_count;
 
     {
         let can_old = |r: Ref| !claims_old.borrow().conflicts(old_dom, r);
@@ -99,20 +99,20 @@ pub fn detect_moves(
         let mut on_pair = |o: Ref, n: Ref| {
             claims_old.borrow_mut().claim(old_dom, o);
             claims_new.borrow_mut().claim(new_dom, n);
-            moves.push((o, n));
+            reparents.push((o, n));
         };
 
-        // Pass B: same (name, class) similarity over roots (move + edit)
+        // Pass B: same (name, class) similarity over roots (reparent + edit)
         pair_by_similarity(&matcher, &removed, &added, &can_old, &can_new, &mut on_pair);
     }
-    let pass_b_count = moves.len() - pass_a_count - pass_a2_count;
+    let pass_b_count = reparents.len() - pass_a_count - pass_a2_count;
 
     // Passes C/D: pair an unmatched boundary root with a node inside the other
-    // side's unmatched tree. This detects content moved into a newly-added
+    // side's unmatched tree. This detects content reparented into a newly-added
     // group or out of a deleted folder. We deliberately never pair two proper
     // descendants here: identical generic Parts inside unrelated replacement
-    // containers are copies, not evidence that one was moved into the other.
-    // Claimed roots are not expanded: their contents moved with them.
+    // containers are copies, not evidence that one was reparented into the other.
+    // Claimed roots are not expanded: their contents were reparented with them.
     let leftover_removed: Vec<Ref> = removed
         .iter()
         .copied()
@@ -132,7 +132,7 @@ pub fn detect_moves(
         let mut on_pair = |o: Ref, n: Ref| {
             claims_old.borrow_mut().claim(old_dom, o);
             claims_new.borrow_mut().claim(new_dom, n);
-            moves.push((o, n));
+            reparents.push((o, n));
         };
         pair_by_exact_hash(
             &matcher,
@@ -151,7 +151,7 @@ pub fn detect_moves(
             &mut on_pair,
         );
     }
-    let pass_c_count = moves.len() - pass_a_count - pass_a2_count - pass_b_count;
+    let pass_c_count = reparents.len() - pass_a_count - pass_a2_count - pass_b_count;
 
     {
         let can_old = |r: Ref| !claims_old.borrow().conflicts(old_dom, r);
@@ -159,7 +159,7 @@ pub fn detect_moves(
         let mut on_pair = |o: Ref, n: Ref| {
             claims_old.borrow_mut().claim(old_dom, o);
             claims_new.borrow_mut().claim(new_dom, n);
-            moves.push((o, n));
+            reparents.push((o, n));
         };
         pair_by_similarity(
             &matcher,
@@ -178,29 +178,29 @@ pub fn detect_moves(
             &mut on_pair,
         );
     }
-    let pass_d_count = moves.len() - pass_a_count - pass_a2_count - pass_b_count - pass_c_count;
+    let pass_d_count = reparents.len() - pass_a_count - pass_a2_count - pass_b_count - pass_c_count;
 
-    if !moves.is_empty() {
+    if !reparents.is_empty() {
         info!(
             removed_in = removed_count,
             added_in = added_count,
-            moves = moves.len(),
+            reparents = reparents.len(),
             exact = pass_a_count,
             renamed_exact = pass_a2_count,
             similarity = pass_b_count,
             descendant_exact = pass_c_count,
             descendant_similarity = pass_d_count,
-            "move detection"
+            "reparent detection"
         );
     }
 
-    moves
+    reparents
 }
 
 /// Immutable evidence shared by every global pairing pass. Keeping DOM and
 /// hash access together makes it impossible for exact and similarity paths to
 /// accidentally consult different compatibility inputs.
-struct MoveMatcher<'a> {
+struct ReparentMatcher<'a> {
     old_dom: &'a dyn DomView,
     new_dom: &'a dyn DomView,
     old_deep: &'a DeepHashCache<'a>,
@@ -230,8 +230,8 @@ impl Claims {
     }
 
     /// A node can't pair if a claimed pair already covers it (an ancestor
-    /// moved, taking it along) or it covers a claimed pair (its descendant
-    /// moved away — this subtree is no longer a coherent unit).
+    /// reparented, taking it along) or it covers a claimed pair (its descendant
+    /// reparented away — this subtree is no longer a coherent unit).
     fn conflicts(&self, dom: &dyn DomView, node: Ref) -> bool {
         if self.ancestors.contains(&node) {
             return true;
@@ -251,7 +251,7 @@ impl Claims {
 /// candidate per old-side node. Passes A and C differ only in their pools
 /// and claim predicates.
 fn pair_by_exact_hash(
-    matcher: &MoveMatcher<'_>,
+    matcher: &ReparentMatcher<'_>,
     old_pool: &[Ref],
     new_pool: &[Ref],
     can_claim_old: impl Fn(Ref) -> bool,
@@ -289,7 +289,7 @@ fn pair_by_exact_hash(
     }
 }
 
-/// Rename+move pairing: exact deep content with only the ROOT's name ignored
+/// Rename+reparent pairing: exact deep content with only the ROOT's name ignored
 /// (descendant names still participate). Unlike [`pair_by_exact_hash`], a
 /// name is not corroborating evidence here, so pairing demands more of the
 /// content itself:
@@ -302,7 +302,7 @@ fn pair_by_exact_hash(
 /// - the pair must satisfy the same [`PairingBasis::ContentPreservingRename`]
 ///   gate the per-parent class fallback uses.
 fn pair_by_exact_hash_ignoring_name(
-    matcher: &MoveMatcher<'_>,
+    matcher: &ReparentMatcher<'_>,
     old_pool: &[Ref],
     new_pool: &[Ref],
     can_claim_old: impl Fn(Ref) -> bool,
@@ -381,7 +381,7 @@ fn pair_by_exact_hash_ignoring_name(
 /// a bucket, then claim greedily from the highest score down. Passes B and D
 /// differ only in their pools and claim predicates.
 fn pair_by_similarity(
-    matcher: &MoveMatcher<'_>,
+    matcher: &ReparentMatcher<'_>,
     old_pool: &[Ref],
     new_pool: &[Ref],
     can_claim_old: impl Fn(Ref) -> bool,
@@ -430,7 +430,7 @@ fn pair_by_similarity(
                 class = %key.1,
                 old = old_group.len(),
                 new = new_group.len(),
-                "move detection bucket too large, skipping similarity scoring"
+                "reparent detection bucket too large, skipping similarity scoring"
             );
             continue;
         }
@@ -443,7 +443,7 @@ fn pair_by_similarity(
                 // Similarity is useful evidence only after strong identity
                 // agrees. Otherwise many generic MeshPart properties can
                 // outvote a different MeshContent and invent a destructive
-                // move between unrelated pieces of geometry.
+                // reparent between unrelated pieces of geometry.
                 if !pairing_compatible(&old_instance, &new_instance, PairingBasis::Inferred) {
                     continue;
                 }

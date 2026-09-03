@@ -44,7 +44,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
     let mut added = Vec::new();
     let mut removed = Vec::new();
     let mut modified = Vec::new();
-    let mut moved = Vec::new();
+    let mut reparented = Vec::new();
     let mut pivoted = Vec::new();
 
     for diff in diffs {
@@ -52,7 +52,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
             DiffEntry::Added { .. } => added.push(diff),
             DiffEntry::Removed { .. } => removed.push(diff),
             DiffEntry::Modified { .. } => modified.push(diff),
-            DiffEntry::Moved { .. } => moved.push(diff),
+            DiffEntry::Reparented { .. } => reparented.push(diff),
             DiffEntry::Pivoted { .. } => pivoted.push(diff),
         }
     }
@@ -60,7 +60,7 @@ fn print_pretty(diffs: &[DiffEntry]) {
     print_path_tree(&entries, print_instance_changes);
 
     println!();
-    print_summary_line(&added, &removed, &modified, &moved, &pivoted);
+    print_summary_line(&added, &removed, &modified, &reparented, &pivoted);
 }
 
 fn print_instance_changes(entries: &[&DiffEntry], label: &str, depth: usize) {
@@ -70,7 +70,7 @@ fn print_instance_changes(entries: &[&DiffEntry], label: &str, depth: usize) {
             DiffEntry::Added { .. } => "+".green(),
             DiffEntry::Removed { .. } => "-".red(),
             DiffEntry::Modified { .. } => "~".yellow(),
-            DiffEntry::Moved { .. } => ">".cyan(),
+            DiffEntry::Reparented { .. } => ">".cyan(),
             DiffEntry::Pivoted { .. } => "↻".cyan(),
         })
         .map(|marker| marker.to_string())
@@ -80,7 +80,7 @@ fn print_instance_changes(entries: &[&DiffEntry], label: &str, depth: usize) {
     let label = match entries[0] {
         DiffEntry::Added { .. } => label.green().bold(),
         DiffEntry::Removed { .. } => label.red().bold(),
-        DiffEntry::Modified { .. } | DiffEntry::Moved { .. } | DiffEntry::Pivoted { .. } => {
+        DiffEntry::Modified { .. } | DiffEntry::Reparented { .. } | DiffEntry::Pivoted { .. } => {
             label.bold()
         }
     };
@@ -97,7 +97,7 @@ fn print_instance_changes(entries: &[&DiffEntry], label: &str, depth: usize) {
             DiffEntry::Pivoted { delta, .. } => {
                 println!("{}{}", detail_indent(depth), format_delta(delta).cyan());
             }
-            DiffEntry::Moved { old_path, .. } => {
+            DiffEntry::Reparented { old_path, .. } => {
                 println!(
                     "{}{} {}",
                     detail_indent(depth),
@@ -118,7 +118,7 @@ fn diff_class(diff: &DiffEntry) -> &str {
         DiffEntry::Added { class, .. }
         | DiffEntry::Removed { class, .. }
         | DiffEntry::Modified { class, .. }
-        | DiffEntry::Moved { class, .. }
+        | DiffEntry::Reparented { class, .. }
         | DiffEntry::Pivoted { class, .. } => class,
     }
 }
@@ -226,7 +226,7 @@ fn diff_identity(diff: &DiffEntry) -> (bool, &str) {
         DiffEntry::Removed { old_ref, .. } => (false, old_ref),
         DiffEntry::Added { new_ref, .. }
         | DiffEntry::Modified { new_ref, .. }
-        | DiffEntry::Moved { new_ref, .. }
+        | DiffEntry::Reparented { new_ref, .. }
         | DiffEntry::Pivoted { new_ref, .. } => (true, new_ref),
     }
 }
@@ -236,7 +236,7 @@ fn path_segments(diff: &DiffEntry) -> &[(Ref, String)] {
         DiffEntry::Added { path_segments, .. }
         | DiffEntry::Removed { path_segments, .. }
         | DiffEntry::Modified { path_segments, .. }
-        | DiffEntry::Moved { path_segments, .. }
+        | DiffEntry::Reparented { path_segments, .. }
         | DiffEntry::Pivoted { path_segments, .. } => path_segments,
     }
 }
@@ -442,7 +442,7 @@ fn print_summary(diffs: &[DiffEntry]) {
     let mut added = 0;
     let mut removed = 0;
     let mut modified = 0;
-    let mut moved = 0;
+    let mut reparented = 0;
     let mut pivoted = 0;
 
     for diff in diffs {
@@ -450,20 +450,20 @@ fn print_summary(diffs: &[DiffEntry]) {
             DiffEntry::Added { .. } => added += 1,
             DiffEntry::Removed { .. } => removed += 1,
             DiffEntry::Modified { .. } => modified += 1,
-            DiffEntry::Moved { .. } => moved += 1,
+            DiffEntry::Reparented { .. } => reparented += 1,
             DiffEntry::Pivoted { .. } => pivoted += 1,
         }
     }
 
-    if added == 0 && removed == 0 && modified == 0 && moved == 0 && pivoted == 0 {
+    if added == 0 && removed == 0 && modified == 0 && reparented == 0 && pivoted == 0 {
         println!("No differences found.");
     } else {
         println!(
-            "{} added, {} removed, {} modified, {} moved, {} pivoted",
+            "{} added, {} removed, {} modified, {} reparented, {} pivoted",
             added.to_string().green(),
             removed.to_string().red(),
             modified.to_string().yellow(),
-            moved.to_string().cyan(),
+            reparented.to_string().cyan(),
             pivoted.to_string().cyan(),
         );
     }
@@ -473,16 +473,16 @@ fn print_summary_line(
     added: &[&DiffEntry],
     removed: &[&DiffEntry],
     modified: &[&DiffEntry],
-    moved: &[&DiffEntry],
+    reparented: &[&DiffEntry],
     pivoted: &[&DiffEntry],
 ) {
     println!(
-        "{}: {} added, {} removed, {} modified, {} moved, {} pivoted",
+        "{}: {} added, {} removed, {} modified, {} reparented, {} pivoted",
         "Summary".bold(),
         added.len().to_string().green(),
         removed.len().to_string().red(),
         modified.len().to_string().yellow(),
-        moved.len().to_string().cyan(),
+        reparented.len().to_string().cyan(),
         pivoted.len().to_string().cyan(),
     );
 }
@@ -493,7 +493,7 @@ pub struct DiffCounts {
     pub added: usize,
     pub removed: usize,
     pub modified: usize,
-    pub moved: usize,
+    pub reparented: usize,
     pub pivoted: usize,
 }
 
@@ -505,7 +505,7 @@ impl DiffCounts {
                 DiffEntry::Added { .. } => counts.added += 1,
                 DiffEntry::Removed { .. } => counts.removed += 1,
                 DiffEntry::Modified { .. } => counts.modified += 1,
-                DiffEntry::Moved { .. } => counts.moved += 1,
+                DiffEntry::Reparented { .. } => counts.reparented += 1,
                 DiffEntry::Pivoted { .. } => counts.pivoted += 1,
             }
         }
@@ -569,14 +569,14 @@ pub fn render_markdown(diffs: &[DiffEntry], max_rows: usize) -> String {
         return out;
     }
     out.push_str(&format!(
-        "**{} added · {} removed · {} modified · {} moved · {} pivoted**\n\n",
-        counts.added, counts.removed, counts.modified, counts.moved, counts.pivoted
+        "**{} added · {} removed · {} modified · {} reparented · {} pivoted**\n\n",
+        counts.added, counts.removed, counts.modified, counts.reparented, counts.pivoted
     ));
 
     let mut added = Vec::new();
     let mut removed = Vec::new();
     let mut modified = Vec::new();
-    let mut moved = Vec::new();
+    let mut reparented = Vec::new();
     let mut pivoted = Vec::new();
     for diff in diffs {
         match diff {
@@ -610,13 +610,13 @@ pub fn render_markdown(diffs: &[DiffEntry], max_rows: usize) -> String {
                     ]);
                 }
             }
-            DiffEntry::Moved {
+            DiffEntry::Reparented {
                 old_path,
                 path,
                 class,
                 ..
             } => {
-                moved.push(vec![md_code(old_path), md_code(path), md_cell(class)]);
+                reparented.push(vec![md_code(old_path), md_code(path), md_cell(class)]);
             }
             DiffEntry::Pivoted {
                 path, class, delta, ..
@@ -632,7 +632,7 @@ pub fn render_markdown(diffs: &[DiffEntry], max_rows: usize) -> String {
     md_section(&mut out, "Pivoted", &["Model", "Class", "Delta"], &pivoted, max_rows);
     md_section(&mut out, "Added", &["Instance", "Class"], &added, max_rows);
     md_section(&mut out, "Removed", &["Instance", "Class"], &removed, max_rows);
-    md_section(&mut out, "Moved", &["From", "To", "Class"], &moved, max_rows);
+    md_section(&mut out, "Reparented", &["From", "To", "Class"], &reparented, max_rows);
     md_section(
         &mut out,
         "Modified",
@@ -656,7 +656,7 @@ fn print_json(diffs: &[DiffEntry]) {
         added: usize,
         removed: usize,
         modified: usize,
-        moved: usize,
+        reparented: usize,
         pivoted: usize,
     }
 
@@ -672,9 +672,9 @@ fn print_json(diffs: &[DiffEntry]) {
         .iter()
         .filter(|d| matches!(d, DiffEntry::Modified { .. }))
         .count();
-    let moved = diffs
+    let reparented = diffs
         .iter()
-        .filter(|d| matches!(d, DiffEntry::Moved { .. }))
+        .filter(|d| matches!(d, DiffEntry::Reparented { .. }))
         .count();
     let pivoted = diffs
         .iter()
@@ -687,7 +687,7 @@ fn print_json(diffs: &[DiffEntry]) {
             added,
             removed,
             modified,
-            moved,
+            reparented,
             pivoted,
         },
     };

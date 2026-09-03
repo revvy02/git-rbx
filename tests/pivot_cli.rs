@@ -538,7 +538,7 @@ fn pretty_diff_nests_attributes_with_direct_values() {
 }
 
 #[test]
-fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
+fn reparent_with_edit_renders_and_serializes_as_two_primitive_operations() {
     let asset = |destination: &str, transparency: f32| {
         let part = InstanceBuilder::new("Part")
             .with_name("P")
@@ -569,7 +569,7 @@ fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
         )
     };
     let scratch = std::env::temp_dir().join(format!(
-        "rbx-diff-move-edit-output-test-{}",
+        "rbx-diff-reparent-edit-output-test-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&scratch).unwrap();
@@ -602,7 +602,7 @@ fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Summary: 0 added, 0 removed, 1 modified, 1 moved, 0 pivoted"),
+        stdout.contains("Summary: 0 added, 0 removed, 1 modified, 1 reparented, 0 pivoted"),
         "{stdout}"
     );
 
@@ -623,7 +623,7 @@ fn move_with_edit_renders_and_serializes_as_two_primitive_operations() {
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     let changes = json["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2, "{json:#}");
-    assert_eq!(changes[0]["type"], "moved");
+    assert_eq!(changes[0]["type"], "reparented");
     assert!(changes[0].get("property_changes").is_none(), "{json:#}");
     assert_eq!(changes[1]["type"], "modified");
 

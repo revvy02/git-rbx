@@ -1,7 +1,7 @@
-//! Chained-conflict scenario: both sides move the same subtree to different
-//! parents (MoveTarget conflict), while ONE side also adds new content inside
+//! Chained-conflict scenario: both sides reparent the same subtree to different
+//! parents (ReparentTarget conflict), while ONE side also adds new content inside
 //! that subtree. The add is an independent, non-conflicting op — it must merge
-//! into the subtree regardless of how (or before) the move conflict is
+//! into the subtree regardless of how (or before) the reparent conflict is
 //! resolved, and travel with the subtree to whichever destination wins.
 
 use git_rbx::{
@@ -31,8 +31,8 @@ fn base_dom() -> WeakDom {
     )
 }
 
-/// ours: S moved under A.            root { A { S { Child } }, B }
-/// theirs: S moved under B, plus a   root { A, B { S { Child, New } } }
+/// ours: S reparented under A.            root { A { S { Child } }, B }
+/// theirs: S reparented under B, plus a   root { A, B { S { Child, New } } }
 /// new part added inside S.
 fn merged_with_chain() -> WeakDom {
     let mut base = base_dom();
@@ -54,7 +54,7 @@ fn merged_with_chain() -> WeakDom {
     let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
     assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
     assert!(
-        matches!(result.conflicts[0].kind, ConflictKind::MoveTarget),
+        matches!(result.conflicts[0].kind, ConflictKind::ReparentTarget),
         "{:?}",
         result.conflicts[0].kind
     );
@@ -87,7 +87,7 @@ fn find_named(dom: &WeakDom, name: &str) -> rbx_dom_weak::types::Ref {
 }
 
 /// Before resolution: the theirs-side add already lives inside S, and S is
-/// parked at its BASE location while the move conflict is unresolved.
+/// parked at its BASE location while the reparent conflict is unresolved.
 #[test]
 fn add_inside_contested_subtree_merges_immediately() {
     let dom = merged_with_chain();
@@ -100,7 +100,7 @@ fn add_inside_contested_subtree_merges_immediately() {
     assert_eq!(parent_of_s, root, "S must stay at base position while contested");
 }
 
-/// Resolving the move either way carries the merged contents (including the
+/// Resolving the reparent either way carries the merged contents (including the
 /// other side's add) to the chosen destination.
 #[test]
 fn move_resolution_carries_merged_contents_both_ways() {

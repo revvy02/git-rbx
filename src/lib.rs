@@ -11,7 +11,7 @@ mod hash;
 mod match_instances;
 mod merge;
 mod model_normalize;
-mod move_detect;
+mod reparent_detect;
 pub mod output;
 mod placement;
 mod property_semantics;

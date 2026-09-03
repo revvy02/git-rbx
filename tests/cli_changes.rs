@@ -36,7 +36,7 @@ fn diff_markdown_renders_count_line_and_tables() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let md = String::from_utf8(output.stdout).unwrap();
-    assert!(md.contains("**1 added · 0 removed · 1 modified · 0 moved · 0 pivoted**"), "{md}");
+    assert!(md.contains("**1 added · 0 removed · 1 modified · 0 reparented · 0 pivoted**"), "{md}");
     assert!(md.contains("<summary><b>Modified</b> (1)</summary>"), "{md}");
     assert!(md.contains("| `Q` | Transparency | `0` | `0.5` |"), "{md}");
     assert!(md.contains("<summary><b>Added</b> (1)</summary>"), "{md}");

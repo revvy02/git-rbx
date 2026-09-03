@@ -15,10 +15,10 @@
 //!       <clone of our version>      (shallow for property conflicts,
 //!                                    full subtree for delete-vs-edit)
 //!     Theirs                        Folder; same shape
-//!       MoveOuts                    Folder; edited descendants that escape a
+//!       ReparentedOut                    Folder; edited descendants that escape a
 //!                                    root both branches ultimately delete
-//!         Move_N/Destination        ObjectValue -> live destination parent
-//!         Move_N/<snapshot>         full escaped branch subtree
+//!         Reparent_N/Destination        ObjectValue -> live destination parent
+//!         Reparent_N/<snapshot>         full escaped branch subtree
 //!         References                old -> clone ref remapping table
 //!   PivotPlan                       Folder; automatic hierarchical pivots
 //!     Pivot_1                       Folder; attrs: PivotOrder,
@@ -58,10 +58,10 @@ pub const ENTRY_TAG: &str = "GitRbxConflictEntry";
 pub const VIRTUAL_TREES_NAME: &str = "VirtualTrees";
 /// Conflict container schema version, stamped as the container's `Version`
 /// attribute. Bump when the on-file layout changes shape.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 const VIRTUAL_TREE_CHUNK_BYTES: usize = 100_000;
-const MOVE_OUTS_NAME: &str = "MoveOuts";
+const REPARENTED_OUT_NAME: &str = "ReparentedOut";
 
 /// Stamp the conflict container into a merged DOM. `base` is the merged
 /// result (conflicted targets at base state); the branch DOMs supply the
@@ -388,7 +388,7 @@ fn stamp_side(
         Some(EditOp::RemoveSubtree { .. }) => {
             side_attrs = side_attrs.with("Deleted", Variant::Bool(true));
         }
-        Some(EditOp::Move { new_parent, .. }) => {
+        Some(EditOp::Reparent { new_parent, .. }) => {
             let dest_path = match new_parent {
                 Anchor::Old(parent) => get_instance_path(base, *parent),
                 Anchor::Added(branch_ref) => get_instance_path(branch_dom, *branch_ref),
@@ -401,7 +401,7 @@ fn stamp_side(
     if !side_pivots.is_empty()
         || side_ops
             .iter()
-            .any(|op| !matches!(op, EditOp::RemoveSubtree { .. } | EditOp::Move { .. }))
+            .any(|op| !matches!(op, EditOp::RemoveSubtree { .. } | EditOp::Reparent { .. }))
     {
         deep_clone = true;
     }
@@ -429,7 +429,7 @@ fn stamp_side(
     // escaped subtrees and their live destinations explicitly. All roots
     // share one clone-ref map so references between separate escapes remain
     // intact; the Original/Clone table lets finalize repair incoming refs.
-    stamp_move_outs(
+    stamp_reparented_out(
         base,
         side_folder,
         side_ops,
@@ -439,8 +439,8 @@ fn stamp_side(
         branch_to_base,
     );
 
-    // Move destination for finalize, when it maps to a live base instance
-    if let Some(EditOp::Move {
+    // Reparent destination for finalize, when it maps to a live base instance
+    if let Some(EditOp::Reparent {
         new_parent: Anchor::Old(parent),
         ..
     }) = side_ops.first()
@@ -454,11 +454,11 @@ fn stamp_side(
         );
     }
 
-    // Clone this side's version of the instance (skip for pure deletes/moves)
+    // Clone this side's version of the instance (skip for pure deletes/reparents)
     let is_delete = matches!(side_ops.first(), Some(EditOp::RemoveSubtree { .. }));
-    let is_move_only =
-        !side_ops.is_empty() && side_ops.iter().all(|op| matches!(op, EditOp::Move { .. }));
-    if !is_delete && !is_move_only {
+    let is_reparent_only =
+        !side_ops.is_empty() && side_ops.iter().all(|op| matches!(op, EditOp::Reparent { .. }));
+    if !is_delete && !is_reparent_only {
         if let Some(&branch_ref) = base_to_branch.get(&base_ref) {
             let (builder, branch_to_clone) =
                 clone_from_branch(branch_dom, branch_ref, branch_to_base, deep_clone);
@@ -468,7 +468,7 @@ fn stamp_side(
     }
 }
 
-fn stamp_move_outs(
+fn stamp_reparented_out(
     base: &mut WeakDom,
     side_folder: Ref,
     side_ops: &[EditOp],
@@ -477,10 +477,10 @@ fn stamp_move_outs(
     base_to_branch: &HashMap<Ref, Ref>,
     branch_to_base: &HashMap<Ref, Ref>,
 ) {
-    let moved: Vec<(Ref, Ref, Ref)> = side_ops
+    let reparented: Vec<(Ref, Ref, Ref)> = side_ops
         .iter()
         .filter_map(|op| {
-            let EditOp::Move {
+            let EditOp::Reparent {
                 old_ref,
                 new_parent: Anchor::Old(destination),
             } = op
@@ -495,22 +495,22 @@ fn stamp_move_outs(
             Some((*old_ref, *destination, *base_to_branch.get(old_ref)?))
         })
         .collect();
-    if moved.is_empty() {
+    if reparented.is_empty() {
         return;
     }
 
     let mut branch_to_clone = HashMap::new();
-    for (_, _, branch_ref) in &moved {
+    for (_, _, branch_ref) in &reparented {
         allocate_clone_refs(branch_dom, *branch_ref, true, &mut branch_to_clone);
     }
 
-    let move_outs = base.insert(
+    let reparented_out = base.insert(
         side_folder,
-        InstanceBuilder::new("Folder").with_name(MOVE_OUTS_NAME),
+        InstanceBuilder::new("Folder").with_name(REPARENTED_OUT_NAME),
     );
-    for (index, (_, destination, branch_ref)) in moved.iter().enumerate() {
+    for (index, (_, destination, branch_ref)) in reparented.iter().enumerate() {
         let record = base.insert(
-            move_outs,
+            reparented_out,
             InstanceBuilder::new("Folder").with_name(format!("Move_{}", index + 1)),
         );
         base.insert(
@@ -530,7 +530,7 @@ fn stamp_move_outs(
     }
 
     let references = base.insert(
-        move_outs,
+        reparented_out,
         InstanceBuilder::new("Folder").with_name("References"),
     );
     let mut pairs: Vec<(Ref, Ref)> = branch_to_clone
@@ -740,7 +740,7 @@ fn impact_for_ops(
                     None,
                 )
             }
-            EditOp::Move {
+            EditOp::Reparent {
                 old_ref,
                 new_parent,
             } => {
@@ -753,7 +753,7 @@ fn impact_for_ops(
                     Anchor::Added(branch_ref) => Some(get_instance_path(branch, *branch_ref)),
                 };
                 (
-                    "Move",
+                    "Reparent",
                     id,
                     base_path(*old_ref),
                     None,
@@ -979,7 +979,7 @@ fn kind_str(kind: &ConflictKind) -> &'static str {
         ConflictKind::Property { .. } => "Property",
         ConflictKind::PropertyBundle { .. } => "PropertyBundle",
         ConflictKind::DeleteVsEdit => "DeleteVsEdit",
-        ConflictKind::MoveTarget => "MoveTarget",
+        ConflictKind::ReparentTarget => "ReparentTarget",
         ConflictKind::Pivot { .. } => "Pivot",
     }
 }
@@ -1172,7 +1172,7 @@ pub struct ConflictEntryReport {
 pub struct SideReport {
     /// This side deleted the contested subtree.
     pub deleted: bool,
-    /// Where this side moved the contested instance, when it moved it.
+    /// Where this side reparented the contested instance, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_path: Option<String>,
     /// This side's placement delta for Pivot conflicts.
@@ -1864,7 +1864,7 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
             let deleted = side_attr_bool(dom, side_folder, "Deleted");
             if deleted {
                 dom.destroy(target);
-            } else if apply_move_outs(dom, side_folder)? {
+            } else if apply_reparented_out(dom, side_folder)? {
                 // Both branches delete the old container, but this side first
                 // preserves edited descendants by moving them elsewhere.
                 // The snapshots now occupy those destinations and all
@@ -1878,18 +1878,18 @@ fn apply_entry(dom: &mut WeakDom, entry: &ConflictEntry) -> Result<()> {
                     dom.destroy(target);
                 }
             }
-            // An edit-side win with no clone means the edit was a move-out;
+            // An edit-side win with no clone means the edit was a reparent-out;
             // base content already stands, nothing to do.
         }
-        "MoveTarget" => {
+        "ReparentTarget" => {
             let dest = child_object_value(dom, side_folder, "Destination").ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{}: move destination is not resolvable in this file (it was inside content added by the other branch); re-merge and pick the other side, or move manually",
+                    "{}: reparent destination is not resolvable in this file (it was inside content added by the other branch); re-merge and pick the other side, or reparent manually",
                     entry.path
                 )
             })?;
             if dom.get_by_ref(dest).is_none() {
-                bail!("{}: move destination no longer exists", entry.path);
+                bail!("{}: reparent destination no longer exists", entry.path);
             }
             dom.transfer_within(target, dest);
         }
@@ -1943,18 +1943,18 @@ fn first_non_value_child(dom: &WeakDom, side_folder: Ref) -> Option<Ref> {
                     i.class.as_str() != "ObjectValue"
                         && i.name != "__GitRbxImpact"
                         && i.name != "PivotPlan"
-                        && i.name != MOVE_OUTS_NAME
+                        && i.name != REPARENTED_OUT_NAME
                 })
                 .unwrap_or(false)
         })
 }
 
-fn apply_move_outs(dom: &mut WeakDom, side_folder: Ref) -> Result<bool> {
-    let Some(move_outs) = child_by_name(dom, side_folder, MOVE_OUTS_NAME) else {
+fn apply_reparented_out(dom: &mut WeakDom, side_folder: Ref) -> Result<bool> {
+    let Some(reparented_out) = child_by_name(dom, side_folder, REPARENTED_OUT_NAME) else {
         return Ok(false);
     };
-    let references = child_by_name(dom, move_outs, "References")
-        .ok_or_else(|| anyhow::anyhow!("MoveOuts is missing its References table"))?;
+    let references = child_by_name(dom, reparented_out, "References")
+        .ok_or_else(|| anyhow::anyhow!("ReparentedOut is missing its References table"))?;
     let pair_refs = dom
         .get_by_ref(references)
         .map(|instance| instance.children().to_vec())
@@ -1962,14 +1962,14 @@ fn apply_move_outs(dom: &mut WeakDom, side_folder: Ref) -> Result<bool> {
     let mut remap = HashMap::new();
     for pair in pair_refs {
         let original = child_object_value(dom, pair, "Original")
-            .ok_or_else(|| anyhow::anyhow!("move-out reference is missing Original"))?;
+            .ok_or_else(|| anyhow::anyhow!("reparent-out reference is missing Original"))?;
         let clone_ref = child_object_value(dom, pair, "Clone")
-            .ok_or_else(|| anyhow::anyhow!("move-out reference is missing Clone"))?;
+            .ok_or_else(|| anyhow::anyhow!("reparent-out reference is missing Clone"))?;
         remap.insert(original, clone_ref);
     }
 
     let records = dom
-        .get_by_ref(move_outs)
+        .get_by_ref(reparented_out)
         .map(|instance| instance.children().to_vec())
         .unwrap_or_default();
     let mut transfers = Vec::new();
@@ -1988,7 +1988,7 @@ fn apply_move_outs(dom: &mut WeakDom, side_folder: Ref) -> Result<bool> {
     }
     for (snapshot, destination) in transfers {
         if dom.get_by_ref(destination).is_none() {
-            bail!("move-out destination no longer exists");
+            bail!("reparent-out destination no longer exists");
         }
         dom.transfer_within(snapshot, destination);
     }

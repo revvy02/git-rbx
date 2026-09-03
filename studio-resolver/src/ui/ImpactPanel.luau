@@ -3,7 +3,7 @@
 
 	Each side is a literal Base -> Side patch: only changed instances and the
 	ancestor paths needed to locate them are shown. Changed nodes carry explicit
-	Add / Remove / Move / Edit markers; edited nodes expand into two-line
+	Add / Remove / Reparent / Edit markers; edited nodes expand into two-line
 	Base/Side property values. Rust emits the exact operations and serialized
 	values, so this remains truthful for properties Studio cannot read.
 ]]
@@ -84,8 +84,8 @@ local function patchKind(node: PatchNode): string?
 	for _, operation in node.operations do
 		if operation.kind == "Delete" or operation.kind == "Add" then
 			return operation.kind
-		elseif operation.kind == "Move" then
-			result = "Move"
+		elseif operation.kind == "Reparent" then
+			result = "Reparent"
 		elseif not result then
 			result = "Property"
 		end
@@ -98,8 +98,8 @@ local function kindColor(kind: string?): Color3
 		return theme.added
 	elseif kind == "Delete" then
 		return theme.removed
-	elseif kind == "Move" then
-		return theme.moved
+	elseif kind == "Reparent" then
+		return theme.reparented
 	elseif kind == "Property" then
 		return theme.modified
 	end
@@ -116,7 +116,7 @@ local function renderDiffIcon(kind: string, color: Color3)
 			Icon("icon", "lucide:plus", color, UDim2.fromOffset(14, 14))
 		elseif kind == "Delete" then
 			Icon("icon", "lucide:minus", color, UDim2.fromOffset(14, 14))
-		elseif kind == "Move" then
+		elseif kind == "Reparent" then
 			Icon("icon", "lucide:move-right", color, UDim2.fromOffset(14, 14))
 		else
 			Icon("icon", "lucide:pencil", color, UDim2.fromOffset(14, 14))
@@ -217,14 +217,14 @@ local function buildRows(roots: { PatchNode }, side: string): { Row }
 		if expanded then
 			local hasChanges = false
 			for _, operation in node.operations do
-				if operation.kind == "Property" or operation.kind == "Move" then
+				if operation.kind == "Property" or operation.kind == "Reparent" then
 					hasChanges = true
 				end
 			end
 			if hasChanges then
 				push("header", CHANGE_HEIGHT, depth + 1, node, nil)
 				for _, operation in node.operations do
-					if operation.kind == "Property" or operation.kind == "Move" then
+					if operation.kind == "Property" or operation.kind == "Reparent" then
 						push("property", CHANGE_HEIGHT, depth + 1, node, operation)
 					end
 				end
@@ -255,7 +255,7 @@ local function renderNode(row: Row, side: string)
 	local details = 0
 	local subtreeCount: number? = nil
 	for _, operation in node.operations do
-		if operation.kind == "Property" or operation.kind == "Move" then
+		if operation.kind == "Property" or operation.kind == "Reparent" then
 			details += 1
 		elseif operation.kind == "Add" or operation.kind == "Delete" then
 			subtreeCount = operation.instanceCount
@@ -408,11 +408,11 @@ end
 
 local function renderProperty(row: Row)
 	local operation = row.operation :: ImpactOperation
-	local property = operation.property or (if operation.kind == "Move" then "Parent" else "Property")
-	local before = if operation.kind == "Move"
+	local property = operation.property or (if operation.kind == "Reparent" then "Parent" else "Property")
+	local before = if operation.kind == "Reparent"
 		then format.escapeRich(operation.path)
 		else format.patchValue(operation.before)
-	local after = if operation.kind == "Move"
+	local after = if operation.kind == "Reparent"
 		then format.escapeRich(operation.destination or "?")
 		else format.patchValue(operation.after)
 	Element("TextButton", {

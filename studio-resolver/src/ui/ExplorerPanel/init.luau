@@ -4,7 +4,7 @@
 	is a normal explorer per state; the diff layers come back iteratively.
 
 	All four tabs walk ECS-owned Explorer projection tables. Nodes share
-	canonical subjects but carry view-specific sources and parents, so moved,
+	canonical subjects but carry view-specific sources and parents, so reparented,
 	deleted, cloned, or virtualized content needs no UI-side tree grafting.
 
 	Conflict ancestor chains start expanded so each contested root is visible,
@@ -232,7 +232,7 @@ local function TabBar()
 end
 
 -- Ancestors of the selected occurrence light up as on-path. Following the
--- projected parent (rather than Instance.Parent) gives move views and virtual
+-- projected parent (rather than Instance.Parent) gives reparent views and virtual
 -- nodes their own topology.
 local function ancestorSet(projection: ExplorerProjection): { [ExplorerNode]: boolean }
 	local set: { [any]: boolean } = {}

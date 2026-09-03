@@ -128,7 +128,7 @@ fn content_preserving_rename_uses_identity_op() {
 }
 
 #[test]
-fn round_trip_move_with_edit() {
+fn round_trip_reparent_with_edit() {
     let old = WeakDom::new(
         folder("root")
             .with_child(folder("A").with_child(part("P")))
@@ -150,8 +150,8 @@ fn round_trip_move_with_edit() {
 }
 
 #[test]
-fn round_trip_move_into_added_subtree() {
-    // P moves into a folder that itself is newly added — exercises the
+fn round_trip_reparent_into_added_subtree() {
+    // P is reparented into a folder that itself is newly added — exercises the
     // Anchor::Added path in apply.
     let old = WeakDom::new(
         folder("root").with_child(folder("A").with_child(part("P"))),
@@ -166,7 +166,7 @@ fn round_trip_move_into_added_subtree() {
 
 #[test]
 fn round_trip_parent_swap() {
-    // A was parent of B; now B is parent of A — stresses move ordering
+    // A was parent of B; now B is parent of A — stresses reparent ordering
     // (transfer into an unsettled ancestor would panic or corrupt).
     let old = WeakDom::new(
         folder("root").with_child(
@@ -330,7 +330,7 @@ fn rename_into_duplicate_name_waits_for_content_matching() {
 }
 
 #[test]
-fn script_uses_move_op_for_pure_move() {
+fn script_uses_reparent_op_for_pure_reparent() {
     let old = WeakDom::new(
         folder("root")
             .with_child(folder("A").with_child(part("P")))
@@ -342,14 +342,14 @@ fn script_uses_move_op_for_pure_move() {
             .with_child(folder("B").with_child(part("P"))),
     );
     let script = compute_edit_script(&old, &new, &DiffConfig::default());
-    let moves = script.ops.iter().filter(|op| matches!(op, EditOp::Move { .. })).count();
+    let reparents = script.ops.iter().filter(|op| matches!(op, EditOp::Reparent { .. })).count();
     let structural = script
         .ops
         .iter()
         .filter(|op| matches!(op, EditOp::AddSubtree { .. } | EditOp::RemoveSubtree { .. }))
         .count();
-    assert_eq!(moves, 1, "pure move should be a Move op: {:?}", script.ops);
-    assert_eq!(structural, 0, "no add/remove for a pure move: {:?}", script.ops);
+    assert_eq!(reparents, 1, "pure reparent should be a Reparent op: {:?}", script.ops);
+    assert_eq!(structural, 0, "no add/remove for a pure reparent: {:?}", script.ops);
 }
 
 // ============================================================================
@@ -434,7 +434,7 @@ fn round_trip_full_place() {
 #[test]
 fn round_trip_group_dupes_into_new_container() {
     // Multiple same-named instances gathered under a new container: the
-    // clone of the added container must not duplicate the moved-in content.
+    // clone of the added container must not duplicate the reparented-in content.
     let dup = |t: f32| {
         InstanceBuilder::new("Part")
             .with_name("P")
@@ -450,16 +450,16 @@ fn round_trip_group_dupes_into_new_container() {
         ),
     );
     let script = compute_edit_script(&old, &new, &DiffConfig::default());
-    let move_ops = script.ops.iter().filter(|op| matches!(op, EditOp::Move { .. })).count();
+    let reparent_ops = script.ops.iter().filter(|op| matches!(op, EditOp::Reparent { .. })).count();
     let removes = script.ops.iter().filter(|op| matches!(op, EditOp::RemoveSubtree { .. })).count();
-    assert_eq!(move_ops, 2, "{:?}", script.ops);
+    assert_eq!(reparent_ops, 2, "{:?}", script.ops);
     assert_eq!(removes, 0, "{:?}", script.ops);
 
     assert_round_trip(old, new);
 }
 
 #[test]
-fn round_trip_move_out_of_removed_folder() {
+fn round_trip_reparent_out_of_removed_folder() {
     let old = WeakDom::new(
         folder("root")
             .with_child(folder("Doomed").with_child(part("Keep")).with_child(folder("Junk")))

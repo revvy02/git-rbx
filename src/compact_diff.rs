@@ -253,7 +253,7 @@ fn compact_change_pass(
             continue;
         }
         let old_ref = context.old_dom.node(old_child).source_ref();
-        if context.identity.moved_old.contains(&old_ref) {
+        if context.identity.reparented_old.contains(&old_ref) {
             continue;
         }
         let instance = context.old_dom.node(old_child);
@@ -275,7 +275,7 @@ fn compact_change_pass(
             continue;
         }
         let new_ref = context.new_dom.node(new_child).source_ref();
-        if context.identity.moved_new.contains(&new_ref) {
+        if context.identity.reparented_new.contains(&new_ref) {
             continue;
         }
         let instance = context.new_dom.node(new_child);
@@ -380,22 +380,22 @@ pub(crate) fn compute_compact_diff_with_identity(
         config,
     };
 
-    let mut moves_by_depth = identity.moves.as_ref().clone();
-    moves_by_depth.sort_by_key(|(_, new_ref)| new_side_depth(new_dom, *new_ref));
+    let mut reparents_by_depth = identity.reparents.as_ref().clone();
+    reparents_by_depth.sort_by_key(|(_, new_ref)| new_side_depth(new_dom, *new_ref));
     let mut ops = Vec::new();
-    for &(old_ref, new_ref) in &moves_by_depth {
+    for &(old_ref, new_ref) in &reparents_by_depth {
         let new_parent = new_dom
             .get_by_ref(new_ref)
             .map(|instance| instance.parent())
             .unwrap_or_else(Ref::none);
-        ops.push(EditOp::Move {
+        ops.push(EditOp::Reparent {
             old_ref,
             new_parent: anchor_for(new_parent, &identity.reverse_matched),
         });
     }
 
     compact_change_pass(&context, old_dom.root_id(), new_dom.root_id(), &mut ops);
-    for &(old_ref, new_ref) in identity.moves.iter() {
+    for &(old_ref, new_ref) in identity.reparents.iter() {
         emit_compact_instance_changes(&context, old_ref, new_ref, &mut ops);
         let (Some(old_id), Some(new_id)) = (
             old_dom.id_from_source_ref(old_ref),

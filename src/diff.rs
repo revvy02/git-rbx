@@ -52,10 +52,10 @@ pub enum DiffEntry {
         class: String,
         property_changes: Vec<PropertyChange>,
     },
-    /// Instance was moved to a different parent (same logical instance).
+    /// Instance was reparented to a different parent (same logical instance).
     /// `path` is the new location. Property edits remain separate `Modified`
     /// entries so every diff entry represents one primitive operation.
-    Moved {
+    Reparented {
         old_ref: String,
         new_ref: String,
         old_path: String,
@@ -496,8 +496,8 @@ pub(crate) fn raw_property_changes(
 /// Project storage-independent semantic changes into the presentation diff.
 ///
 /// The change set is authoritative: this function does not rematch instances
-/// or compare properties again. Changes below a moved root are deferred until
-/// after that root's `Moved` row, preserving the tree-oriented output order.
+/// or compare properties again. Changes below a reparented root are deferred until
+/// after that root's `Reparented` row, preserving the tree-oriented output order.
 fn presentation_path(
     dom: &dyn DomView,
     referent: Ref,
@@ -593,7 +593,7 @@ pub(crate) fn semantic_changes_to_diff(
     let moved_ancestor = |mut referent: Ref| {
         while let Some(instance) = old_dom.get_by_ref(referent) {
             referent = instance.parent();
-            if changes.identity.moved_old.contains(&referent) {
+            if changes.identity.reparented_old.contains(&referent) {
                 return Some(referent);
             }
         }
@@ -642,7 +642,7 @@ pub(crate) fn semantic_changes_to_diff(
                 );
                 let owner = match parent {
                     Anchor::Old(parent) => {
-                        if changes.identity.moved_old.contains(parent) {
+                        if changes.identity.reparented_old.contains(parent) {
                             Some(*parent)
                         } else {
                             moved_ancestor(*parent)
@@ -663,9 +663,9 @@ pub(crate) fn semantic_changes_to_diff(
                 );
             }
             EditOp::SetName { old_ref, .. } | EditOp::SetProperty { old_ref, .. } => {
-                // A moved instance's property edits are emitted immediately
-                // after its primitive Moved entry below.
-                if changes.identity.moved_old.contains(old_ref) {
+                // A reparented instance's property edits are emitted immediately
+                // after its primitive Reparented entry below.
+                if changes.identity.reparented_old.contains(old_ref) {
                     continue;
                 }
                 if !emitted_modifications.insert(*old_ref) {
@@ -700,11 +700,11 @@ pub(crate) fn semantic_changes_to_diff(
                     &mut deferred,
                 );
             }
-            EditOp::Move { .. } => {}
+            EditOp::Reparent { .. } => {}
         }
     }
 
-    for (old_ref, new_ref) in changes.identity.moves.iter() {
+    for (old_ref, new_ref) in changes.identity.reparents.iter() {
         let Some(instance) = new_dom.get_by_ref(*new_ref) else {
             continue;
         };
@@ -714,7 +714,7 @@ pub(crate) fn semantic_changes_to_diff(
             Some(&changes.identity.reverse_matched),
         );
         let property_changes = modifications.remove(old_ref).unwrap_or_default();
-        result.push(DiffEntry::Moved {
+        result.push(DiffEntry::Reparented {
             old_ref: old_ref.to_string(),
             new_ref: new_ref.to_string(),
             old_path: get_instance_path(old_dom, *old_ref),
@@ -738,7 +738,7 @@ pub(crate) fn semantic_changes_to_diff(
     }
 
     // Conservatively retain any deferred entries if malformed identity data
-    // omitted their owning move.
+    // omitted their owning reparent.
     for mut entries in deferred.into_values() {
         result.append(&mut entries);
     }

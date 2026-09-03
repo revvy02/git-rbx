@@ -53,7 +53,7 @@ fn counts(diffs: &[DiffEntry]) -> (usize, usize, usize, usize) {
             DiffEntry::Added { .. } => c.0 += 1,
             DiffEntry::Removed { .. } => c.1 += 1,
             DiffEntry::Modified { .. } => c.2 += 1,
-            DiffEntry::Moved { .. } => c.3 += 1,
+            DiffEntry::Reparented { .. } => c.3 += 1,
             DiffEntry::Pivoted { .. } => {}
         }
     }

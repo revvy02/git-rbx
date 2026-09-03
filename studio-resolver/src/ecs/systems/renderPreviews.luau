@@ -4,7 +4,7 @@
 	Base snapshot (what unpicking restores); the scheduled loop renders the
 	staged selection into the scene — staging Ours renders ours' version,
 	Theirs renders theirs', unpicked renders base. Property values apply to
-	the target, moves reparent it, and decisions that require serialized-only
+	the target, reparents relocate it, and decisions that require serialized-only
 	state swap stamped clones in and out. None of this touches the disk file —
 	the CLI at Complete is the
 	only writer. Staged Resolution vs Rendered drives the frame diff.
@@ -60,7 +60,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			for _, child in folder:GetChildren() do
 				if child.Name == "Destination" and child:IsA("ObjectValue") then
 					info.destination = child.Value
-				elseif child.Name == "MoveOuts" then
+				elseif child.Name == "ReparentedOut" then
 					local moveOuts = {}
 					for _, record in child:GetChildren() do
 						if record.Name == "References" then
@@ -172,7 +172,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			-- Both kinds use clone swaps. Mesh geometry includes serialized-only
 			-- InitialSize, so property writes cannot faithfully preview its bundle.
 			base.parts = capturePartTransparencies(target)
-		elseif kind == "MoveTarget" then
+		elseif kind == "ReparentTarget" then
 			base.parent = target.Parent
 		elseif kind == "Pivot" then
 			captureFrameTarget(target)
@@ -235,12 +235,12 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			for part, original in base.parts :: { [BasePart]: number } do
 				part.Transparency = if hideTarget then 1 else original
 			end
-		elseif kind == "MoveTarget" then
+		elseif kind == "ReparentTarget" then
 			local destination = if staged == "ours"
 				then ours.destination
 				elseif staged == "theirs" then theirs.destination
 				else nil
-			-- A side with no live destination (moved into the other branch's added
+			-- A side with no live destination (reparented into the other branch's added
 			-- content) previews as base rather than sticking at a stale parent.
 			destination = destination or base.parent
 			if destination then
@@ -248,7 +248,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			end
 		elseif kind == "DeleteVsEdit" then
 			-- One side deletes (stamped Deleted attribute); the other keeps —
-			-- an edited clone, or a move out of the deleted subtree (no clone).
+			-- an edited clone, or a reparent out of the deleted subtree (no clone).
 			-- Staging the delete side hides the base target; staging a keep
 			-- side with an edited clone swaps the clone into the target's spot
 			-- (it carries its own true coordinates). A clone-less keep side

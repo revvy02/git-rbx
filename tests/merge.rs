@@ -125,8 +125,8 @@ fn property_conflict_keeps_base_and_reports() {
 }
 
 #[test]
-fn move_composes_with_edit() {
-    // The marquee case: ours moves P from A to B; theirs edits P's property.
+fn reparent_composes_with_edit() {
+    // The marquee case: ours reparents P from A to B; theirs edits P's property.
     let mut base = base_dom();
     let ours = WeakDom::new(
         folder("root")
@@ -151,7 +151,7 @@ fn move_composes_with_edit() {
 }
 
 #[test]
-fn conflicting_move_destinations() {
+fn conflicting_reparent_destinations() {
     // ours: P → B; theirs: P → C
     let mut base = WeakDom::new(
         folder("root")
@@ -174,7 +174,7 @@ fn conflicting_move_destinations() {
 
     let result = merge_doms(&mut base, &ours, &theirs, &DiffConfig::default());
     assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
-    assert_eq!(result.conflicts[0].kind, ConflictKind::MoveTarget);
+    assert_eq!(result.conflicts[0].kind, ConflictKind::ReparentTarget);
     assert_eq!(result.conflicts[0].path, "root.A.P");
 }
 
@@ -232,7 +232,7 @@ fn multiple_edits_under_one_deleted_subtree_are_one_conflict() {
 }
 
 #[test]
-fn move_into_deleted_subtree_conflicts() {
+fn reparent_into_deleted_subtree_conflicts() {
     // ours: remove B; theirs: move P into B
     let mut base = base_dom();
     let ours = WeakDom::new(folder("root").with_child(folder("A").with_child(part("P"))));

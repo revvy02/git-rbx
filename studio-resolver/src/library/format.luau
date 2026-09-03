@@ -161,7 +161,7 @@ function format.relPath(inst: Instance): string
 end
 
 -- What choosing this side means, one glance: the property value it sets, the
--- destination it moves to, or whether it keeps (edited) / deletes the target.
+-- destination it reparents to, or whether it keeps (edited) / deletes the target.
 function format.sideSummary(kind: string, property: string?, info: SideInfo?): string?
 	if not info then
 		return nil
@@ -178,11 +178,11 @@ function format.sideSummary(kind: string, property: string?, info: SideInfo?): s
 		return if ok then format.formatValue(value) else "(not scriptable)"
 	elseif kind == "PropertyBundle" then
 		return if info.clone then "use complete serialized bundle" else nil
-	elseif kind == "MoveTarget" then
+	elseif kind == "ReparentTarget" then
 		local path = info.destinationPath
 		return path and `→ {format.escapeRich(path)}`
 	elseif kind == "DeleteVsEdit" then
-		-- The non-deleting side may carry an edited clone, or be a move out
+		-- The non-deleting side may carry an edited clone, or be a reparent out
 		-- of the deleted subtree (Destination only, no clone).
 		if info.deleted then
 			return "delete"
@@ -214,7 +214,7 @@ function format.baseSummary(kind: string, base: Base): string
 		return "keep base bundle"
 	elseif kind == "Pivot" then
 		return "canonical placement"
-	elseif kind == "MoveTarget" then
+	elseif kind == "ReparentTarget" then
 		local parent = base.parent
 		return if parent then `→ {format.escapeRich(format.relPath(parent))}` else "→ ?"
 	end

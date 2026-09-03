@@ -602,7 +602,7 @@ fn cmd_changes(base: &str, head: &str, format: Format, max_rows: usize) -> Resul
                         "added": counts.added,
                         "removed": counts.removed,
                         "modified": counts.modified,
-                        "moved": counts.moved,
+                        "reparented": counts.reparented,
                         "pivoted": counts.pivoted,
                     },
                     "diffs": diffs,
@@ -839,7 +839,7 @@ fn cmd_merge(
                 format!("property bundle '{}'", name)
             }
             ConflictKind::DeleteVsEdit => "delete vs edit".to_string(),
-            ConflictKind::MoveTarget => "conflicting move destinations".to_string(),
+            ConflictKind::ReparentTarget => "conflicting reparent destinations".to_string(),
             ConflictKind::Pivot { .. } => "pivot".to_string(),
         };
         eprintln!("  ! {} — {} (base content kept)", conflict.path, kind);

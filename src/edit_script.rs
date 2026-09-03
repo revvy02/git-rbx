@@ -2,7 +2,7 @@
 //! plus materialization helpers that apply them to a mutable result.
 //!
 //! This is the layer the merge combiner consumes. Ordinary basis ops are
-//! AddSubtree / RemoveSubtree / SetName / SetProperty; Move is the derived
+//! AddSubtree / RemoveSubtree / SetName / SetProperty; Reparent is the derived
 //! identity op (a paired remove+add). Hierarchical [`PivotOp`]s are another
 //! primitive, kept in an ordered placement phase because they transform the
 //! coordinate system in which ordinary edits were planned. Ops address
@@ -23,7 +23,7 @@ use crate::diff::{is_studio_artifact, raw_property_changes, DiffConfig};
 use crate::diff_dom::DomView;
 use crate::hash::{DeepHashCache, LazyHashCache};
 use crate::match_instances::Matcher;
-use crate::move_detect::detect_moves;
+use crate::reparent_detect::detect_reparents;
 use crate::placement::{apply_pivot_ops, PivotOp};
 use crate::reference_value::{direct_reference, with_direct_reference_target};
 
@@ -43,7 +43,7 @@ pub enum EditOp {
     RemoveSubtree { old_ref: Ref },
     /// Reparent an old-DOM instance (derived identity op; lowers to
     /// RemoveSubtree + AddSubtree).
-    Move { old_ref: Ref, new_parent: Anchor },
+    Reparent { old_ref: Ref, new_parent: Anchor },
     /// Rename a matched instance (Name lives outside the property map).
     SetName { old_ref: Ref, name: String },
     /// Set (`Some`) or remove (`None`) a property on a matched instance.
@@ -82,34 +82,34 @@ pub struct SemanticChangeSet {
 #[derive(Debug, Clone)]
 pub struct InstanceIdentity {
     /// Identity mapping (old_ref → new_ref) for every matched instance,
-    /// including moved pairs and instances inside unchanged subtrees.
+    /// including reparented pairs and instances inside unchanged subtrees.
     pub matched: Arc<HashMap<Ref, Ref>>,
     /// Reverse identity mapping (new_ref → old_ref).
     pub reverse_matched: Arc<HashMap<Ref, Ref>>,
-    /// Paired moved roots in identity-detection order.
-    pub moves: Arc<Vec<(Ref, Ref)>>,
-    /// Old-DOM roots supplied by Move operations.
-    pub moved_old: Arc<HashSet<Ref>>,
-    /// New-DOM refs that are Move destinations. A destination can sit inside
-    /// an added subtree (moved into a new group); cloning that subtree must
-    /// skip these positions — the Move op supplies the real instance.
-    pub moved_new: Arc<HashSet<Ref>>,
+    /// Paired reparented roots in identity-detection order.
+    pub reparents: Arc<Vec<(Ref, Ref)>>,
+    /// Old-DOM roots supplied by Reparent operations.
+    pub reparented_old: Arc<HashSet<Ref>>,
+    /// New-DOM refs that are Reparent destinations. A destination can sit inside
+    /// an added subtree (reparented into a new group); cloning that subtree must
+    /// skip these positions — the Reparent op supplies the real instance.
+    pub reparented_new: Arc<HashSet<Ref>>,
 }
 
 /// Backwards-compatible name for the applicable semantic change set.
 pub type EditScript = SemanticChangeSet;
 
 impl InstanceIdentity {
-    fn new(matched: HashMap<Ref, Ref>, moves: Vec<(Ref, Ref)>) -> Self {
+    fn new(matched: HashMap<Ref, Ref>, reparents: Vec<(Ref, Ref)>) -> Self {
         let reverse_matched = matched.iter().map(|(old, new)| (*new, *old)).collect();
-        let moved_old = moves.iter().map(|(old, _)| *old).collect();
-        let moved_new = moves.iter().map(|(_, new)| *new).collect();
+        let reparented_old = reparents.iter().map(|(old, _)| *old).collect();
+        let reparented_new = reparents.iter().map(|(_, new)| *new).collect();
         Self {
             matched: Arc::new(matched),
             reverse_matched: Arc::new(reverse_matched),
-            moves: Arc::new(moves),
-            moved_old: Arc::new(moved_old),
-            moved_new: Arc::new(moved_new),
+            reparents: Arc::new(reparents),
+            reparented_old: Arc::new(reparented_old),
+            reparented_new: Arc::new(reparented_new),
         }
     }
 }
@@ -174,7 +174,7 @@ fn discover_identity_once(
         &mut added_roots,
     );
 
-    let moves = detect_moves(
+    let reparents = detect_reparents(
         old_dom,
         new_dom,
         removed_roots,
@@ -182,7 +182,7 @@ fn discover_identity_once(
         old_deep,
         new_deep,
     );
-    for (old_root, new_root) in &moves {
+    for (old_root, new_root) in &reparents {
         matched.insert(*old_root, *new_root);
         build_full_mapping_once(
             matcher,
@@ -193,7 +193,7 @@ fn discover_identity_once(
             &mut Vec::new(),
         );
     }
-    InstanceIdentity::new(matched, moves)
+    InstanceIdentity::new(matched, reparents)
 }
 
 /// Per-DOM lazy hash caches shared across planning passes.
@@ -260,20 +260,20 @@ pub(crate) fn compute_semantic_changes_with_caches(
 
     let mut ops = Vec::new();
 
-    // Move ops first in new-side depth order (parents settle before children),
+    // Reparent ops first in new-side depth order (parents settle before children),
     // so applying in script order can never transfer into an unsettled spot.
-    let mut moves_by_depth: Vec<(usize, &(Ref, Ref))> = identity
-        .moves
+    let mut reparents_by_depth: Vec<(usize, &(Ref, Ref))> = identity
+        .reparents
         .iter()
         .map(|pair| (new_side_depth(new_dom, pair.1), pair))
         .collect();
-    moves_by_depth.sort_by_key(|(depth, _)| *depth);
-    for (_, (old_root, new_root)) in moves_by_depth {
+    reparents_by_depth.sort_by_key(|(depth, _)| *depth);
+    for (_, (old_root, new_root)) in reparents_by_depth {
         let new_parent = new_dom
             .get_by_ref(*new_root)
             .map(|inst| inst.parent())
             .unwrap_or_else(Ref::none);
-        ops.push(EditOp::Move {
+        ops.push(EditOp::Reparent {
             old_ref: *old_root,
             new_parent: anchor_for(new_parent, &identity.reverse_matched),
         });
@@ -289,7 +289,7 @@ pub(crate) fn compute_semantic_changes_with_caches(
         new_deep,
     };
     emit_ops(&ctx, old_dom.root_ref(), new_dom.root_ref(), &mut ops);
-    for (old_root, new_root) in identity.moves.iter() {
+    for (old_root, new_root) in identity.reparents.iter() {
         emit_instance_edits(&ctx, *old_root, *new_root, &mut ops);
         emit_ops(&ctx, *old_root, *new_root, &mut ops);
     }
@@ -373,7 +373,7 @@ fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
                     .get_by_ref(*new_child)
                     .is_some_and(|instance| instance.parent() == new_ref)
             });
-        if local_match.is_some() || ctx.identity.moved_old.contains(&old_child) {
+        if local_match.is_some() || ctx.identity.reparented_old.contains(&old_child) {
             continue;
         }
         if let Some(inst) = ctx.old_dom.get_by_ref(old_child) {
@@ -395,7 +395,7 @@ fn emit_ops(ctx: &BuildCtx, old_ref: Ref, new_ref: Ref, ops: &mut Vec<EditOp>) {
                     .get_by_ref(*old_child)
                     .is_some_and(|instance| instance.parent() == old_ref)
             });
-        if local_match.is_some() || ctx.identity.moved_new.contains(&new_child) {
+        if local_match.is_some() || ctx.identity.reparented_new.contains(&new_child) {
             continue;
         }
         if let Some(inst) = ctx.new_dom.get_by_ref(new_child) {
@@ -514,25 +514,25 @@ fn apply_ops_where(
         }
         if let EditOp::AddSubtree { parent, new_ref } = op {
             let parent_ref = resolve_anchor(*parent, &created);
-            let builder = build_subtree(new_dom, *new_ref, &identity.moved_new);
+            let builder = build_subtree(new_dom, *new_ref, &identity.reparented_new);
             let created_root = target.insert(parent_ref, builder);
             record_created(
                 new_dom,
                 *new_ref,
                 target,
                 created_root,
-                &identity.moved_new,
+                &identity.reparented_new,
                 &mut created,
             );
         }
     }
 
-    // 2. Moves — emitted in new-side depth order by the builder
+    // 2. Reparents — emitted in new-side depth order by the builder
     for (index, op) in ops.iter().enumerate() {
         if !include(index) {
             continue;
         }
-        if let EditOp::Move {
+        if let EditOp::Reparent {
             old_ref,
             new_parent,
         } = op
@@ -646,12 +646,12 @@ fn remap_ref_value(
 
 /// Recursively clone a new-DOM subtree into an InstanceBuilder (full fidelity —
 /// every property verbatim, no comparability filtering; this is a copy).
-/// Move destinations are skipped: their content is an existing instance the
-/// Move op relocates here, not new content to duplicate.
+/// Reparent destinations are skipped: their content is an existing instance the
+/// Reparent op relocates here, not new content to duplicate.
 fn build_subtree(
     new_dom: &dyn DomView,
     referent: Ref,
-    moved_destinations: &HashSet<Ref>,
+    reparent_destinations: &HashSet<Ref>,
 ) -> InstanceBuilder {
     let inst = new_dom.get_by_ref(referent).unwrap();
     let mut builder = InstanceBuilder::new(inst.class()).with_name(inst.name());
@@ -660,22 +660,22 @@ fn build_subtree(
     }
     let children: Vec<InstanceBuilder> = inst
         .children()
-        .filter(|child| !moved_destinations.contains(child))
-        .map(|child| build_subtree(new_dom, child, moved_destinations))
+        .filter(|child| !reparent_destinations.contains(child))
+        .map(|child| build_subtree(new_dom, child, reparent_destinations))
         .collect();
     builder.with_children(children)
 }
 
 /// Walk the source subtree and the freshly created target subtree in parallel,
 /// recording new_ref → created_ref for every instance. Children were built in
-/// source order minus skipped move destinations, so pairing filters the same
+/// source order minus skipped reparent destinations, so pairing filters the same
 /// refs to stay positional.
 fn record_created(
     new_dom: &dyn DomView,
     new_ref: Ref,
     target: &WeakDom,
     created_ref: Ref,
-    moved_destinations: &HashSet<Ref>,
+    reparent_destinations: &HashSet<Ref>,
     created: &mut HashMap<Ref, Ref>,
 ) {
     created.insert(new_ref, created_ref);
@@ -683,7 +683,7 @@ fn record_created(
         .get_by_ref(new_ref)
         .unwrap()
         .children()
-        .filter(|c| !moved_destinations.contains(c));
+        .filter(|c| !reparent_destinations.contains(c));
     let target_children = target
         .get_by_ref(created_ref)
         .unwrap()
@@ -696,7 +696,7 @@ fn record_created(
             source_child,
             target,
             target_child,
-            moved_destinations,
+            reparent_destinations,
             created,
         );
     }

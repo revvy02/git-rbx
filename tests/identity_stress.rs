@@ -1,8 +1,8 @@
 //! Identity stress scenarios for the 3-way merge: ambiguous same-name
 //! siblings edited on both branches, rename+reparent in one commit, and
 //! cross-branch Ref properties into deduplicated added subtrees. Each case
-//! here started as a confirmed false conflict (or lost move) — keep them
-//! passing when touching match_instances, move_detect, or the merge combiner.
+//! here started as a confirmed false conflict (or lost reparent) — keep them
+//! passing when touching match_instances, reparent_detect, or the merge combiner.
 
 use git_rbx::{diff_doms, merge_doms, DiffConfig};
 use rbx_dom_weak::{types::Ref, InstanceBuilder, WeakDom};
@@ -174,7 +174,7 @@ fn probe_identical_twins_delete_vs_edit() {
 // ---------- Item 2: rename + reparent ----------
 
 /// A subtree that is renamed AND reparented in one commit pairs through the
-/// name-less exact-hash move pass: one Moved entry plus a Name change, no
+/// name-less exact-hash reparent pass: one Reparented entry plus a Name change, no
 /// remove+add.
 #[test]
 fn probe_rename_plus_reparent_diff() {
@@ -191,8 +191,8 @@ fn probe_rename_plus_reparent_diff() {
     assert!(
         diffs
             .iter()
-            .any(|d| matches!(d, git_rbx::DiffEntry::Moved { .. })),
-        "expected a Moved entry: {diffs:#?}"
+            .any(|d| matches!(d, git_rbx::DiffEntry::Reparented { .. })),
+        "expected a Reparented entry: {diffs:#?}"
     );
     assert!(
         !diffs.iter().any(|d| matches!(
@@ -204,7 +204,7 @@ fn probe_rename_plus_reparent_diff() {
 }
 
 /// Merge consequence: ours renames+reparents the container, theirs edits a
-/// descendant. With the rename+move visible, both compose cleanly: the
+/// descendant. With the rename+reparent visible, both compose cleanly: the
 /// container ends up renamed at its new location with the edit applied.
 #[test]
 fn probe_rename_plus_reparent_merge() {
@@ -245,10 +245,10 @@ fn probe_rename_plus_reparent_merge() {
 }
 
 /// Both branches evacuate P from A to the same destination, then delete A —
-/// identical intent on both sides. The identical moves dedupe and the common
+/// identical intent on both sides. The identical reparents dedupe and the common
 /// delete composes: no delete-vs-edit conflict, P survives at B, A is gone.
-/// (Asymmetric evacuation — only one side moves P out — must still conflict;
-/// that case is covered by resolve.rs's move-out tests.)
+/// (Asymmetric evacuation — only one side reparents P out — must still conflict;
+/// that case is covered by resolve.rs's reparent-out tests.)
 #[test]
 fn symmetric_evacuation_composes() {
     let mut base = WeakDom::new(

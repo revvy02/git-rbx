@@ -160,7 +160,7 @@ fn class_semantics(class_name: &str) -> Option<&'static ClassSemantics> {
 }
 
 /// Get the authored property names for a class. The result is cached for the
-/// process lifetime and shared by matching, hashing, move detection, and diff.
+/// process lifetime and shared by matching, hashing, reparent detection, and diff.
 pub(crate) fn get_authored_properties(class_name: &str) -> &'static FxHashSet<String> {
     static CLASS_PROPERTIES: OnceLock<Mutex<HashMap<String, &'static FxHashSet<String>>>> =
         OnceLock::new();

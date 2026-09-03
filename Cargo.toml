@@ -1,6 +1,6 @@
 [package]
 name = "git-rbx"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Semantic diff, three-way merge, and conflict resolution for Roblox place/model files, as a git extension (git rbx)"
 autobins = false

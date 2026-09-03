@@ -98,7 +98,7 @@ hook enforces.
 
 Every diff — `diff`, `changes`, `git diff`, and the conflict reports — is
 expressed in five kinds of change. Each entry is one primitive operation;
-an instance that was moved *and* edited appears as one Moved entry plus one
+an instance that was reparented *and* edited appears as one Reparented entry plus one
 Modified entry, never a blended record.
 
 | Kind | Meaning |
@@ -106,7 +106,7 @@ Modified entry, never a blended record.
 | **Added** | An instance (with its whole subtree) exists only in the new version. |
 | **Removed** | An instance (with its whole subtree) exists only in the old version. |
 | **Modified** | The same instance has different property values. A rename is a Modified entry on the `Name` property. |
-| **Moved** | The same instance has a different parent (`old_path` → `path`). |
+| **Reparented** | The same instance has a different parent (`old_path` → `path`). |
 | **Pivoted** | A Model and its world-space descendants were transformed together as a rigid body. |
 
 **Property granularity.** Container properties are diffed per key rather
@@ -143,8 +143,8 @@ competing versions are stored alongside it, and you choose.
 |---|---|---|
 | **Property** | Both sides set the same property of the same instance to different values (including `Name`, and per-key `Attributes.<key>`). | `ours`, `theirs`, or `custom` with a value of your own. |
 | **PropertyBundle** | Both sides changed properties that only make sense together. The canonical case is a MeshPart's `MeshContent` and `InitialSize`: taking the mesh from one side and the source extent from the other renders the mesh at a wildly wrong scale. | `ours` or `theirs`, applied atomically to the whole bundle. |
-| **DeleteVsEdit** | One side deleted a subtree; the other edited inside it, moved something into it, or moved something out of it. Reported once per deleted root, however many edits the other side made underneath. | `ours` or `theirs` — the whole branch outcome for that subtree. If the surviving side had moved edited descendants out before the delete, those *move-outs* are preserved with either choice. |
-| **MoveTarget** | Both sides moved the same instance to different parents (or to destinations that cannot be proven equal across the two branches). | `ours` or `theirs`. |
+| **DeleteVsEdit** | One side deleted a subtree; the other edited inside it, reparented something into it, or reparented something out of it. Reported once per deleted root, however many edits the other side made underneath. | `ours` or `theirs` — the whole branch outcome for that subtree. If the surviving side had reparented edited descendants out before the delete, those *reparent-outs* are preserved with either choice. |
+| **ReparentTarget** | Both sides reparented the same instance to different parents (or to destinations that cannot be proven equal across the two branches). | `ours` or `theirs`. |
 | **Pivot** | Both sides pivoted the same Model by different transforms. Nested pivots resolve in top-down order. | `ours` or `theirs`; the chosen delta is applied to the whole rigid body. |
 
 **Rigid groups.** When a spatial edit touches many parts that are not under
@@ -155,7 +155,7 @@ resolvable as one: `--take theirs --entry Group_1`.
 
 **What does not conflict.** Two branches making the *same* change dedupe,
 including identical additions (and references pointing into each branch's
-copy of the identical new content), identical moves, and both branches
+copy of the identical new content), identical reparents, and both branches
 evacuating the same instances out of a container before deleting it.
 Different attributes or tags on the same instance compose. Tags never
 conflict at all (set semantics).
@@ -251,8 +251,8 @@ always kept last so it overrides LFS's own `merge=lfs diff=lfs` lines.
 - Identity is heuristic. Truly ambiguous cases (identical twins under one
   parent, both edited on both branches) resolve positionally and
   consistently, but a sufficiently creative reorganization can still read
-  as remove-and-add. Renamed *and* moved *and* edited in one commit is the
-  known gap: rename-and-move and move-and-edit are detected, all three
+  as remove-and-add. Renamed *and* reparented *and* edited in one commit is the
+  known gap: rename-and-reparent and reparent-and-edit are detected, all three
   together are not.
 - Studio materializes content on load and save (services, a session
   camera, migration attributes). A fresh Rojo build compared with a Studio

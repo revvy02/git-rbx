@@ -37,9 +37,9 @@ pub enum ConflictKind {
     },
     /// One side removed a subtree the other side edited/moved into or out of.
     DeleteVsEdit,
-    /// Both sides moved the same instance to different parents, or a move
+    /// Both sides reparented the same instance to different parents, or a reparent
     /// destination can't be proven equal across branches.
-    MoveTarget,
+    ReparentTarget,
     /// Both branches placed an otherwise canonical hierarchy boundary
     /// differently. A root delta is world-relative; a nested delta is
     /// relative to the nearest participating ancestor placement.
@@ -295,10 +295,10 @@ fn merge_scripts(
     let mut ours_edits_vs_theirs_delete: HashMap<Ref, usize> = HashMap::new();
     let mut theirs_edits_vs_ours_delete: HashMap<Ref, usize> = HashMap::new();
 
-    // Moves indexed by their moved instance, for the symmetric-evacuation
+    // Reparents indexed by their reparented instance, for the symmetric-evacuation
     // check below.
-    let ours_move_anchor: HashMap<Ref, Anchor> = move_anchors(&ours.ops);
-    let theirs_move_anchor: HashMap<Ref, Anchor> = move_anchors(&theirs.ops);
+    let ours_reparent_anchor: HashMap<Ref, Anchor> = reparent_anchors(&ours.ops);
+    let theirs_reparent_anchor: HashMap<Ref, Anchor> = reparent_anchors(&theirs.ops);
 
     // Pair up identical additions before any conflict pass runs: the pairing
     // depends only on content, and the per-instance equivalence it yields
@@ -314,16 +314,16 @@ fn merge_scripts(
         theirs_deep,
     );
 
-    // Instances BOTH branches moved to the same destination (a live base
+    // Instances BOTH branches reparented to the same destination (a live base
     // parent or corresponding spots in identical added groups) are alive on
     // both sides no matter what happens to their base surroundings. Ops on
     // or below them must not read as edits inside a deleted subtree: the
     // delete-vs-edit ancestry walk stops at these before it can reach a
     // removed root, and every such op falls through to same-target dedupe.
-    let evacuated: HashSet<Ref> = ours_move_anchor
+    let evacuated: HashSet<Ref> = ours_reparent_anchor
         .iter()
         .filter(|(old_ref, ours_anchor)| {
-            theirs_move_anchor
+            theirs_reparent_anchor
                 .get(old_ref)
                 .is_some_and(|their_anchor| anchors_equal(**ours_anchor, *their_anchor, &added_equiv))
         })
@@ -564,7 +564,7 @@ fn merge_scripts(
                     if a == b =>
                 {
                     // A common outer deletion is not independently safe when
-                    // one branch first moves edited descendants out of that
+                    // one branch first reparents edited descendants out of that
                     // subtree. The delete-vs-edit decision owns the complete
                     // branch outcome: keep the base subtree alive for the
                     // resolver, and include both nominally-identical removes
@@ -593,11 +593,11 @@ fn merge_scripts(
                     }
                 }
                 (
-                    EditOp::Move {
+                    EditOp::Reparent {
                         old_ref: a,
                         new_parent: ap,
                     },
-                    EditOp::Move {
+                    EditOp::Reparent {
                         old_ref: b,
                         new_parent: bp,
                     },
@@ -609,7 +609,7 @@ fn merge_scripts(
                         conflicted_ours[i] = true;
                         conflicted_theirs[j] = true;
                         conflicts.push(MergeConflict {
-                            kind: ConflictKind::MoveTarget,
+                            kind: ConflictKind::ReparentTarget,
                             base_ref: *a,
                             path: get_instance_path(base, *a),
                             ours: ConflictSide::edits(vec![our_op.clone()]),
@@ -617,8 +617,8 @@ fn merge_scripts(
                         });
                     }
                 }
-                (EditOp::Move { old_ref: a, .. }, EditOp::RemoveSubtree { old_ref: b })
-                | (EditOp::RemoveSubtree { old_ref: b }, EditOp::Move { old_ref: a, .. })
+                (EditOp::Reparent { old_ref: a, .. }, EditOp::RemoveSubtree { old_ref: b })
+                | (EditOp::RemoveSubtree { old_ref: b }, EditOp::Reparent { old_ref: a, .. })
                     if a == b =>
                 {
                     conflicted_ours[i] = true;
@@ -812,7 +812,7 @@ fn conflict_kind_key(kind: &ConflictKind) -> (u8, &str) {
         ConflictKind::Property { name } => (0, name),
         ConflictKind::PropertyBundle { name, .. } => (1, name),
         ConflictKind::DeleteVsEdit => (2, ""),
-        ConflictKind::MoveTarget => (3, ""),
+        ConflictKind::ReparentTarget => (3, ""),
         ConflictKind::Pivot { .. } => (4, ""),
     }
 }
@@ -928,12 +928,12 @@ fn group_property_bundle_conflicts(
 }
 
 /// The base-DOM instances an op touches: the primary target, plus the
-/// destination parent for moves and adds (a move into a subtree the other
+/// destination parent for reparents and adds (a reparent into a subtree the other
 /// side removed is just as conflicting as an edit inside it).
 fn op_primary_target(op: &EditOp) -> Option<Ref> {
     match op {
         EditOp::RemoveSubtree { old_ref }
-        | EditOp::Move { old_ref, .. }
+        | EditOp::Reparent { old_ref, .. }
         | EditOp::SetName { old_ref, .. }
         | EditOp::SetProperty { old_ref, .. } => Some(*old_ref),
         EditOp::AddSubtree { .. } => None,
@@ -945,7 +945,7 @@ fn op_base_targets(op: &EditOp) -> [Option<Ref>; 2] {
         EditOp::RemoveSubtree { old_ref }
         | EditOp::SetName { old_ref, .. }
         | EditOp::SetProperty { old_ref, .. } => [Some(*old_ref), None],
-        EditOp::Move {
+        EditOp::Reparent {
             old_ref,
             new_parent,
         } => match new_parent {
@@ -960,11 +960,11 @@ fn op_base_targets(op: &EditOp) -> [Option<Ref>; 2] {
     }
 }
 
-/// Move destinations by moved instance, for cross-branch identical-move checks.
-fn move_anchors(ops: &[EditOp]) -> HashMap<Ref, Anchor> {
+/// Reparent destinations by reparented instance, for cross-branch identical-reparent checks.
+fn reparent_anchors(ops: &[EditOp]) -> HashMap<Ref, Anchor> {
     ops.iter()
         .filter_map(|op| match op {
-            EditOp::Move {
+            EditOp::Reparent {
                 old_ref,
                 new_parent,
             } => Some((*old_ref, *new_parent)),
@@ -984,7 +984,7 @@ fn removed_roots(ops: &[EditOp]) -> HashSet<Ref> {
 
 /// Walk up from `target` in the base DOM; return the first ancestor (or the
 /// target itself) present in `roots`. The walk stops at symmetrically
-/// evacuated instances first: content both branches moved to the same live
+/// evacuated instances first: content both branches reparented to the same live
 /// destination is not "inside" any removed subtree it started under.
 fn ancestor_in(
     base: &WeakDom,
@@ -1167,9 +1167,9 @@ fn values_equal(
     }
 }
 
-/// Move destinations compare equal when both map to the same base instance,
+/// Reparent destinations compare equal when both map to the same base instance,
 /// or when both are corresponding positions inside deduplicated added
-/// subtrees (each branch moved the target into its own identical copy).
+/// subtrees (each branch reparented the target into its own identical copy).
 fn anchors_equal(a: Anchor, b: Anchor, added_equiv: &HashMap<Ref, Ref>) -> bool {
     match (a, b) {
         (Anchor::Old(ra), Anchor::Old(rb)) => ra == rb,

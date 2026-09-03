@@ -18,10 +18,10 @@ local jecs = packages.jecs
 -- stamped Ours/Theirs folders.
 export type SideInfo = {
 	folder: Instance?, -- the stamped side folder (a swapped-out clone lives here)
-	clone: Instance?, -- this side's edited version (absent for deletes and moves)
+	clone: Instance?, -- this side's edited version (absent for deletes and reparents)
 	moveOuts: { { folder: Instance, snapshot: Instance, destination: Instance } }?, -- edited descendants escaping a commonly deleted root
 	deleted: boolean?, -- this side removes the subtree (stamped Deleted attribute)
-	destination: Instance?, -- the parent this side moves the target to
+	destination: Instance?, -- the parent this side reparents the target to
 	destinationPath: string?,
 	delta: CFrame?, -- Pivot: canonical/base content -> this side's world placement
 	pivots: { PivotApplication }?, -- conditional pivots selected with this side
@@ -31,7 +31,7 @@ export type SideInfo = {
 -- `operations` are the exact edit script shown by the sparse diff tree;
 -- `affectedIds` supports exact de-duplicated counts when rigid cards aggregate.
 export type ImpactOperation = {
-	kind: string, -- Property | Add | Delete | Move
+	kind: string, -- Property | Add | Delete | Reparent
 	nodeId: number?,
 	path: string,
 	property: string?,
@@ -51,7 +51,7 @@ export type ImpactSide = {
 -- Boot snapshot of the base state, restored on unpick (preview.boot).
 export type Base = {
 	value: any, -- Property: value to restore
-	parent: Instance?, -- MoveTarget: parent to restore
+	parent: Instance?, -- ReparentTarget: parent to restore
 	parts: { [BasePart]: number }?, -- clone swaps: true target transparencies
 }
 
@@ -119,7 +119,7 @@ local cts = {
 	VirtualSubjectIds = world:component(), -- live result Instance -> logical id
 
 	-- Conflict entities, one per stamped container entry.
-	Kind = world:component(), -- "Property" | "PropertyBundle" | "MoveTarget" | "DeleteVsEdit" | "Pivot"
+	Kind = world:component(), -- "Property" | "PropertyBundle" | "ReparentTarget" | "DeleteVsEdit" | "Pivot"
 	Path = world:component(), -- display path of the contested instance
 	Property = world:component(), -- Property kind: the contested property name
 	Properties = world:component(), -- PropertyBundle: atomic serialized property names

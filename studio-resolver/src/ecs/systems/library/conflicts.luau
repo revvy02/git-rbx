@@ -143,7 +143,7 @@ function conflicts.chooseGroup(entity: any, side: string)
 end
 
 -- Delete-vs-edit: which side deletes, from the stamped Deleted attributes.
--- The other side keeps — via an edited clone or a move out of the subtree.
+-- The other side keeps — via an edited clone or a reparent out of the subtree.
 function conflicts.deleteSide(entity: any): string?
 	local ours = world:get(entity, cts.Ours) :: SideInfo?
 	local theirs = world:get(entity, cts.Theirs) :: SideInfo?

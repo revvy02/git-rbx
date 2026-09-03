@@ -1069,7 +1069,7 @@ mod tests {
                 .with_child(
                     InstanceBuilder::new("Folder").with_name("A").with_child(
                         InstanceBuilder::new("Part")
-                            .with_name("Moved")
+                            .with_name("Reparented")
                             .with_property("Transparency", Variant::Float32(0.0)),
                     ),
                 )
@@ -1083,7 +1083,7 @@ mod tests {
                 .with_child(
                     InstanceBuilder::new("Folder").with_name("B").with_child(
                         InstanceBuilder::new("Part")
-                            .with_name("Moved")
+                            .with_name("Reparented")
                             .with_property("Transparency", Variant::Float32(0.5)),
                     ),
                 )
