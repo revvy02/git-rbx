@@ -20,20 +20,13 @@ see in Studio — leave it; resolving removes it). Resolve with:
 - [Change types](#change-types)
 - [Conflict types](#conflict-types)
 - [Commands](#commands)
-- [Automation and agents](#automation-and-agents)
 - [GitHub](#github)
 - [Git LFS](#git-lfs)
-- [How it works](#how-it-works)
 - [Limitations](#limitations)
-- [Development](#development)
 
 ## Install
 
-The binary has to be on your `PATH` as `git-rbx`; git then dispatches
-`git rbx <subcommand>` to it. Prebuilt binaries ship on every
-[release](https://github.com/revvy02/git-rbx/releases) for macOS (Apple
-silicon and Intel), Linux x86_64, and Windows x86_64.
-
+git runs `git rbx <subcommand>` by finding a `git-rbx` binary on your `PATH`.
 With [mise](https://mise.jdx.dev), add it to your project's `mise.toml` (or
 `mise use -g github:revvy02/git-rbx@latest` for every project):
 
@@ -41,14 +34,6 @@ With [mise](https://mise.jdx.dev), add it to your project's `mise.toml` (or
 [tools]
 "github:revvy02/git-rbx" = "latest"
 ```
-
-The repository is private, so mise needs a `GITHUB_TOKEN` in the environment
-with access to it to fetch the release asset. Recent mise versions also hide
-releases younger than 24 hours (`minimum_release_age`); to pick up a release
-sooner, pin its version (`"github:revvy02/git-rbx" = "0.0.1"`) or add
-`minimum_release_age_excludes = ["github:revvy02/git-rbx"]` under
-`[settings]`.
-
 Or build from source:
 
 ```sh
@@ -98,8 +83,8 @@ hook enforces.
 
 Every diff — `diff`, `changes`, `git diff`, and the conflict reports — is
 expressed in five kinds of change. Each entry is one primitive operation;
-an instance that was reparented *and* edited appears as one Reparented entry plus one
-Modified entry, never a blended record.
+an instance that was reparented *and* edited appears as one Reparented
+entry plus one Modified entry, never a blended record.
 
 | Kind | Meaning |
 |---|---|
@@ -193,72 +178,33 @@ git rbx git-diff <git external-diff arguments>
   the only source of truth, so CLI and Studio resolution can be interleaved.
 - **`git-diff`** is the git external-diff entry point; you never call it
   directly.
-
-## Automation and agents
-
-Every command that produces a decision has a machine-readable form, and the
-conflict state lives in the file, so an agent can drive a merge end to end
-with no GUI:
-
-```sh
-git merge feature || true
-git rbx check map.rbxl --json              # {"clean":false,"unresolvedCount":2}
-git rbx resolve map.rbxl --list --json     # the full conflict report (below)
-git rbx resolve map.rbxl --take theirs --entry Conflict_1
-git rbx resolve map.rbxl --take custom --entry Conflict_2 --value 0.5
-git rbx resolve map.rbxl --finalize
-git rbx check map.rbxl && git add map.rbxl && git commit
-```
-
-The **conflict report** (`resolve --list --json`, and embedded in
-`merge --json`) lists each conflict with its stable entry name, kind, base
-path, property, resolution state, rigid-group membership, and — for each
-side — whether it deleted the target, where it moved it, its pivot delta,
-and an *impact*: the exact patch that choosing that side applies, with typed
-before/after values. That is enough to decide on the merits ("theirs moved
-the door two studs; ours only retextured it") rather than blindly picking a
-side. Entry names are deterministic across runs, so a recorded decision
-can be replayed. `changes --format json` and `diff --format json` use the
-same typed value encoding.
+- Every command that produces a decision has a `--json` form. The conflict
+  report lists each conflict with, per side, the exact patch that choosing
+  it applies, so an agent can drive a merge end to end without a GUI.
 
 ## GitHub
 
-GitHub cannot render Roblox file diffs and has no hook for custom
-renderers; `.gitattributes` diff drivers are a local-git mechanism. The
-review surface has to be fed from CI instead.
+GitHub cannot render Roblox file diffs, so
 [`.github/workflows/roblox-changes.yml`](.github/workflows/roblox-changes.yml)
-is a reference workflow: on every pull request and push it runs
-`git rbx changes` between the two revisions, appends the markdown to the
-check's step summary (so it exists on every commit), and posts a single
-pull-request comment that later pushes update in place. Copy it into a
-repository that stores Roblox files and adjust the install step.
+runs `git rbx changes` on every pull request and posts the result as a
+step summary and one comment that later pushes update in place. Copy it
+into any repository that stores Roblox files.
 
 ## Git LFS
 
-Large place files usually live in Git LFS, and LFS is a clean/smudge
-filter that git does **not** run for merge drivers or external diff
-commands: each side arrives as pointer text, and whatever a driver writes
-back is stored verbatim. git-rbx handles this transparently — pointers are
-resolved through `git lfs smudge` on read (before the extension is trusted,
-so skip-smudge checkouts work too), and a result that replaces a pointer is
-written back through `git lfs clean`, so the repository keeps a pointer and
-the worktree gets real content. Put `git rbx install` *after* `git lfs
-track` in `.gitattributes` history, or just re-run it: the managed block is
-always kept last so it overrides LFS's own `merge=lfs diff=lfs` lines.
+git does not run LFS filters for merge drivers or external diffs, so each
+side arrives as a pointer. git-rbx resolves pointers through `git lfs
+smudge` on read and writes results back through `git lfs clean`, so the
+repository keeps pointers and the worktree gets real content. The managed
+`.gitattributes` block must stay below the LFS lines; re-running
+`git rbx install` moves it back to the end.
 
 ## Limitations
 
-- Identity is heuristic. Truly ambiguous cases (identical twins under one
-  parent, both edited on both branches) resolve positionally and
-  consistently, but a sufficiently creative reorganization can still read
-  as remove-and-add. Renamed *and* reparented *and* edited in one commit is the
-  known gap: rename-and-reparent and reparent-and-edit are detected, all three
-  together are not.
-- Studio materializes content on load and save (services, a session
-  camera, migration attributes). A fresh Rojo build compared with a Studio
-  save is never a zero diff; compare save with save.
-- `git log -p` and `git show` only use external diff drivers with
-  `--ext-diff`; `git diff` uses them automatically.
-- The Studio resolver currently runs from the git-rbx source checkout it
-  was built in (it needs the `studio-resolver` sources); the CLI path has
-  no such dependency.
+- Identity is heuristic. Rename, reparent, and edit of the same instance in
+  one commit is not detected; any two of the three are.
+- Studio adds content on load and save (services, a session camera,
+  migration attributes), so a fresh Rojo build never diffs clean against a
+  Studio save. Compare save with save.
+- `git log -p` and `git show` need `--ext-diff` to use the semantic diff;
+  `git diff` uses it automatically.
