@@ -1017,10 +1017,15 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         );
     }
 
+    // `--place` always: with a path rodeo opens that place; with no value it
+    // launches an empty one. Omitting it entirely would route the script
+    // into whatever Studio session happens to be running.
     let mut cmd = std::process::Command::new("rodeo");
-    cmd.arg("run").arg("--place");
+    cmd.arg("run");
     if is_place {
-        cmd.arg(&abs_file);
+        cmd.arg("--place").arg(&abs_file);
+    } else {
+        cmd.arg("--place");
     }
     cmd.arg("--focus")
         .args(["--show-widgets", "none"])
