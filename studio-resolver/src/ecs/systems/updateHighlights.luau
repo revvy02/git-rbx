@@ -55,7 +55,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		name = "update_highlights",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_highlights")
+			debug.profilebegin("gitrbx_highlights")
 			local finished = world:has(cts.Finished, cts.Finished)
 			for _, entity in conflictList do
 				local target = world:get(entity, cts.Target) :: Instance

@@ -1,6 +1,6 @@
 --[[
 	Decision transport: the canonical CLI, host-side. Complete batches every
-	staged decision through `rbx-diff resolve` and finalizes; the disk file is
+	staged decision through `git rbx resolve` and finalizes; the disk file is
 	only ever written here. Progress/outcome land in the world as the
 	Completing/Finished tags and the CompleteError singleton.
 ]]
@@ -35,7 +35,7 @@ function transport.complete()
 				-- in-Studio edit is the resolution
 				local encoded = format.encodeValue(conflicts.liveValue(entity))
 				args = {
-					config.rbxDiffBin,
+					config.gitRbxBin,
 					"resolve",
 					config.mergedFile,
 					"--take",
@@ -47,7 +47,7 @@ function transport.complete()
 				}
 			else
 				args = {
-					config.rbxDiffBin,
+					config.gitRbxBin,
 					"resolve",
 					config.mergedFile,
 					"--take",
@@ -65,7 +65,7 @@ function transport.complete()
 				return
 			end
 		end
-		local ok, result = pcall(process.run, { config.rbxDiffBin, "resolve", config.mergedFile, "--finalize" })
+		local ok, result = pcall(process.run, { config.gitRbxBin, "resolve", config.mergedFile, "--finalize" })
 		if ok and result.ok then
 			world:add(cts.Finished, cts.Finished)
 		else

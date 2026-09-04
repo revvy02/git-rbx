@@ -5,7 +5,7 @@
 	single-file bundling — resolve natively from there. Only string requires
 	go through the bundler; require(<ModuleScript>) happens at runtime.
 
-	The resolver checkout root comes from --resolver-root (the rbx-diff
+	The resolver checkout root comes from --resolver-root (the git-rbx
 	launcher passes it); running by hand from studio-resolver, cwd is already
 	the root.
 ]]

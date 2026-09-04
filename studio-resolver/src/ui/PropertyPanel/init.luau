@@ -222,7 +222,7 @@ local function PropertyPanel()
 			return
 		end
 
-		debug.profilebegin("rbxdiff_props_items")
+		debug.profilebegin("gitrbx_props_items")
 		local items = buildItems(inst)
 		debug.profileend()
 

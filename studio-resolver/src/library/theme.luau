@@ -1,5 +1,5 @@
 --[[
-	VS Code-dark theme, lifted from the old rbx-diff-viewer frontend
+	VS Code-dark theme, lifted from the old web diff-viewer frontend
 	(frontend/src/styles/index.css): #1e1e1e/#252526 surfaces, 1px #404040
 	borders, monospace throughout, small radii, #094771 selection, #0e639c
 	action blue, and the VS Code semantic palette for diff states.
@@ -72,7 +72,7 @@ theme.headerSize = 12
 -- (flex-*, gap-*, p-*, corner-*, auto-size-*, bg-none, ...) plus the
 -- resolver's VS Code-dark classes below.
 function theme.link()
-	debug.profilebegin("rbxdiff_sheet")
+	debug.profilebegin("gitrbx_sheet")
 	wind.StyleLink(wind.StyleSheet(function()
 		wind.WindRules()
 		theme.rules()

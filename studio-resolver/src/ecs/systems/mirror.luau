@@ -151,7 +151,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 		name = "mirror",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_mirror")
+			debug.profilebegin("gitrbx_mirror")
 			syncTree(treeRoots())
 			parentConflicts()
 			if dirty then

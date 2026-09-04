@@ -15,7 +15,7 @@ local widgets = require("./library/widgets")
 local Panel = require("../../ui/Panel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("GitRbxMergeConflicts", "rbx-diff — conflicts", Enum.InitialDockState.Right, {
+	local widget = widgets.create("GitRbxMergeConflicts", "git-rbx — conflicts", Enum.InitialDockState.Right, {
 		width = 460,
 		height = 600,
 		minWidth = 320,
@@ -26,9 +26,9 @@ return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler
 		name = "ui_conflicts",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_ui_conflicts")
-			Portal(widget, "rbx-diff-conflicts", function()
-				debug.profilebegin("rbxdiff_conflicts_body")
+			debug.profilebegin("gitrbx_ui_conflicts")
+			Portal(widget, "git-rbx-conflicts", function()
+				debug.profilebegin("gitrbx_conflicts_body")
 				theme.link()
 				Element("Frame", {
 					id = "conflicts",

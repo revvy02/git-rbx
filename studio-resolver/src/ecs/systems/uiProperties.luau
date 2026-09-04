@@ -12,7 +12,7 @@ local widgets = require("./library/widgets")
 local PropertyPanel = require("../../ui/PropertyPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("GitRbxMergeProperties", "rbx-diff — properties", Enum.InitialDockState.Left, {
+	local widget = widgets.create("GitRbxMergeProperties", "git-rbx — properties", Enum.InitialDockState.Left, {
 		width = 340,
 		height = 500,
 		minWidth = 240,
@@ -23,8 +23,8 @@ return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler
 		name = "ui_properties",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_ui_properties")
-			Portal(widget, "rbx-diff-properties", function()
+			debug.profilebegin("gitrbx_ui_properties")
+			Portal(widget, "git-rbx-properties", function()
 				theme.link()
 				Element("Frame", {
 					id = "properties-widget",

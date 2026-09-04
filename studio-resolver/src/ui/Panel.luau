@@ -23,7 +23,7 @@ local FOOTER_HEIGHT = 36
 -- after the last card.
 local function Panel()
 	local cards = conflicts.cards()
-	debug.profilebegin("rbxdiff_panel_count")
+	debug.profilebegin("gitrbx_panel_count")
 	local unresolved = 0
 	for _, entity in cards do
 		local members = world:get(entity, cts.Members) :: { any }?
@@ -57,7 +57,7 @@ local function Panel()
 			return
 		end
 
-		debug.profilebegin("rbxdiff_panel_cards")
+		debug.profilebegin("gitrbx_panel_cards")
 		VirtualList({
 			id = "cards",
 			data = cards,

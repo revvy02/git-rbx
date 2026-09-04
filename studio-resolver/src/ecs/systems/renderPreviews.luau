@@ -355,7 +355,7 @@ return function(world: types.World, cts: types.Cts, scheduler: types.Scheduler)
 			if world:has(cts.Finished, cts.Finished) then
 				return
 			end
-			debug.profilebegin("rbxdiff_previews")
+			debug.profilebegin("gitrbx_previews")
 			local changed = false
 			for _, entity in conflictList do
 				local staged = (world:get(entity, cts.Resolution) :: string?) or "unresolved"

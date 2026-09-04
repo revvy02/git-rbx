@@ -458,7 +458,7 @@ local function ExplorerPanel()
 		local key = `{viewTab}:{expansionGen}:{explorerGen}:{searchGen}`
 		if key ~= rowsCacheKey then
 			rowsCacheKey = key
-			debug.profilebegin("rbxdiff_explorer_rows")
+			debug.profilebegin("gitrbx_explorer_rows")
 			local rows = projectionRows(projection, searching)
 			rowsCache = filterRows(rows, query)
 			debug.profileend()

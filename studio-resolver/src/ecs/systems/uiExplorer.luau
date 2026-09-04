@@ -12,7 +12,7 @@ local widgets = require("./library/widgets")
 local ExplorerPanel = require("../../ui/ExplorerPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("GitRbxMergeExplorer", "rbx-diff — explorer", Enum.InitialDockState.Left, {
+	local widget = widgets.create("GitRbxMergeExplorer", "git-rbx — explorer", Enum.InitialDockState.Left, {
 		width = 360,
 		height = 600,
 		minWidth = 260,
@@ -23,8 +23,8 @@ return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler
 		name = "ui_explorer",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_ui_explorer")
-			Portal(widget, "rbx-diff-explorer", function()
+			debug.profilebegin("gitrbx_ui_explorer")
+			Portal(widget, "git-rbx-explorer", function()
 				theme.link()
 				Element("Frame", {
 					id = "explorer-widget",

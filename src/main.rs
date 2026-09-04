@@ -1032,7 +1032,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         .arg(RESOLVER_ENTRY)
         .arg("--")
         .arg(&abs_file)
-        .arg("--rbx-diff")
+        .arg("--git-rbx")
         .arg(std::env::current_exe()?)
         .arg("--resolver-root")
         .arg(RESOLVER_ROOT);

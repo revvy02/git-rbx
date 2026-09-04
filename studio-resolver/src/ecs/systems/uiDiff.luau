@@ -12,7 +12,7 @@ local widgets = require("./library/widgets")
 local ImpactPanel = require("../../ui/ImpactPanel")
 
 return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler)
-	local widget = widgets.create("GitRbxMergeDirectDiff", "rbx-diff — direct diff", Enum.InitialDockState.Right, {
+	local widget = widgets.create("GitRbxMergeDirectDiff", "git-rbx — direct diff", Enum.InitialDockState.Right, {
 		width = 500,
 		height = 360,
 		minWidth = 320,
@@ -23,8 +23,8 @@ return function(_world: types.World, _cts: types.Cts, scheduler: types.Scheduler
 		name = "ui_diff",
 		phase = packages.planckRunService.Phases.Heartbeat,
 		system = function()
-			debug.profilebegin("rbxdiff_ui_diff")
-			Portal(widget, "rbx-diff-direct-diff", function()
+			debug.profilebegin("gitrbx_ui_diff")
+			Portal(widget, "git-rbx-direct-diff", function()
 				theme.link()
 				Element("Frame", {
 					id = "diff-widget",

@@ -6,7 +6,7 @@
 
 local config = {
 	mergedFile = "",
-	rbxDiffBin = "rbx-diff",
+	gitRbxBin = "git-rbx",
 }
 
 return config
