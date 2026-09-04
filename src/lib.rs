@@ -3,6 +3,7 @@
 mod compact_diff;
 mod conflict_file;
 mod diff;
+mod diff_container;
 mod diff_document;
 mod diff_dom;
 mod dom_utils;
@@ -31,6 +32,7 @@ pub use conflict_file::{
 pub use diff::{compute_diff, CFrameValue, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use diff_dom::DiffDom;
+pub use diff_container::{stamp_diff, DIFF_CONTAINER_NAME, DIFF_SCHEMA_VERSION};
 pub use diff_document::{
     AddedInstance, DiffDocument, DocumentCounts, DocumentOp, DocumentPivot, ManifestNode,
     DOCUMENT_SCHEMA,

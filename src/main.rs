@@ -14,7 +14,7 @@ use git_rbx::output::{print_diff, render_markdown, OutputFormat, DEFAULT_MARKDOW
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use git_rbx::{
     apply_pivot_ops, apply_pivot_ops_to_compact_branch, conflict_report, detect_rigid_groups,
-    diff_model_compact_doms_document, diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
+    diff_model_compact_doms_document, diff_model_compact_doms_with_config, finalize, stamp_diff, find_container, list_entries, mark_entry,
     mark_entry_custom, merge_compact_doms, merge_compact_doms_with_matches_and_pivots,
     normalize_model_merge_compact_pivots, stamp_compact_conflicts, stamp_pivot_plan,
     stamp_rigid_groups, ConflictKind, ConflictReport, DiffConfig, DiffDom, MergeStats,
@@ -60,6 +60,12 @@ enum Command {
         /// Show timing information
         #[arg(long, short = 't')]
         timing: bool,
+
+        /// Open the diff in Roblox Studio: the new file with every change
+        /// highlighted, removed content as ghosts, and a change list (needs
+        /// `rodeo` on PATH). Neither input is modified
+        #[arg(long, conflicts_with_all = ["json", "summary_only", "format"])]
+        studio: bool,
     },
     /// Semantic diff of every Roblox file changed between two revisions —
     /// what `git diff --stat` cannot say about binaries. Rename-aware and
@@ -238,7 +244,11 @@ fn main() -> Result<()> {
             format,
             max_rows,
             timing,
+            studio,
         } => {
+            if studio {
+                return cmd_diff_studio(&old_file, &new_file);
+            }
             let format = format.unwrap_or(if json {
                 Format::Json
             } else if summary_only {
@@ -1005,51 +1015,13 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         .filter(|e| e.resolved.is_none())
         .count();
 
-    // Places open in Studio directly; models run in an empty place and the
-    // resolver imports them into a preview folder.
     let abs_file = std::fs::canonicalize(file)?;
-    let is_place = matches!(extension(file).as_str(), "rbxl" | "rbxlx");
-
-    if !Path::new(RESOLVER_ENTRY).exists() {
-        bail!(
-            "resolver source not found at {RESOLVER_ENTRY} — `resolve --studio` \
-             currently runs from the git-rbx checkout it was built in; rebuild \
-             on this machine or resolve from the CLI (git rbx resolve {file} --list)"
-        );
-    }
-
-    // `--place` always: with a path rodeo opens that place; with no value it
-    // launches an empty one. Omitting it entirely would route the script
-    // into whatever Studio session happens to be running.
-    let mut cmd = std::process::Command::new("rodeo");
-    cmd.arg("run");
-    if is_place {
-        cmd.arg("--place").arg(&abs_file);
-    } else {
-        cmd.arg("--place");
-    }
-    cmd.arg("--focus")
-        .args(["--show-widgets", "none"])
-        .arg(RESOLVER_ENTRY)
-        .arg("--")
-        .arg(&abs_file)
-        .arg("--git-rbx")
-        .arg(std::env::current_exe()?)
-        .arg("--resolver-root")
-        .arg(RESOLVER_ROOT);
+    let mut script_args: Vec<&str> = Vec::new();
     if let Some(side) = auto {
-        cmd.args(["--auto", side]);
+        script_args.extend(["--auto", side]);
     }
-
     eprintln!("Opening the Studio resolver for {file} ({unresolved} unresolved conflict(s))...");
-    let status = cmd.status().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => anyhow::anyhow!(
-            "`rodeo` not found on PATH — the Studio resolver runs through it \
-             (https://github.com/revvy02/rodeo). Resolve from the CLI instead: \
-             git rbx resolve {file} --list"
-        ),
-        _ => anyhow::Error::from(e).context("launching rodeo"),
-    })?;
+    let status = launch_studio(&abs_file, &script_args)?;
 
     // rodeo's exit code only says how the SESSION ended (completed, killed,
     // Studio closed mid-way); what the merge is at now is in the file.
@@ -1063,6 +1035,91 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         eprintln!("{file}: still contains conflict state");
         std::process::exit(1);
     }
+}
+
+
+/// Run the Studio front end (studio-resolver/src/init.luau) through rodeo
+/// on `file`. Places open directly; models run in an empty place and the
+/// script imports them. `script_args` follow the file on the script's argv.
+fn launch_studio(file: &Path, script_args: &[&str]) -> Result<std::process::ExitStatus> {
+    let is_place = matches!(
+        file.extension().and_then(|e| e.to_str()).unwrap_or(""),
+        "rbxl" | "rbxlx"
+    );
+    if !Path::new(RESOLVER_ENTRY).exists() {
+        bail!(
+            "Studio front end not found at {RESOLVER_ENTRY} — `--studio` currently \
+             runs from the git-rbx checkout it was built in; rebuild on this machine"
+        );
+    }
+    // `--place` always: with a path rodeo opens that place; with no value it
+    // launches an empty one. Omitting it entirely would route the script
+    // into whatever Studio session happens to be running.
+    let mut cmd = std::process::Command::new("rodeo");
+    cmd.arg("run");
+    if is_place {
+        cmd.arg("--place").arg(file);
+    } else {
+        cmd.arg("--place");
+    }
+    cmd.arg("--focus")
+        .args(["--show-widgets", "none"])
+        .arg(RESOLVER_ENTRY)
+        .arg("--")
+        .arg(file)
+        .arg("--git-rbx")
+        .arg(std::env::current_exe()?)
+        .arg("--resolver-root")
+        .arg(RESOLVER_ROOT)
+        .args(script_args);
+    cmd.status().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => anyhow::anyhow!(
+            "`rodeo` not found on PATH — the Studio front end runs through it \
+             (https://github.com/revvy02/rodeo)"
+        ),
+        _ => anyhow::Error::from(e).context("launching rodeo"),
+    })
+}
+
+/// Open a two-file diff in Studio. The document is stamped into a temporary
+/// copy of the new file (neither input is touched); the copy is deleted when
+/// the session ends.
+fn cmd_diff_studio(old_file: &str, new_file: &str) -> Result<()> {
+    let (old_compact, _) = load_diff_file(old_file, None)?;
+    let (mut new_compact, _) = load_diff_file(new_file, None)?;
+    let document =
+        diff_model_compact_doms_document(&old_compact, &mut new_compact, &DiffConfig::default());
+    drop(new_compact);
+    drop(old_compact);
+
+    let (old_dom, _) = load_file(old_file, None)?;
+    let (mut new_dom, mut source) = load_file(new_file, None)?;
+    stamp_diff(&mut new_dom, &old_dom, &document, old_file, new_file)?;
+    drop(old_dom);
+
+    let dir = std::env::temp_dir().join(format!("git-rbx-diff-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let file_name = Path::new(new_file)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("diff.rbxl");
+    let temp = dir.join(file_name);
+    source.lfs_pointer = false;
+    save_file(temp.to_str().unwrap(), &new_dom, source)?;
+    drop(new_dom);
+
+    let counts = &document.counts;
+    eprintln!(
+        "Opening the Studio diff viewer: {} added, {} removed, {} modified, {} reparented, {} pivoted...",
+        counts.added, counts.removed, counts.modified, counts.reparented, counts.pivoted
+    );
+    let status = launch_studio(&temp, &["--diff"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let status = status?;
+    if !status.success() {
+        eprintln!("(diff viewer session ended)");
+    }
+    Ok(())
 }
 
 fn cmd_check(file: &str, json: bool) -> Result<()> {

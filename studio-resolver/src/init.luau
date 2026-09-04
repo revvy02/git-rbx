@@ -59,6 +59,7 @@ parser:argument("file", "Conflicted merged file written by `git rbx merge`")
 parser:option("--git-rbx", "Path to the git-rbx binary"):target("gitRbxBin"):default("git-rbx")
 parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
 parser:option("--resolver-root", "Resolver checkout dir (read by packages.luau)"):target("resolverRoot"):default(".")
+parser:flag("--diff", "Diff viewer mode: the file carries a __GitRbxDiff container (git rbx diff --studio)")
 
 local args = parser:parse(process.args)
 local mergedFile = args.file
@@ -68,7 +69,8 @@ local mergedFile = args.file
 -- from here on the world is the source of truth for merge + session state.
 -- ============================================================================
 
-local container = game:FindFirstChild(CONTAINER_NAME, true)
+local wantedContainer = if args.diff then "__GitRbxDiff" else CONTAINER_NAME
+local container = game:FindFirstChild(wantedContainer, true)
 
 -- Model files can't be opened as a place: import the conflicted rbxm into a
 -- preview folder in Workspace instead. The disk file stays authoritative
@@ -85,7 +87,11 @@ if not container and mergedFile:match("%.rbxmx?$") then
 		root.Parent = previewFolder
 	end
 	previewFolder.Parent = workspace
-	container = game:FindFirstChild(CONTAINER_NAME, true)
+	container = game:FindFirstChild(wantedContainer, true)
+end
+
+if args.diff then
+	return require("@self/diff")(args)
 end
 
 if not container then
