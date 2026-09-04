@@ -94,28 +94,6 @@ entry plus one Modified entry, never a blended record.
 | **Reparented** | The same instance has a different parent (`old_path` → `path`). |
 | **Pivoted** | A Model and its world-space descendants were transformed together as a rigid body. |
 
-**Property granularity.** Container properties are diffed per key rather
-than as one blob: an attribute change is reported as `Attributes.<key>` and
-a tag as `Tags.<tag>`, so two branches editing different attributes of the
-same instance compose instead of conflicting. Reference-valued properties
-(`PrimaryPart`, `ObjectValue.Value`, adornee-style refs) are compared by the
-*logical target* — a ref that points at the same instance in both versions
-is unchanged even though the underlying referent ids differ between files.
-
-**Pivoted, in detail.** Dragging a Model in Studio rewrites the `CFrame` of
-every descendant part. A naïve diff reports thousands of modified CFrames
-and cannot tell that from thousands of independent edits. git-rbx factors
-hierarchical rigid transforms out first: if a Model's descendants all moved
-by the same transform, that is one `Pivoted` entry carrying the delta
-(`Δ` position and axis-angle rotation), and only the *residual* edits —
-parts that moved differently from their model — appear as Modified. Nested
-pivots are reported relative to the nearest pivoted ancestor (`order` /
-`parent_order` in the JSON) so a moved building with a moved door inside
-reads as two small deltas, not one large and one enormous one. Pivots are
-also first-class merge operations: two branches pivoting different models
-compose, and two branches pivoting the same model differently is a
-[Pivot conflict](#conflict-types).
-
 ## Conflict types
 
 A three-way merge computes two change sets against the common ancestor and
