@@ -56,7 +56,15 @@ git diff                              # worktree vs index, semantic for Roblox f
 git show --ext-diff HEAD              # git log/show need --ext-diff for external drivers
 git rbx changes main..feature         # every Roblox file changed between two revisions
 git rbx diff old.rbxl new.rbxl        # any two files, no git required
+git rbx diff old.rbxl new.rbxl --studio   # the same diff in Roblox Studio, in 3D
+git difftool -t rbx main..feature     # ditto for every changed file in a range
 ```
+
+**In Studio.** `--studio` on `diff` or `changes` opens the new version with
+every changed instance highlighted by kind, removed content restored as
+translucent ghosts where it used to be, and a *changes* panel listing the
+diff as a tree. Double click a row to select and frame the instance.
+Neither input file is modified.
 
 **Merge.** Nothing to do — `git merge`, `git rebase`, and `git cherry-pick`
 call the driver. Non-overlapping edits compose; identical edits on both sides
@@ -75,7 +83,8 @@ git add map.rbxl && git commit
 ```
 
 `git mergetool` also works: `install` registers git-rbx as a mergetool that
-opens the Studio resolver. `git rbx check <file>` exits nonzero while a
+opens the Studio resolver, and as a difftool that opens the Studio diff
+viewer. `git rbx check <file>` exits nonzero while a
 file still carries conflict state, which is what the optional pre-commit
 hook enforces.
 
@@ -126,8 +135,8 @@ conflict at all (set semantics).
 ## Commands
 
 ```
-git rbx diff <old> <new> [--format pretty|summary|json|markdown] [--max-rows N] [-t]
-git rbx changes <base> <head> [--format markdown|json|pretty|summary] [--max-rows N]
+git rbx diff <old> <new> [--format pretty|summary|json|markdown] [--max-rows N] [-t] [--studio]
+git rbx changes <base> <head> [--format markdown|json|pretty|summary] [--max-rows N] [--studio]
 git rbx merge <base> <ours> <theirs> [--output FILE] [--path REAL_PATH] [--json]
 git rbx resolve <file> --list [--json]
 git rbx resolve <file> --take ours|theirs (--entry NAME | --path BASE_PATH | --all)

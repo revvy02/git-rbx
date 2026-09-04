@@ -29,6 +29,10 @@ fn install_writes_driver_config_and_managed_attributes_idempotently() {
         repo.git(&["config", "--local", "--get", "mergetool.rbx.cmd"]),
         format!("{BIN} resolve \"$MERGED\" --studio")
     );
+    assert_eq!(
+        repo.git(&["config", "--local", "--get", "difftool.rbx.cmd"]),
+        format!("{BIN} diff \"$LOCAL\" \"$REMOTE\" --studio")
+    );
     let attributes = repo.attributes();
     assert!(attributes.starts_with("*.png binary\n"), "{attributes}");
     for glob in ["*.rbxl", "*.rbxlx", "*.rbxm", "*.rbxmx"] {

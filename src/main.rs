@@ -85,6 +85,11 @@ enum Command {
         /// Markdown: rows per table before "… and N more"
         #[arg(long, default_value_t = DEFAULT_MARKDOWN_ROWS)]
         max_rows: usize,
+
+        /// Open each changed file in the Studio diff viewer, one after the
+        /// other (needs `rodeo` on PATH)
+        #[arg(long)]
+        studio: bool,
     },
     /// Three-way merge (git merge driver: git-rbx merge %O %A %B --path %P).
     /// Writes the merged result to OURS (or --output) and exits nonzero
@@ -263,6 +268,7 @@ fn main() -> Result<()> {
             head,
             format,
             max_rows,
+            studio,
         } => {
             let (base, head) = match (head, base.split_once("..")) {
                 (Some(head), _) => (base.clone(), head),
@@ -271,7 +277,7 @@ fn main() -> Result<()> {
                 }
                 (None, _) => bail!("changes needs <base> <head> or <base>..<head>"),
             };
-            cmd_changes(&base, &head, format, max_rows)
+            cmd_changes(&base, &head, format, max_rows, studio)
         }
         Command::Merge {
             base,
@@ -577,9 +583,33 @@ fn load_revision_side(rev: &str, path: Option<&str>) -> Result<DiffDom> {
     diff_dom_from_bytes(&bytes, source.format)
 }
 
-fn cmd_changes(base: &str, head: &str, format: Format, max_rows: usize) -> Result<()> {
+fn cmd_changes(base: &str, head: &str, format: Format, max_rows: usize, studio: bool) -> Result<()> {
     let files = changed_roblox_files(base, head)?;
     let config = DiffConfig::default();
+
+    if studio {
+        if files.is_empty() {
+            eprintln!("No Roblox files changed between {base} and {head}.");
+            return Ok(());
+        }
+        for file in &files {
+            let old = revision_bytes(base, file.old_path.as_deref())?;
+            let new = revision_bytes(head, file.new_path.as_deref())?;
+            let Some((new_bytes, source)) = new else {
+                eprintln!("{}: deleted; nothing to open", file.display_path());
+                continue;
+            };
+            let old_pair = match old {
+                Some((bytes, source)) => dom_pair_from_bytes(&bytes, source.format)?,
+                None => empty_dom_pair(),
+            };
+            let new_pair = dom_pair_from_bytes(&new_bytes, source.format)?;
+            let old_label = format!("{base}:{}", file.old_path.as_deref().unwrap_or("(absent)"));
+            let new_label = format!("{head}:{}", file.display_path());
+            open_diff_in_studio(old_pair, new_pair, source, &old_label, &new_label, &file.display_path())?;
+        }
+        return Ok(());
+    }
 
     if files.is_empty() {
         match format {
@@ -1081,25 +1111,65 @@ fn launch_studio(file: &Path, script_args: &[&str]) -> Result<std::process::Exit
     })
 }
 
-/// Open a two-file diff in Studio. The document is stamped into a temporary
-/// copy of the new file (neither input is touched); the copy is deleted when
-/// the session ends.
-fn cmd_diff_studio(old_file: &str, new_file: &str) -> Result<()> {
-    let (old_compact, _) = load_diff_file(old_file, None)?;
-    let (mut new_compact, _) = load_diff_file(new_file, None)?;
+/// A file's content as both DOM flavors: the compact one the diff engine
+/// reads and the editable one the container is stamped into.
+fn dom_pair_from_bytes(bytes: &[u8], format: FileFormat) -> Result<(DiffDom, WeakDom)> {
+    let compact = diff_dom_from_bytes(bytes, format)?;
+    let weak = match format {
+        FileFormat::Binary => rbx_binary::from_reader(bytes)?,
+        FileFormat::Xml => rbx_xml::from_reader_default(bytes)?,
+    };
+    Ok((compact, weak))
+}
+
+fn empty_dom_pair() -> (DiffDom, WeakDom) {
+    let weak = WeakDom::new(InstanceBuilder::new("DataModel"));
+    (DiffDom::from_weak_dom(&weak), weak)
+}
+
+/// Bytes of `path` at `rev` through `git cat-file`, LFS-resolved; `None`
+/// when the side does not exist (added or deleted file).
+fn revision_bytes(rev: &str, path: Option<&str>) -> Result<Option<(Vec<u8>, Source)>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let spec = format!("{rev}:{path}");
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "blob", &spec])
+        .output()
+        .context("running git cat-file")?;
+    if !output.status.success() {
+        bail!(
+            "git cat-file {spec} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(Some(source_from_bytes(&spec, output.stdout, Some(path))?))
+}
+
+/// Compute the diff document, stamp it into the new DOM, write that as a
+/// temporary file named like the real one, and run the viewer on it. The
+/// temporary directory is removed when the session ends.
+fn open_diff_in_studio(
+    old: (DiffDom, WeakDom),
+    new: (DiffDom, WeakDom),
+    mut source: Source,
+    old_label: &str,
+    new_label: &str,
+    file_name: &str,
+) -> Result<()> {
+    let (old_compact, old_dom) = old;
+    let (mut new_compact, mut new_dom) = new;
     let document =
         diff_model_compact_doms_document(&old_compact, &mut new_compact, &DiffConfig::default());
     drop(new_compact);
     drop(old_compact);
-
-    let (old_dom, _) = load_file(old_file, None)?;
-    let (mut new_dom, mut source) = load_file(new_file, None)?;
-    stamp_diff(&mut new_dom, &old_dom, &document, old_file, new_file)?;
+    stamp_diff(&mut new_dom, &old_dom, &document, old_label, new_label)?;
     drop(old_dom);
 
     let dir = std::env::temp_dir().join(format!("git-rbx-diff-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let file_name = Path::new(new_file)
+    let file_name = Path::new(file_name)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("diff.rbxl");
@@ -1110,16 +1180,24 @@ fn cmd_diff_studio(old_file: &str, new_file: &str) -> Result<()> {
 
     let counts = &document.counts;
     eprintln!(
-        "Opening the Studio diff viewer: {} added, {} removed, {} modified, {} reparented, {} pivoted...",
+        "Opening the Studio diff viewer for {new_label}: {} added, {} removed, {} modified, {} reparented, {} pivoted...",
         counts.added, counts.removed, counts.modified, counts.reparented, counts.pivoted
     );
     let status = launch_studio(&temp, &["--diff"]);
     let _ = std::fs::remove_dir_all(&dir);
-    let status = status?;
-    if !status.success() {
+    if !status?.success() {
         eprintln!("(diff viewer session ended)");
     }
     Ok(())
+}
+
+/// `diff old new --studio`: neither input is modified.
+fn cmd_diff_studio(old_file: &str, new_file: &str) -> Result<()> {
+    let (old_bytes, old_source) = read_source(old_file, None)?;
+    let (new_bytes, new_source) = read_source(new_file, None)?;
+    let old = dom_pair_from_bytes(&old_bytes, old_source.format)?;
+    let new = dom_pair_from_bytes(&new_bytes, new_source.format)?;
+    open_diff_in_studio(old, new, new_source, old_file, new_file, new_file)
 }
 
 fn cmd_check(file: &str, json: bool) -> Result<()> {
@@ -1231,6 +1309,10 @@ fn config_entries(exe: &str) -> Vec<(&'static str, String)> {
             format!("{exe} resolve \"$MERGED\" --studio"),
         ),
         ("mergetool.rbx.trustExitCode", "true".to_string()),
+        (
+            "difftool.rbx.cmd",
+            format!("{exe} diff \"$LOCAL\" \"$REMOTE\" --studio"),
+        ),
     ]
 }
 
