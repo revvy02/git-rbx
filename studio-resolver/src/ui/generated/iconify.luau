@@ -11,6 +11,7 @@ local INDEX = {
 			["lucide:move-right"] = { 1, 4 },
 			["lucide:pencil"] = { 1, 5 },
 			["lucide:plus"] = { 1, 6 },
+			["lucide:rotate-3d"] = { 1, 7 },
 		},
 	},
 }
