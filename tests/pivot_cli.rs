@@ -362,17 +362,18 @@ fn two_way_diff_cli_json_reports_pivots_instead_of_descendant_cframes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let changes = json["changes"].as_array().unwrap();
-    assert_eq!(changes.len(), 2, "{json:#}");
-    assert!(changes.iter().all(|change| change["type"] == "pivoted"));
-    assert!(changes.iter().all(|change| change["delta"]
+    assert_eq!(json["schema"], 1, "{json:#}");
+    let pivots = json["pivots"].as_array().unwrap();
+    assert_eq!(pivots.len(), 2, "{json:#}");
+    assert!(pivots.iter().all(|pivot| pivot["delta"]
         .as_array()
         .is_some_and(|delta| delta.len() == 12)));
-    assert!(changes
-        .iter()
-        .all(|change| change.get("path_segments").is_none()));
-    assert_eq!(json["summary"]["pivoted"], 2);
-    assert_eq!(json["summary"]["modified"], 0);
+    assert!(
+        json["ops"].as_array().unwrap().is_empty(),
+        "descendant CFrames must be absorbed by the pivots: {json:#}"
+    );
+    assert_eq!(json["counts"]["pivoted"], 2);
+    assert_eq!(json["counts"]["modified"], 0);
 
     std::fs::remove_dir_all(scratch).unwrap();
 }
@@ -621,11 +622,15 @@ fn reparent_with_edit_renders_and_serializes_as_two_primitive_operations() {
         String::from_utf8_lossy(&json.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    let changes = json["changes"].as_array().unwrap();
-    assert_eq!(changes.len(), 2, "{json:#}");
-    assert_eq!(changes[0]["type"], "reparented");
-    assert!(changes[0].get("property_changes").is_none(), "{json:#}");
-    assert_eq!(changes[1]["type"], "modified");
+    let ops = json["ops"].as_array().unwrap();
+    assert_eq!(ops.len(), 2, "{json:#}");
+    assert_eq!(ops[0]["op"], "reparent");
+    assert!(ops[0]["from"].is_number() && ops[0]["to"].is_number(), "{json:#}");
+    assert_eq!(ops[1]["op"], "setProperty");
+    assert_eq!(ops[1]["property"], "Transparency");
+    assert_eq!(ops[0]["id"], ops[1]["id"], "both ops address the same instance");
+    assert_eq!(json["counts"]["reparented"], 1);
+    assert_eq!(json["counts"]["modified"], 1);
 
     std::fs::remove_dir_all(scratch).unwrap();
 }

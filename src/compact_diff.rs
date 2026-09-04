@@ -369,6 +369,19 @@ pub(crate) fn compute_compact_diff_with_identity(
     pivots: &[PivotOp],
     config: &DiffConfig,
 ) -> Vec<DiffEntry> {
+    let changes = compute_compact_changes_with_identity(old_dom, new_dom, identity, pivots, config);
+    semantic_changes_to_diff(old_dom, new_dom, &changes)
+}
+
+/// The compact planner's change set itself, for consumers that serialize
+/// or replay it rather than project it to display entries.
+pub(crate) fn compute_compact_changes_with_identity(
+    old_dom: &DiffDom,
+    new_dom: &DiffDom,
+    identity: &InstanceIdentity,
+    pivots: &[PivotOp],
+    config: &DiffConfig,
+) -> SemanticChangeSet {
     let dense = DenseIdentity::from_complete(old_dom, new_dom, identity);
     let changed = compact_changed_subtrees(old_dom, new_dom, identity, &dense, config);
     let context = CompactDiffContext {
@@ -407,10 +420,9 @@ pub(crate) fn compute_compact_diff_with_identity(
             compact_change_pass(&context, old_id, new_id, &mut ops);
         }
     }
-    let changes = SemanticChangeSet {
+    SemanticChangeSet {
         ops,
         pivots: pivots.to_vec(),
         identity: identity.clone(),
-    };
-    semantic_changes_to_diff(old_dom, new_dom, &changes)
+    }
 }

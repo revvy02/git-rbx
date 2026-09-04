@@ -152,6 +152,9 @@ pub enum PropertyValue {
     },
     Ref {
         value: String,
+        /// Manifest id of the target when the value is part of a diff document.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<u32>,
     },
     Vector2 {
         x: f32,
@@ -747,7 +750,7 @@ pub(crate) fn semantic_changes_to_diff(
 
 /// Check if a property should be compared (is meaningful for diffing).
 /// Uses the shared authored-property policy from property_semantics.rs.
-fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
+pub(crate) fn should_compare_property(class_name: &str, prop_name: &str) -> bool {
     get_authored_properties(class_name).contains(prop_name)
 }
 
@@ -882,6 +885,7 @@ pub(crate) fn variant_to_property_value(v: &Variant) -> PropertyValue {
             ContentType::Object(target) if target.is_none() => PropertyValue::Nil,
             ContentType::Object(target) => PropertyValue::Ref {
                 value: format!("{}", target),
+                id: None,
             },
             _ => PropertyValue::Other {
                 type_name: "Content".to_string(),
@@ -905,6 +909,7 @@ pub(crate) fn variant_to_property_value(v: &Variant) -> PropertyValue {
             } else {
                 PropertyValue::Ref {
                     value: format!("{}", r),
+                    id: None,
                 }
             }
         }

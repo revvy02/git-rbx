@@ -656,6 +656,7 @@ fn patch_value(dom: &dyn DomView, property: &str, value: Option<&Variant>) -> Pr
                 .get_by_ref(*r)
                 .map(|_| get_instance_path(dom, *r))
                 .unwrap_or_else(|| format!("{r}")),
+            id: None,
         },
         Some(value) if property.starts_with("Attributes.") => {
             attribute_variant_to_property_value(value)

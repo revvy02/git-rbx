@@ -10,11 +10,11 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 mod git_lfs;
 
-use git_rbx::output::{print_diff, render_markdown, DiffCounts, OutputFormat, DEFAULT_MARKDOWN_ROWS};
+use git_rbx::output::{print_diff, render_markdown, OutputFormat, DEFAULT_MARKDOWN_ROWS};
 use rbx_dom_weak::{InstanceBuilder, WeakDom};
 use git_rbx::{
     apply_pivot_ops, apply_pivot_ops_to_compact_branch, conflict_report, detect_rigid_groups,
-    diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
+    diff_model_compact_doms_document, diff_model_compact_doms_with_config, finalize, find_container, list_entries, mark_entry,
     mark_entry_custom, merge_compact_doms, merge_compact_doms_with_matches_and_pivots,
     normalize_model_merge_compact_pivots, stamp_compact_conflicts, stamp_pivot_plan,
     stamp_rigid_groups, ConflictKind, ConflictReport, DiffConfig, DiffDom, MergeStats,
@@ -381,6 +381,11 @@ fn cmd_diff(
             diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &DiffConfig::default());
         print!("{}", render_markdown(&diffs, max_rows));
         pivots.as_ref().map(|p| (p.pivots.len(), p.detected))
+    } else if format == Format::Json {
+        let document =
+            diff_model_compact_doms_document(&old_dom, &mut new_dom, &DiffConfig::default());
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        Some((document.pivots.len(), 0))
     } else {
         diff_and_print(&old_dom, &mut new_dom, format.into())
     };
@@ -579,6 +584,17 @@ fn cmd_changes(base: &str, head: &str, format: Format, max_rows: usize) -> Resul
     for file in &files {
         let old_dom = load_revision_side(base, file.old_path.as_deref())?;
         let mut new_dom = load_revision_side(head, file.new_path.as_deref())?;
+        if format == Format::Json {
+            let document = diff_model_compact_doms_document(&old_dom, &mut new_dom, &config);
+            json_files.push(serde_json::json!({
+                "path": file.display_path(),
+                "status": file.status.to_string(),
+                "oldPath": file.old_path,
+                "counts": document.counts,
+                "diff": document,
+            }));
+            continue;
+        }
         let (diffs, _) = diff_model_compact_doms_with_config(&old_dom, &mut new_dom, &config);
         let status_note = match file.status {
             'A' => " (added)".to_string(),
@@ -592,22 +608,7 @@ fn cmd_changes(base: &str, head: &str, format: Format, max_rows: usize) -> Resul
                 println!("### `{}`{status_note}\n", file.display_path());
                 print!("{}", render_markdown(&diffs, max_rows));
             }
-            Format::Json => {
-                let counts = DiffCounts::of(&diffs);
-                json_files.push(serde_json::json!({
-                    "path": file.display_path(),
-                    "status": file.status.to_string(),
-                    "oldPath": file.old_path,
-                    "counts": {
-                        "added": counts.added,
-                        "removed": counts.removed,
-                        "modified": counts.modified,
-                        "reparented": counts.reparented,
-                        "pivoted": counts.pivoted,
-                    },
-                    "diffs": diffs,
-                }));
-            }
+            Format::Json => unreachable!("handled above"),
             Format::Pretty | Format::Summary => {
                 println!("== {}{} ==", file.display_path(), status_note);
                 print_diff(&diffs, format.into());

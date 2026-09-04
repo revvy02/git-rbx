@@ -343,7 +343,7 @@ fn format_property_value(v: &PropertyValue) -> String {
             }
         }
         PropertyValue::BinaryString { len } => format!("<binary {} bytes>", len),
-        PropertyValue::Ref { value } => format!("Ref({})", &value[..8.min(value.len())]),
+        PropertyValue::Ref { value, .. } => format!("Ref({})", &value[..8.min(value.len())]),
         PropertyValue::Vector2 { x, y } => format!("({}, {})", x, y),
         PropertyValue::Vector3 { x, y, z } => format!("({}, {}, {})", x, y, z),
         PropertyValue::CFrame(value) => format_cframe_value(value),

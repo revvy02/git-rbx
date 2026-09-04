@@ -121,7 +121,13 @@ fn changes_renders_one_section_per_changed_roblox_file() {
     let map_entry = files.iter().find(|f| f["path"] == "map.rbxm").unwrap();
     assert_eq!(map_entry["status"], "M");
     assert_eq!(map_entry["counts"]["modified"], 1);
-    assert_eq!(map_entry["diffs"][0]["type"], "modified");
+    assert_eq!(map_entry["diff"]["schema"], 1);
+    assert_eq!(map_entry["diff"]["ops"][0]["op"], "setProperty");
+    let fresh = files.iter().find(|f| f["path"] == "fresh.rbxm").unwrap();
+    let adds = fresh["diff"]["ops"].as_array().unwrap();
+    assert!(adds.iter().all(|op| op["op"] == "add"), "{fresh:#}");
+    let instances: u64 = adds.iter().map(|op| op["instanceCount"].as_u64().unwrap()).sum();
+    assert_eq!(instances, 12, "an added file carries every instance: {fresh:#}");
     let renamed = files.iter().find(|f| f["path"] == "new-name.rbxm").unwrap();
     assert_eq!(renamed["status"], "R");
     assert_eq!(renamed["oldPath"], "old-name.rbxm");

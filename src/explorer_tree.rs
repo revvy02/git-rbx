@@ -146,7 +146,7 @@ fn reverse_matched_ids(
         .collect()
 }
 
-fn capture_tree(
+pub(crate) fn capture_tree(
     dom: &dyn DomView,
     known_ids: &HashMap<Ref, u32>,
     next_id: &mut u32,

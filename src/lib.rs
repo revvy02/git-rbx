@@ -3,6 +3,7 @@
 mod compact_diff;
 mod conflict_file;
 mod diff;
+mod diff_document;
 mod diff_dom;
 mod dom_utils;
 mod edit_script;
@@ -30,6 +31,10 @@ pub use conflict_file::{
 pub use diff::{compute_diff, CFrameValue, DiffConfig, DiffEntry, PropertyChange, PropertyValue};
 pub use diff::{ColorKeypoint, NumberKeypoint};
 pub use diff_dom::DiffDom;
+pub use diff_document::{
+    AddedInstance, DiffDocument, DocumentCounts, DocumentOp, DocumentPivot, ManifestNode,
+    DOCUMENT_SCHEMA,
+};
 pub use edit_script::{
     apply_edit_script, compute_edit_script, compute_semantic_changes, Anchor, EditOp, EditScript,
     InstanceIdentity, SemanticChangeSet,
@@ -93,6 +98,24 @@ pub fn diff_model_compact_old_with_config(
 
 /// Diff two compact snapshots, mutating only existing world-space properties
 /// on the new side while hierarchical pivots are factored.
+/// The canonical serialized diff (manifests + replayable ops) between two
+/// compact DOMs, with the same pivot factoring as the display diff.
+pub fn diff_model_compact_doms_document(
+    old_dom: &DiffDom,
+    new_dom: &mut DiffDom,
+    config: &DiffConfig,
+) -> DiffDocument {
+    let normalization = model_normalize::prepare_model_diff_pivots_view(old_dom, new_dom);
+    let changes = compact_diff::compute_compact_changes_with_identity(
+        old_dom,
+        new_dom,
+        &normalization.identity,
+        normalization.pivot_ops(),
+        config,
+    );
+    diff_document::build(old_dom, new_dom, &changes, config)
+}
+
 pub fn diff_model_compact_doms_with_config(
     old_dom: &DiffDom,
     new_dom: &mut DiffDom,

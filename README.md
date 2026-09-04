@@ -159,6 +159,13 @@ git rbx git-diff <git external-diff arguments>
 - Every command that produces a decision has a `--json` form. The conflict
   report lists each conflict with, per side, the exact patch that choosing
   it applies, so an agent can drive a merge end to end without a GUI.
+- `diff --format json` and `changes --format json` emit a **diff document**:
+  a replayable edit script rather than a list of observations. It carries
+  an `old` and `new` manifest (id, parent, name, class for every instance,
+  matched instances sharing an id), `ops` (`add` with the full subtree and
+  its authored properties, `remove`, `reparent`, `setName`, `setProperty`
+  with typed before/after values), and `pivots`. Applying the ops to the
+  old version yields the new one.
 
 ## GitHub
 
