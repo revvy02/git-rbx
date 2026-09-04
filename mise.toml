@@ -1,7 +1,7 @@
 [tools]
 rust = "stable"
 node = "24"
-"ubi:revvy02/rodeo" = "v1.2.0-rc.7"
+"ubi:revvy02/rodeo" = "v1.3.0"
 "ubi:revvy02/rbx-iconify" = "v0.3.0"
 "ubi:jacktabscode/asphalt" = "v2.0.2"
 "ubi:Kampfkarren/selene" = "latest"
