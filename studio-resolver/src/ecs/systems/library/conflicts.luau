@@ -11,7 +11,7 @@ local world = require("../../world")
 
 type SideInfo = cts.SideInfo
 type ImpactSide = cts.ImpactSide
-type ImpactOperation = cts.ImpactOperation
+type DocumentOp = cts.DocumentOp
 
 local conflicts = {}
 
@@ -66,7 +66,7 @@ end
 
 local function emptyImpact(): ImpactSide
 	return {
-		operations = {},
+		ops = {},
 		affectedIds = {},
 		instanceCount = 0,
 		propertyCount = 0,
@@ -82,15 +82,17 @@ function conflicts.impact(entity: any, side: string): ImpactSide
 		return (world:get(entity, component) :: ImpactSide?) or emptyImpact()
 	end
 
-	local operations: { ImpactOperation } = {}
+	local operations: { DocumentOp } = {}
 	local affected: { [number]: boolean } = {}
 	local properties: { [string]: boolean } = {}
 	for _, member in members do
 		local impact = (world:get(member, component) :: ImpactSide?) or emptyImpact()
-		for _, operation in impact.operations do
+		for _, operation in impact.ops do
 			table.insert(operations, operation)
-			if operation.property then
-				properties[`{operation.nodeId or 0}:{operation.property}`] = true
+			if operation.op == "setProperty" then
+				properties[`{operation.id}:{operation.property}`] = true
+			elseif operation.op == "setName" then
+				properties[`{operation.id}:Name`] = true
 			end
 		end
 		for _, id in impact.affectedIds do
@@ -108,7 +110,7 @@ function conflicts.impact(entity: any, side: string): ImpactSide
 		propertyCount += 1
 	end
 	return {
-		operations = operations,
+		ops = operations,
 		affectedIds = affectedIds,
 		instanceCount = #affectedIds,
 		propertyCount = propertyCount,

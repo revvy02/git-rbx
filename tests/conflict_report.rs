@@ -97,7 +97,7 @@ fn report_describes_every_conflict_with_competing_patches() {
     assert_eq!(delete["theirs"]["deleted"], true);
     assert!(delete.get("resolved").is_none(), "unresolved entries omit `resolved`");
     // Ours' side of the decision is the edit inside A; the impact says so.
-    let our_ops = delete["ours"]["impact"]["operations"].as_array().unwrap();
+    let our_ops = delete["ours"]["impact"]["ops"].as_array().unwrap();
     assert!(
         our_ops
             .iter()
@@ -111,8 +111,8 @@ fn report_describes_every_conflict_with_competing_patches() {
     assert_eq!(property["property"], "Transparency");
     // Both sides' exact patches: before is the base value, after is each
     // branch's value — this is what lets an agent decide without a GUI.
-    let ours_op = &property["ours"]["impact"]["operations"][0];
-    let theirs_op = &property["theirs"]["impact"]["operations"][0];
+    let ours_op = &property["ours"]["impact"]["ops"][0];
+    let theirs_op = &property["theirs"]["impact"]["ops"][0];
     assert_eq!(ours_op["before"], f32_value(0.0));
     assert_eq!(ours_op["after"], f32_value(0.1));
     assert_eq!(theirs_op["before"], f32_value(0.0));

@@ -100,6 +100,15 @@ impl ExplorerTrees {
         );
     }
 
+    /// Every ref -> id binding for one version.
+    pub(crate) fn ids(&self, version: ExplorerVersion) -> &HashMap<Ref, u32> {
+        match version {
+            ExplorerVersion::Base => &self.base_ids,
+            ExplorerVersion::Ours => &self.ours_ids,
+            ExplorerVersion::Theirs => &self.theirs_ids,
+        }
+    }
+
     pub(crate) fn id_for(&self, version: ExplorerVersion, referent: Ref) -> Option<u32> {
         match version {
             ExplorerVersion::Base => self.base_ids.get(&referent),

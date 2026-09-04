@@ -40,8 +40,10 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::diff::{
-    attribute_variant_to_property_value, variant_to_property_value, CFrameValue, PropertyValue,
+    attribute_variant_to_property_value, variant_to_property_value, CFrameValue, DiffConfig,
+    PropertyValue,
 };
+use crate::diff_document::{ops_from_edit_ops, DocumentOp};
 use crate::diff_dom::{DiffDom, DomView};
 use crate::dom_utils::class_is_a;
 use crate::edit_script::{get_sub_property, is_sub_property, set_sub_property, Anchor, EditOp};
@@ -58,7 +60,7 @@ pub const ENTRY_TAG: &str = "GitRbxConflictEntry";
 pub const VIRTUAL_TREES_NAME: &str = "VirtualTrees";
 /// Conflict container schema version, stamped as the container's `Version`
 /// attribute. Bump when the on-file layout changes shape.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 const VIRTUAL_TREE_CHUNK_BYTES: usize = 100_000;
 const REPARENTED_OUT_NAME: &str = "ReparentedOut";
@@ -413,15 +415,7 @@ fn stamp_side(
             .with_property("Attributes", Variant::Attributes(side_attrs)),
     );
 
-    let impact = impact_for_ops_and_pivots(
-        base,
-        branch_dom,
-        side_ops,
-        side_pivots,
-        base_to_branch,
-        trees,
-        version,
-    );
+    let impact = impact_for_ops_and_pivots(base, branch_dom, side_ops, side_pivots, trees, version);
     stamp_impact(base, side_folder, &impact);
 
     // A branch can delete the contested root after moving edited descendants
@@ -613,28 +607,12 @@ fn stamp_conditional_pivots(
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImpactSide {
-    operations: Vec<ImpactOperation>,
+    /// The exact patch choosing this side applies, in the diff document's
+    /// op vocabulary (see `diff_document`).
+    ops: Vec<DocumentOp>,
     affected_ids: Vec<u32>,
     instance_count: usize,
     property_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ImpactOperation {
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node_id: Option<u32>,
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    property: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    destination: Option<String>,
-    instance_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    before: Option<PropertyValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    after: Option<PropertyValue>,
 }
 
 fn stamp_impact(base: &mut WeakDom, side_folder: Ref, impact: &ImpactSide) {
@@ -647,155 +625,38 @@ fn stamp_impact(base: &mut WeakDom, side_folder: Ref, impact: &ImpactSide) {
     );
 }
 
-fn patch_value(dom: &dyn DomView, property: &str, value: Option<&Variant>) -> PropertyValue {
-    match value {
-        None => PropertyValue::Nil,
-        Some(Variant::Ref(r)) if r.is_none() => PropertyValue::Nil,
-        Some(Variant::Ref(r)) => PropertyValue::Ref {
-            value: dom
-                .get_by_ref(*r)
-                .map(|_| get_instance_path(dom, *r))
-                .unwrap_or_else(|| format!("{r}")),
-            id: None,
-        },
-        Some(value) if property.starts_with("Attributes.") => {
-            attribute_variant_to_property_value(value)
-        }
-        Some(value) => variant_to_property_value(value),
-    }
-}
-
 fn impact_for_ops(
     base: &WeakDom,
     branch: &dyn DomView,
     ops: &[EditOp],
-    base_to_branch: &HashMap<Ref, Ref>,
     trees: &ExplorerTrees,
     version: ExplorerVersion,
 ) -> ImpactSide {
-    let mut operations = Vec::new();
+    let (ops, _) = ops_from_edit_ops(
+        base,
+        branch,
+        ops,
+        trees.ids(ExplorerVersion::Base),
+        trees.ids(version),
+        &DiffConfig::default(),
+    );
     let mut affected = BTreeSet::new();
     let mut property_count = 0;
-
-    let base_path = |referent| get_instance_path(base, referent);
-    let side_path = |referent| {
-        base_to_branch
-            .get(&referent)
-            .map(|branch_ref| get_instance_path(branch, *branch_ref))
-            .unwrap_or_else(|| base_path(referent))
-    };
-
-    for op in ops {
-        let (kind, node_id, path, property, destination, ids, before, after) = match op {
-            EditOp::SetProperty {
-                old_ref,
-                name,
-                old_value,
-                value,
-            } => {
+    for op in &ops {
+        match op {
+            DocumentOp::Add { subtree, .. } => affected.extend(subtree.iter().map(|i| i.id)),
+            DocumentOp::Remove { id, .. } => {
+                affected.extend(trees.subtree_ids(ExplorerVersion::Base, *id))
+            }
+            DocumentOp::Reparent { id, .. } => affected.extend(trees.subtree_ids(version, *id)),
+            DocumentOp::SetName { id, .. } | DocumentOp::SetProperty { id, .. } => {
                 property_count += 1;
-                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
-                (
-                    "Property",
-                    id,
-                    side_path(*old_ref),
-                    Some(name.clone()),
-                    None,
-                    id.into_iter().collect(),
-                    Some(patch_value(base, name, old_value.as_ref())),
-                    Some(patch_value(branch, name, value.as_ref())),
-                )
+                affected.insert(*id);
             }
-            EditOp::SetName { old_ref, name } => {
-                property_count += 1;
-                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
-                let old_name = &base.get_by_ref(*old_ref).unwrap().name;
-                (
-                    "Property",
-                    id,
-                    side_path(*old_ref),
-                    Some("Name".to_string()),
-                    None,
-                    id.into_iter().collect(),
-                    Some(PropertyValue::String {
-                        value: old_name.clone(),
-                    }),
-                    Some(PropertyValue::String {
-                        value: name.clone(),
-                    }),
-                )
-            }
-            EditOp::RemoveSubtree { old_ref } => {
-                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
-                let ids = id
-                    .map(|root| trees.subtree_ids(ExplorerVersion::Base, root))
-                    .unwrap_or_default();
-                (
-                    "Delete",
-                    id,
-                    base_path(*old_ref),
-                    None,
-                    None,
-                    ids,
-                    None,
-                    None,
-                )
-            }
-            EditOp::Reparent {
-                old_ref,
-                new_parent,
-            } => {
-                let id = trees.id_for(ExplorerVersion::Base, *old_ref);
-                let ids = id
-                    .map(|root| trees.subtree_ids(version, root))
-                    .unwrap_or_default();
-                let destination = match new_parent {
-                    Anchor::Old(parent) => Some(side_path(*parent)),
-                    Anchor::Added(branch_ref) => Some(get_instance_path(branch, *branch_ref)),
-                };
-                (
-                    "Reparent",
-                    id,
-                    base_path(*old_ref),
-                    None,
-                    destination,
-                    ids,
-                    None,
-                    None,
-                )
-            }
-            EditOp::AddSubtree { new_ref, .. } => {
-                let id = trees.id_for(version, *new_ref);
-                let ids = id
-                    .map(|root| trees.subtree_ids(version, root))
-                    .unwrap_or_default();
-                (
-                    "Add",
-                    id,
-                    get_instance_path(branch, *new_ref),
-                    None,
-                    None,
-                    ids,
-                    None,
-                    None,
-                )
-            }
-        };
-        affected.extend(ids.iter().copied());
-        operations.push(ImpactOperation {
-            kind,
-            node_id,
-            path,
-            property,
-            destination,
-            instance_count: ids.len(),
-            before,
-            after,
-        });
+        }
     }
-
     ImpactSide {
-        operations,
+        ops,
         affected_ids: affected.iter().copied().collect(),
         instance_count: affected.len(),
         property_count,
@@ -807,14 +668,13 @@ fn impact_for_ops_and_pivots(
     branch: &dyn DomView,
     ops: &[EditOp],
     pivots: &[PivotOp],
-    base_to_branch: &HashMap<Ref, Ref>,
     trees: &ExplorerTrees,
     version: ExplorerVersion,
 ) -> ImpactSide {
-    let mut impact = impact_for_ops(base, branch, ops, base_to_branch, trees, version);
+    let mut impact = impact_for_ops(base, branch, ops, trees, version);
     for pivot in pivots {
         let operation_impact = pivot_impact(base, pivot.target_ref, trees, &pivot.delta);
-        impact.operations.extend(operation_impact.operations);
+        impact.ops.extend(operation_impact.ops);
         impact.affected_ids.extend(operation_impact.affected_ids);
         impact.property_count += operation_impact.property_count;
     }
@@ -863,21 +723,17 @@ fn pivot_impact(
         };
         let transformed = transform.mul(Rigid::from_cframe(&frame)).to_cframe();
         affected.insert(id);
-        operations.push(ImpactOperation {
-            kind: "Property",
-            node_id: Some(id),
-            path: get_instance_path(base, referent),
-            property: Some(property.to_string()),
-            destination: None,
-            instance_count: 1,
-            before: Some(variant_to_property_value(&Variant::CFrame(frame))),
-            after: Some(variant_to_property_value(&Variant::CFrame(transformed))),
+        operations.push(DocumentOp::SetProperty {
+            id,
+            property: property.to_string(),
+            before: variant_to_property_value(&Variant::CFrame(frame)),
+            after: variant_to_property_value(&Variant::CFrame(transformed)),
         });
     }
 
     let affected_ids: Vec<u32> = affected.iter().copied().collect();
     ImpactSide {
-        operations,
+        ops: operations,
         instance_count: affected_ids.len(),
         property_count: affected_ids.len(),
         affected_ids,

@@ -219,23 +219,18 @@ fn subtree_preorder(dom: &dyn DomView, root: Ref) -> Vec<Ref> {
     out
 }
 
-/// Serialize a change set computed from `old` to `new`.
-pub fn build(
+
+/// Serialize edit ops against two DOMs whose instances are already numbered.
+/// Shared by the diff document and the per-side conflict impacts, so both
+/// speak the same op vocabulary.
+pub(crate) fn ops_from_edit_ops(
     old: &dyn DomView,
     new: &dyn DomView,
-    changes: &SemanticChangeSet,
+    edit_ops: &[EditOp],
+    old_ids: &HashMap<Ref, u32>,
+    new_ids: &HashMap<Ref, u32>,
     config: &DiffConfig,
-) -> DiffDocument {
-    let mut next_id = 1;
-    let (old_tree, old_ids) = capture_tree(old, &HashMap::new(), &mut next_id);
-    let known: HashMap<Ref, u32> = changes
-        .identity
-        .reverse_matched
-        .iter()
-        .filter_map(|(new_ref, old_ref)| old_ids.get(old_ref).map(|id| (*new_ref, *id)))
-        .collect();
-    let (new_tree, new_ids) = capture_tree(new, &known, &mut next_id);
-
+) -> (Vec<DocumentOp>, DocumentCounts) {
     let anchor_id = |anchor: &Anchor| match anchor {
         Anchor::Old(r) => old_ids.get(r).copied(),
         Anchor::Added(r) => new_ids.get(r).copied(),
@@ -245,11 +240,11 @@ pub fn build(
             .and_then(|instance| old_ids.get(&instance.parent()).copied())
     };
 
-    let mut ops = Vec::with_capacity(changes.ops.len());
+    let mut ops = Vec::with_capacity(edit_ops.len());
     let mut counts = DocumentCounts::default();
     let mut modified = HashSet::new();
 
-    for op in &changes.ops {
+    for op in edit_ops {
         match op {
             EditOp::AddSubtree { parent, new_ref } => {
                 let Some(id) = new_ids.get(new_ref).copied() else {
@@ -271,7 +266,7 @@ pub fn build(
                             parent: node_parent,
                             name: instance.name().to_string(),
                             class: instance.class().to_string(),
-                            properties: authored_properties(new, &new_ids, referent, config),
+                            properties: authored_properties(new, new_ids, referent, config),
                         })
                     })
                     .collect();
@@ -335,13 +330,34 @@ pub fn build(
                 ops.push(DocumentOp::SetProperty {
                     id,
                     property: name.clone(),
-                    before: value_json(old, &old_ids, name, old_value.as_ref()),
-                    after: value_json(new, &new_ids, name, value.as_ref()),
+                    before: value_json(old, old_ids, name, old_value.as_ref()),
+                    after: value_json(new, new_ids, name, value.as_ref()),
                 });
             }
         }
     }
     counts.modified = modified.len();
+    (ops, counts)
+}
+
+/// Serialize a change set computed from `old` to `new`.
+pub fn build(
+    old: &dyn DomView,
+    new: &dyn DomView,
+    changes: &SemanticChangeSet,
+    config: &DiffConfig,
+) -> DiffDocument {
+    let mut next_id = 1;
+    let (old_tree, old_ids) = capture_tree(old, &HashMap::new(), &mut next_id);
+    let known: HashMap<Ref, u32> = changes
+        .identity
+        .reverse_matched
+        .iter()
+        .filter_map(|(new_ref, old_ref)| old_ids.get(old_ref).map(|id| (*new_ref, *id)))
+        .collect();
+    let (new_tree, new_ids) = capture_tree(new, &known, &mut next_id);
+
+    let (ops, mut counts) = ops_from_edit_ops(old, new, &changes.ops, &old_ids, &new_ids, config);
 
     let pivots: Vec<DocumentPivot> = changes
         .pivots
@@ -364,5 +380,22 @@ pub fn build(
         counts,
         ops,
         pivots,
+    }
+}
+
+impl DocumentOp {
+    /// The instance an op addresses: the added root, or the old instance.
+    pub fn id(&self) -> u32 {
+        match self {
+            DocumentOp::Add { id, .. }
+            | DocumentOp::Remove { id, .. }
+            | DocumentOp::Reparent { id, .. }
+            | DocumentOp::SetName { id, .. }
+            | DocumentOp::SetProperty { id, .. } => *id,
+        }
+    }
+
+    pub fn is_property_edit(&self) -> bool {
+        matches!(self, DocumentOp::SetName { .. } | DocumentOp::SetProperty { .. })
     }
 }

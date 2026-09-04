@@ -176,13 +176,13 @@ fn conflict_state_survives_serialization() {
         assert_eq!(impact["instanceCount"], 1);
         assert_eq!(impact["propertyCount"], 1);
         assert_eq!(impact["affectedIds"].as_array().unwrap().len(), 1);
-        assert_eq!(impact["operations"][0]["kind"], "Property");
-        assert_eq!(impact["operations"][0]["property"], "Transparency");
-        assert_eq!(impact["operations"][0]["path"], "root.A.P");
-        assert_eq!(impact["operations"][0]["before"]["type"], "float32");
-        assert_eq!(impact["operations"][0]["before"]["value"]["value"], 0.0);
-        assert_eq!(impact["operations"][0]["after"]["type"], "float32");
-        assert_eq!(impact["operations"][0]["after"]["value"]["value"], expected);
+        assert_eq!(impact["ops"][0]["op"], "setProperty");
+        assert_eq!(impact["ops"][0]["property"], "Transparency");
+        assert!(impact["ops"][0]["id"].is_number(), "{impact:#}");
+        assert_eq!(impact["ops"][0]["before"]["type"], "float32");
+        assert_eq!(impact["ops"][0]["before"]["value"]["value"], 0.0);
+        assert_eq!(impact["ops"][0]["after"]["type"], "float32");
+        assert_eq!(impact["ops"][0]["after"]["value"]["value"], expected);
     }
 }
 
@@ -344,14 +344,14 @@ fn delete_vs_edit_finalize_both_ways() {
         assert_eq!(ours_impact["instanceCount"], 3);
         assert_eq!(ours_impact["propertyCount"], 0);
         assert_eq!(ours_impact["affectedIds"].as_array().unwrap().len(), 3);
-        assert_eq!(ours_impact["operations"][0]["kind"], "Delete");
-        assert_eq!(ours_impact["operations"][0]["instanceCount"], 3);
+        assert_eq!(ours_impact["ops"][0]["op"], "remove");
+        assert_eq!(ours_impact["ops"][0]["instanceCount"], 3);
 
         let theirs_impact = conflict_impact(&base, entries[0].entry_ref, "Theirs");
         assert_eq!(theirs_impact["instanceCount"], 2);
         assert_eq!(theirs_impact["propertyCount"], 2);
         assert_eq!(theirs_impact["affectedIds"].as_array().unwrap().len(), 2);
-        assert_eq!(theirs_impact["operations"].as_array().unwrap().len(), 2);
+        assert_eq!(theirs_impact["ops"].as_array().unwrap().len(), 2);
         base
     };
 

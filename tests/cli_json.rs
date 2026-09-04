@@ -134,11 +134,11 @@ fn agent_loop_merge_list_take_finalize_check() {
     assert_eq!(conflict["path"], "Q");
     assert_eq!(conflict["property"], "Transparency");
     assert_eq!(
-        conflict["ours"]["impact"]["operations"][0]["after"],
+        conflict["ours"]["impact"]["ops"][0]["after"],
         f32_value(0.1)
     );
     assert_eq!(
-        conflict["theirs"]["impact"]["operations"][0]["after"],
+        conflict["theirs"]["impact"]["ops"][0]["after"],
         f32_value(0.2)
     );
 

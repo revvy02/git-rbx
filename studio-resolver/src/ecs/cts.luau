@@ -27,22 +27,35 @@ export type SideInfo = {
 	pivots: { PivotApplication }?, -- conditional pivots selected with this side
 }
 
--- Canonical direct patch emitted by Rust for one side of a decision.
--- `operations` are the exact edit script shown by the sparse diff tree;
--- `affectedIds` supports exact de-duplicated counts when rigid cards aggregate.
-export type ImpactOperation = {
-	kind: string, -- Property | Add | Delete | Reparent
-	nodeId: number?,
-	path: string,
+-- Canonical direct patch emitted by Rust for one side of a decision, in the
+-- diff document's op vocabulary (src/diff_document.rs). `affectedIds`
+-- supports exact de-duplicated counts when rigid cards aggregate.
+export type AddedInstance = {
+	id: number,
+	parent: number?,
+	name: string,
+	class: string,
+	properties: { [string]: any }, -- serialized diff::PropertyValue per property
+}
+
+export type DocumentOp = {
+	op: string, -- add | remove | reparent | setName | setProperty
+	id: number,
+	-- add
+	parent: number?,
+	instanceCount: number?,
+	subtree: { AddedInstance }?,
+	-- reparent
+	from: number?,
+	to: number?,
+	-- setName / setProperty
 	property: string?,
-	destination: string?,
-	instanceCount: number,
-	before: any?, -- serialized diff::PropertyValue
+	before: any?, -- setName: string; setProperty: serialized diff::PropertyValue
 	after: any?,
 }
 
 export type ImpactSide = {
-	operations: { ImpactOperation },
+	ops: { DocumentOp },
 	affectedIds: { number },
 	instanceCount: number,
 	propertyCount: number,
