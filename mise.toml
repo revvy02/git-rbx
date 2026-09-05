@@ -5,14 +5,29 @@ node = "24"
 "ubi:revvy02/rbx-iconify" = "v0.3.0"
 "ubi:jacktabscode/asphalt" = "v2.0.2"
 "ubi:Kampfkarren/selene" = "latest"
+"ubi:seaofvoices/darklua" = "latest"
 "ubi:JohnnyMorganz/luau-lsp" = "latest"
 "ubi:rojo-rbx/rojo" = "latest"
+"ubi:pesde-pkg/pesde" = "latest"
 stylua = "latest"
 [env]
 _.path = ["./bin"]
 
+[tasks.bundle]
+description = "Bundle the Studio front end (studio-viewer/dist/, committed; the CLI embeds it)"
+dir = "studio-viewer"
+run = """
+pesde install
+mkdir -p build dist
+rojo build packages.project.json -o build/packages.rbxm
+node scripts/embed-packages.mjs build/packages.rbxm shared/generated/packages_blob.luau
+darklua process --config darklua.json conflict-resolver/init.luau dist/conflict-resolver.luau
+darklua process --config darklua.json diff-viewer/init.luau dist/diff-viewer.luau
+"""
+
 [tasks.build]
 description = "Build the git-rbx binary into bin/ (on PATH under mise, so `git rbx` resolves)"
+depends = ["bundle"]
 run = """
 cargo build --release
 mkdir -p bin

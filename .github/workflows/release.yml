@@ -60,6 +60,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install the Studio front end toolchain
+        # pesde, rojo, node, darklua from mise.toml; the Rust toolchain and
+        # the Studio-only tools (rodeo, iconify, asphalt, selene, luau-lsp)
+        # are not needed to rebuild the bundles.
+        uses: jdx/mise-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MISE_DISABLE_TOOLS: "rust,ubi:revvy02/rodeo,ubi:revvy02/rbx-iconify,ubi:jacktabscode/asphalt,ubi:Kampfkarren/selene,ubi:JohnnyMorganz/luau-lsp,stylua"
+
+      - name: Check the committed Studio bundles are current
+        # The CLI embeds studio-viewer/dist/; a stale bundle would ship a
+        # front end that does not match the sources in this tag.
+        run: |
+          mise run bundle
+          git diff --exit-code -- studio-viewer/dist studio-viewer/shared/generated/packages_blob.luau
+
       - name: Test
         # Fixture-backed tests skip here (private submodule not checked out);
         # everything synthetic and the real-git CLI tests still run.

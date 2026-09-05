@@ -1022,34 +1022,6 @@ fn cmd_resolve(
     bail!("specify --list, --take <ours|theirs> (--path/--all), --finalize, or --studio");
 }
 
-/// The Studio resolver checkout, resolved against this crate at build time.
-/// `resolve --studio` therefore needs the checkout present at its build
-/// location — fine while the tool is iterated and run from source; a
-/// self-contained binary (pre-bundled script embedded at build) is the
-/// eventual shape once the resolver stabilizes. The root is also passed to
-/// the script (--resolver-root) so it can rojo-build roblox_packages.
-const RESOLVER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-viewer");
-
-/// Which Studio front end to run; each is its own entry script.
-#[derive(Clone, Copy)]
-enum StudioMode {
-    ConflictResolver,
-    DiffViewer,
-}
-
-impl StudioMode {
-    fn entry(self) -> &'static str {
-        match self {
-            StudioMode::ConflictResolver => {
-                concat!(env!("CARGO_MANIFEST_DIR"), "/studio-viewer/conflict-resolver/init.luau")
-            }
-            StudioMode::DiffViewer => {
-                concat!(env!("CARGO_MANIFEST_DIR"), "/studio-viewer/diff-viewer/init.luau")
-            }
-        }
-    }
-}
-
 /// Launch the visual resolver in Roblox Studio via rodeo. The session stages
 /// decisions in-Studio and calls back into this binary (`resolve --take`,
 /// `--finalize`) when the user hits Complete — the file on disk is the only
@@ -1087,25 +1059,49 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
 }
 
 
-/// Run a Studio front end (studio-viewer/<mode>/init.luau) through rodeo
-/// on `file`. Places open directly; models run in an empty place and the
-/// script imports them. `script_args` follow the file on the script's argv.
+/// The Studio front ends, bundled by `mise run bundle` into
+/// studio-viewer/dist/ (committed) and carried inside the binary, so
+/// `--studio` needs nothing on disk but rodeo.
+#[derive(Clone, Copy)]
+enum StudioMode {
+    ConflictResolver,
+    DiffViewer,
+}
+
+impl StudioMode {
+    fn bundle(self) -> &'static str {
+        match self {
+            StudioMode::ConflictResolver => {
+                include_str!("../studio-viewer/dist/conflict-resolver.luau")
+            }
+            StudioMode::DiffViewer => include_str!("../studio-viewer/dist/diff-viewer.luau"),
+        }
+    }
+}
+
+/// Run a Studio front end through rodeo on `file`. The embedded bundle is
+/// written to a scratch directory for the session (rodeo names an inline
+/// script after its source, which Studio rejects past 200 KB, so stdin is
+/// not an option for a bundle this size). Places open directly; models run
+/// in an empty place and the script imports them. `script_args` follow the
+/// file on the script's argv.
 fn launch_studio(
     file: &Path,
     mode: StudioMode,
     script_args: &[&str],
 ) -> Result<std::process::ExitStatus> {
-    let entry = mode.entry();
     let is_place = matches!(
         file.extension().and_then(|e| e.to_str()).unwrap_or(""),
         "rbxl" | "rbxlx"
     );
-    if !Path::new(entry).exists() {
-        bail!(
-            "Studio front end not found at {entry} — `--studio` currently \
-             runs from the git-rbx checkout it was built in; rebuild on this machine"
-        );
-    }
+    let scratch = std::env::temp_dir().join(format!("git-rbx-studio-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let script = scratch.join(match mode {
+        StudioMode::ConflictResolver => "conflict-resolver.luau",
+        StudioMode::DiffViewer => "diff-viewer.luau",
+    });
+    std::fs::write(&script, mode.bundle())?;
+
     // `--place` always: with a path rodeo opens that place; with no value it
     // launches an empty one. Omitting it entirely would route the script
     // into whatever Studio session happens to be running.
@@ -1118,21 +1114,22 @@ fn launch_studio(
     }
     cmd.arg("--focus")
         .args(["--show-widgets", "none"])
-        .arg(entry)
+        .arg(&script)
         .arg("--")
         .arg(file)
         .arg("--git-rbx")
         .arg(std::env::current_exe()?)
-        .arg("--resolver-root")
-        .arg(RESOLVER_ROOT)
-        .args(script_args);
-    cmd.status().map_err(|e| match e.kind() {
+        .args(script_args)
+        .current_dir(&scratch);
+    let status = cmd.status().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => anyhow::anyhow!(
             "`rodeo` not found on PATH — the Studio front end runs through it \
              (https://github.com/revvy02/rodeo)"
         ),
         _ => anyhow::Error::from(e).context("launching rodeo"),
-    })
+    })?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(status)
 }
 
 /// A file's content as both DOM flavors: the compact one the diff engine

@@ -64,7 +64,9 @@ git difftool -t rbx main..feature     # ditto for every changed file in a range
 every changed instance highlighted by kind, removed content restored as
 translucent ghosts where it used to be, and a *changes* panel listing the
 diff as a tree. Double click a row to select and frame the instance.
-Neither input file is modified.
+Neither input file is modified. The Studio front ends ship inside the
+binary; the only requirement is [rodeo](https://github.com/revvy02/rodeo)
+on `PATH`.
 
 **Merge.** Nothing to do — `git merge`, `git rebase`, and `git cherry-pick`
 call the driver. Non-overlapping edits compose; identical edits on both sides

@@ -147,7 +147,6 @@ end
 local parser = argparse("git-rbx-diff-viewer", "Show a git-rbx diff visually in Studio")
 parser:argument("file", "Temporary copy of the new file carrying a __GitRbxDiff container (git rbx diff --studio)")
 parser:option("--git-rbx", "Path to the git-rbx binary"):target("gitRbxBin"):default("git-rbx")
-parser:option("--resolver-root", "Checkout dir (read by packages.luau)"):target("resolverRoot"):default(".")
 
 local args = parser:parse(process.args)
 

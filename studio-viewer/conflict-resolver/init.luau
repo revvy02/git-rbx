@@ -59,7 +59,6 @@ local parser = argparse("git-rbx-resolver", "Resolve git-rbx merge conflicts vis
 parser:argument("file", "Conflicted merged file written by `git rbx merge`")
 parser:option("--git-rbx", "Path to the git-rbx binary"):target("gitRbxBin"):default("git-rbx")
 parser:option("--auto", "Debug: stage every conflict to this side and Complete immediately"):target("autoSide")
-parser:option("--resolver-root", "Resolver checkout dir (read by packages.luau)"):target("resolverRoot"):default(".")
 
 local args = parser:parse(process.args)
 local mergedFile = args.file

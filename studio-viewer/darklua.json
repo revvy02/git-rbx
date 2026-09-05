@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "require_mode": "luau",
+    "excludes": [
+      "@rodeo",
+      "@rodeo/**",
+      "@lune",
+      "@lune/**",
+      "@lute",
+      "@lute/**"
+    ]
+  },
+  "rules": []
+}
