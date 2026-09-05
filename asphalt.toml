@@ -10,4 +10,4 @@ strip_extensions = true
 
 [inputs.images]
 path = "assets/images/**/*.png"
-output_path = "studio-resolver/src/ui/generated"
+output_path = "studio-viewer/shared/generated"

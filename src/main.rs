@@ -1028,8 +1028,27 @@ fn cmd_resolve(
 /// self-contained binary (pre-bundled script embedded at build) is the
 /// eventual shape once the resolver stabilizes. The root is also passed to
 /// the script (--resolver-root) so it can rojo-build roblox_packages.
-const RESOLVER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolver");
-const RESOLVER_ENTRY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-resolver/src/init.luau");
+const RESOLVER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/studio-viewer");
+
+/// Which Studio front end to run; each is its own entry script.
+#[derive(Clone, Copy)]
+enum StudioMode {
+    ConflictResolver,
+    DiffViewer,
+}
+
+impl StudioMode {
+    fn entry(self) -> &'static str {
+        match self {
+            StudioMode::ConflictResolver => {
+                concat!(env!("CARGO_MANIFEST_DIR"), "/studio-viewer/conflict-resolver/init.luau")
+            }
+            StudioMode::DiffViewer => {
+                concat!(env!("CARGO_MANIFEST_DIR"), "/studio-viewer/diff-viewer/init.luau")
+            }
+        }
+    }
+}
 
 /// Launch the visual resolver in Roblox Studio via rodeo. The session stages
 /// decisions in-Studio and calls back into this binary (`resolve --take`,
@@ -1051,7 +1070,7 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
         script_args.extend(["--auto", side]);
     }
     eprintln!("Opening the Studio resolver for {file} ({unresolved} unresolved conflict(s))...");
-    let status = launch_studio(&abs_file, &script_args)?;
+    let status = launch_studio(&abs_file, StudioMode::ConflictResolver, &script_args)?;
 
     // rodeo's exit code only says how the SESSION ended (completed, killed,
     // Studio closed mid-way); what the merge is at now is in the file.
@@ -1068,17 +1087,22 @@ fn cmd_resolve_studio(file: &str, auto: Option<&str>) -> Result<()> {
 }
 
 
-/// Run the Studio front end (studio-resolver/src/init.luau) through rodeo
+/// Run a Studio front end (studio-viewer/<mode>/init.luau) through rodeo
 /// on `file`. Places open directly; models run in an empty place and the
 /// script imports them. `script_args` follow the file on the script's argv.
-fn launch_studio(file: &Path, script_args: &[&str]) -> Result<std::process::ExitStatus> {
+fn launch_studio(
+    file: &Path,
+    mode: StudioMode,
+    script_args: &[&str],
+) -> Result<std::process::ExitStatus> {
+    let entry = mode.entry();
     let is_place = matches!(
         file.extension().and_then(|e| e.to_str()).unwrap_or(""),
         "rbxl" | "rbxlx"
     );
-    if !Path::new(RESOLVER_ENTRY).exists() {
+    if !Path::new(entry).exists() {
         bail!(
-            "Studio front end not found at {RESOLVER_ENTRY} — `--studio` currently \
+            "Studio front end not found at {entry} — `--studio` currently \
              runs from the git-rbx checkout it was built in; rebuild on this machine"
         );
     }
@@ -1094,7 +1118,7 @@ fn launch_studio(file: &Path, script_args: &[&str]) -> Result<std::process::Exit
     }
     cmd.arg("--focus")
         .args(["--show-widgets", "none"])
-        .arg(RESOLVER_ENTRY)
+        .arg(entry)
         .arg("--")
         .arg(file)
         .arg("--git-rbx")
@@ -1183,7 +1207,7 @@ fn open_diff_in_studio(
         "Opening the Studio diff viewer for {new_label}: {} added, {} removed, {} modified, {} reparented, {} pivoted...",
         counts.added, counts.removed, counts.modified, counts.reparented, counts.pivoted
     );
-    let status = launch_studio(&temp, &["--diff"]);
+    let status = launch_studio(&temp, StudioMode::DiffViewer, &[]);
     let _ = std::fs::remove_dir_all(&dir);
     if !status?.success() {
         eprintln!("(diff viewer session ended)");

@@ -9,6 +9,7 @@ dist/
 .pesde
 
 # pesde-installed packages (regenerate with pesde install)
-studio-resolver/roblox_packages/
-studio-resolver/.rodeo/.temp/
-studio-resolver/lune_packages/
+studio-viewer/roblox_packages/
+studio-viewer/.rodeo/.temp/
+studio-viewer/lune_packages/
+!studio-viewer/dist/

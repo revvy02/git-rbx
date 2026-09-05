@@ -1,7 +1,7 @@
-scan = ["studio-resolver/src/**/*.luau"]
+scan = ["studio-viewer/**/*.luau"]
 
 [output]
-index = "studio-resolver/src/ui/generated/iconify.luau"
+index = "studio-viewer/shared/generated/iconify.luau"
 sheets = "assets/images/iconify"
 
 [target.ui]
