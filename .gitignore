@@ -13,3 +13,4 @@ studio-viewer/roblox_packages/
 studio-viewer/.rodeo/.temp/
 studio-viewer/lune_packages/
 !studio-viewer/dist/
+.env

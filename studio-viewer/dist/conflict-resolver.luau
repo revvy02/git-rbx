@@ -5909,7 +5909,7 @@ end function __DARKLUA_BUNDLE_MODULES.z():typeof(__modImpl())local v=__DARKLUA_B
 local images = {
 	iconify = {
 		ui = {
-			["1"] = "rbxasset://.asphalt-git-rbx/32fbadd7d29730532ab76c18ddeb73a9c24bd3beb2de6e8ec7ac0714f5ab5137.png",
+			["1"] = "rbxassetid://99920530941869",
 		},
 	},
 }
